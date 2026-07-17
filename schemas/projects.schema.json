@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "projects.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "projects"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "projects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["project_id", "repository", "enabled", "priority", "active_milestone", "recovery_branch", "milestone_branch", "validated_baseline_commit", "queue_location", "autonomy_contract_location", "validation_source", "automation_mode", "maximum_retries", "schedule", "human_gates", "last_accepted_feature", "last_accepted_commit", "current_state", "registration_notes"],
+        "properties": {
+          "project_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+          "repository": {"type": "string", "minLength": 1},
+          "enabled": {"type": "boolean"},
+          "priority": {"type": "integer"},
+          "active_milestone": {"type": ["string", "null"]},
+          "recovery_branch": {"type": ["string", "null"]},
+          "milestone_branch": {"type": ["string", "null"]},
+          "validated_baseline_commit": {"type": ["string", "null"]},
+          "queue_location": {"type": "string", "minLength": 1},
+          "autonomy_contract_location": {"type": "string", "minLength": 1},
+          "validation_source": {"type": "string", "minLength": 1},
+          "automation_mode": {"type": "string", "enum": ["audit", "one_feature", "until_blocked", "milestone", "resume"]},
+          "maximum_retries": {"type": ["integer", "null"], "minimum": 0},
+          "schedule": {"type": ["object", "null"]},
+          "human_gates": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "last_accepted_feature": {"type": ["string", "null"]},
+          "last_accepted_commit": {"type": ["string", "null"]},
+          "current_state": {"type": "string", "enum": ["discover", "bootstrap_required", "baseline_required", "queue_reconciliation", "feature_ready", "feature_running", "feature_review", "feature_accepted", "milestone_gate", "milestone_ready_for_merge", "human_merge_approval", "next_milestone", "human_decision_required", "repository_dirty", "validation_failed", "architecture_decision_required", "destructive_change_required", "conveyor_error", "paused", "disabled"]},
+          "registration_notes": {"type": "string"}
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "project-state.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "project_id", "repository_fingerprint", "run_id", "current_state", "active_milestone", "current_feature", "last_checkpoint", "stop_reason", "human_decision_required", "created_at", "updated_at"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "project_id": {"type": "string"},
+    "repository_fingerprint": {"type": "string"},
+    "run_id": {"type": ["string", "null"]},
+    "current_state": {"type": "string"},
+    "active_milestone": {"type": ["string", "null"]},
+    "current_feature": {"type": ["string", "null"]},
+    "last_checkpoint": {"type": ["string", "null"]},
+    "stop_reason": {"type": ["string", "null"]},
+    "human_decision_required": {"type": ["object", "null"]},
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"}
+  }
+}
+

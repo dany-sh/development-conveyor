@@ -1,0 +1,2 @@
+"""Disposable synthetic fixtures only."""
+

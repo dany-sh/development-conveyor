@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "approved_environment_variables": ["HOME", "CODEX_HOME", "DEVELOPMENT_CONVEYOR_HOME"],
+  "maximum_parallel_projects": 2,
+  "default_mode": "milestone",
+  "state_directory": "state",
+  "report_directory": "reports",
+  "log_directory": "logs",
+  "codex": {
+    "executable": "codex",
+    "session_timeout_seconds": 7200,
+    "capture_json_events": true,
+    "resume_sessions": true
+  },
+  "lock_policy": {
+    "writer_lock_relative_path": ".factory/locks/writer.json",
+    "controller_launch_lock_directory": "state/launch-locks",
+    "heartbeat_seconds": 30,
+    "require_process_identity": true,
+    "timestamp_alone_is_stale": false
+  },
+  "retries": {
+    "implementation_repairs": 3,
+    "integration_repairs": 3,
+    "additional_adversarial_reviews": 2,
+    "queue_reconciliation_repairs": 1
+  },
+  "logging": {
+    "structured_events": true,
+    "redact_sensitive_output": true,
+    "persist_raw_subprocess_output": false
+  },
+  "scheduling": {
+    "resume_before_new_work": true,
+    "skip_foreign_writer_locks": true,
+    "blocked_projects_do_not_block_portfolio": true
+  },
+  "goal_mode": {
+    "required_for_unattended_milestone_runs": true,
+    "feature_name": "goals"
+  },
+  "prohibited_operations": [
+    "merge_default_branch",
+    "push",
+    "force_push",
+    "tag",
+    "publish",
+    "deploy",
+    "release",
+    "notarize",
+    "destructive_reset",
+    "unapproved_branch_delete",
+    "automatic_stash",
+    "discarding_checkout",
+    "production_source_edit_by_controller"
+  ]
+}
+

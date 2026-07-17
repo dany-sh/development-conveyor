@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "conveyor-config.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "approved_environment_variables", "maximum_parallel_projects", "default_mode", "state_directory", "report_directory", "log_directory", "codex", "lock_policy", "retries", "logging", "scheduling", "goal_mode", "prohibited_operations"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "approved_environment_variables": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"}, "uniqueItems": true},
+    "maximum_parallel_projects": {"type": "integer", "minimum": 1},
+    "default_mode": {"type": "string", "enum": ["audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume"]},
+    "state_directory": {"type": "string", "minLength": 1},
+    "report_directory": {"type": "string", "minLength": 1},
+    "log_directory": {"type": "string", "minLength": 1},
+    "codex": {"type": "object", "required": ["executable", "session_timeout_seconds", "capture_json_events", "resume_sessions"], "properties": {"executable": {"type": "string", "minLength": 1}, "session_timeout_seconds": {"type": "integer", "minimum": 1}, "capture_json_events": {"type": "boolean"}, "resume_sessions": {"type": "boolean"}}, "additionalProperties": false},
+    "lock_policy": {"type": "object", "required": ["writer_lock_relative_path", "controller_launch_lock_directory", "heartbeat_seconds", "require_process_identity", "timestamp_alone_is_stale"], "properties": {"writer_lock_relative_path": {"type": "string", "minLength": 1}, "controller_launch_lock_directory": {"type": "string", "minLength": 1}, "heartbeat_seconds": {"type": "integer", "minimum": 1}, "require_process_identity": {"type": "boolean"}, "timestamp_alone_is_stale": {"type": "boolean", "enum": [false]}}, "additionalProperties": false},
+    "retries": {"type": "object", "required": ["implementation_repairs", "integration_repairs", "additional_adversarial_reviews", "queue_reconciliation_repairs"], "properties": {"implementation_repairs": {"type": "integer", "minimum": 0}, "integration_repairs": {"type": "integer", "minimum": 0}, "additional_adversarial_reviews": {"type": "integer", "minimum": 0}, "queue_reconciliation_repairs": {"type": "integer", "minimum": 0}}, "additionalProperties": false},
+    "logging": {"type": "object", "required": ["structured_events", "redact_sensitive_output", "persist_raw_subprocess_output"], "properties": {"structured_events": {"type": "boolean"}, "redact_sensitive_output": {"type": "boolean", "enum": [true]}, "persist_raw_subprocess_output": {"type": "boolean", "enum": [false]}}, "additionalProperties": false},
+    "scheduling": {"type": "object", "required": ["resume_before_new_work", "skip_foreign_writer_locks", "blocked_projects_do_not_block_portfolio"], "properties": {"resume_before_new_work": {"type": "boolean"}, "skip_foreign_writer_locks": {"type": "boolean"}, "blocked_projects_do_not_block_portfolio": {"type": "boolean"}}, "additionalProperties": false},
+    "goal_mode": {"type": "object", "required": ["required_for_unattended_milestone_runs", "feature_name"], "properties": {"required_for_unattended_milestone_runs": {"type": "boolean"}, "feature_name": {"type": "string", "minLength": 1}}, "additionalProperties": false},
+    "prohibited_operations": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+  }
+}
+

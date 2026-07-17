@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.coverage
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+state/projects/*.json
+state/launch-locks/*.json
+state/sessions/
+reports/*.json
+reports/*.md
+logs/*.jsonl
+!state/.gitkeep
+!reports/.gitkeep
+!logs/.gitkeep

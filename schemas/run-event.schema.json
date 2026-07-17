@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "run-event.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "timestamp", "run_id", "project_id", "repository_fingerprint", "source", "model", "reasoning", "milestone", "feature", "branch", "commit", "command_category", "command", "result", "validation_outcome", "review_findings", "repair_attempt", "integration_outcome", "previous_state", "next_state", "stop_reason", "human_gate"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "timestamp": {"type": "string"},
+    "run_id": {"type": "string"},
+    "project_id": {"type": ["string", "null"]},
+    "repository_fingerprint": {"type": ["string", "null"]},
+    "source": {"type": "string"},
+    "model": {"type": ["string", "null"]},
+    "reasoning": {"type": ["string", "null"]},
+    "milestone": {"type": ["string", "null"]},
+    "feature": {"type": ["string", "null"]},
+    "branch": {"type": ["string", "null"]},
+    "commit": {"type": ["string", "null"]},
+    "command_category": {"type": ["string", "null"]},
+    "command": {"type": ["array", "null"], "items": {"type": "string"}},
+    "result": {"type": ["string", "null"]},
+    "validation_outcome": {"type": ["string", "null"]},
+    "review_findings": {"type": "object"},
+    "repair_attempt": {"type": ["integer", "null"]},
+    "integration_outcome": {"type": ["string", "null"]},
+    "previous_state": {"type": ["string", "null"]},
+    "next_state": {"type": ["string", "null"]},
+    "stop_reason": {"type": ["string", "null"]},
+    "human_gate": {"type": ["object", "null"]}
+  }
+}
+

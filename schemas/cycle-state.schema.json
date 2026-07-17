@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cycle-state.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "conveyor_run_id", "project_id", "repository_identity", "repository_path_fingerprint", "active_milestone", "current_feature", "feature_dependencies", "feature_branch", "feature_worktree", "feature_starting_commit", "accepted_feature_commit", "milestone_branch", "milestone_pre_integration_commit", "milestone_post_integration_commit", "current_phase", "writer_lock_identity", "validation_attempts", "review_attempts", "integration_attempts", "last_successful_checkpoint", "last_verified_git_state", "stop_reason", "human_decision_required", "resume_instructions", "session_id", "created_at", "updated_at"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "conveyor_run_id": {"type": "string"},
+    "project_id": {"type": "string"},
+    "repository_identity": {"type": "object"},
+    "repository_path_fingerprint": {"type": "string"},
+    "active_milestone": {"type": ["string", "null"]},
+    "current_feature": {"type": ["string", "null"]},
+    "feature_dependencies": {"type": "array", "items": {"type": "string"}},
+    "feature_branch": {"type": ["string", "null"]},
+    "feature_worktree": {"type": ["string", "null"]},
+    "feature_starting_commit": {"type": ["string", "null"]},
+    "accepted_feature_commit": {"type": ["string", "null"]},
+    "milestone_branch": {"type": ["string", "null"]},
+    "milestone_pre_integration_commit": {"type": ["string", "null"]},
+    "milestone_post_integration_commit": {"type": ["string", "null"]},
+    "current_phase": {"type": "string"},
+    "writer_lock_identity": {"type": ["object", "null"]},
+    "validation_attempts": {"type": "array", "items": {"type": "object"}},
+    "review_attempts": {"type": "array", "items": {"type": "object"}},
+    "integration_attempts": {"type": "array", "items": {"type": "object"}},
+    "last_successful_checkpoint": {"type": ["string", "null"]},
+    "last_verified_git_state": {"type": ["object", "null"]},
+    "stop_reason": {"type": ["string", "null"]},
+    "human_decision_required": {"type": ["object", "null"]},
+    "resume_instructions": {"type": ["string", "null"]},
+    "session_id": {"type": ["string", "null"]},
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"}
+  }
+}
+

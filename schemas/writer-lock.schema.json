@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "writer-lock.schema.json",
+  "type": "object",
+  "required": ["project_id", "repository_identity", "run_id", "process_id", "host_identity", "start_time", "last_confirmed_time", "current_feature", "current_phase"],
+  "properties": {
+    "project_id": {"type": "string"},
+    "repository_identity": {"type": "string"},
+    "run_id": {"type": "string"},
+    "process_id": {"type": "integer", "minimum": 1},
+    "host_identity": {"type": "string"},
+    "start_time": {"type": "string"},
+    "last_confirmed_time": {"type": "string"},
+    "current_feature": {"type": ["string", "null"]},
+    "current_phase": {"type": "string"}
+  }
+}
+

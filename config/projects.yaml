@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "projects": [
+    {
+      "project_id": "case-manager",
+      "repository": "${HOME}/Developer/conan-case-manager",
+      "enabled": true,
+      "priority": 100,
+      "active_milestone": "P0",
+      "recovery_branch": "codex/pre-factory-baseline",
+      "milestone_branch": "codex/p0-foundation",
+      "validated_baseline_commit": "e4264c6539338320ace2245cc18b05d7150c1358",
+      "queue_location": "docs/FEATURE_QUEUE.yaml",
+      "autonomy_contract_location": "docs/AUTONOMY_CONTRACT.md",
+      "validation_source": ".factory/project.yaml",
+      "automation_mode": "milestone",
+      "maximum_retries": null,
+      "schedule": null,
+      "human_gates": ["milestone_merge", "product_decision", "destructive_change"],
+      "last_accepted_feature": "P0-002 — Synthetic case and safety fixture generators",
+      "last_accepted_commit": "4c43aa5cd870ddb4962eceb1fbe35c648efa3e18",
+      "current_state": "queue_reconciliation",
+      "registration_notes": "First action is queue_reconciliation. Preserve P0-002, its accepted commit, and codex/pre-factory-baseline."
+    },
+    {
+      "project_id": "interview-companion",
+      "repository": "${HOME}/Developer/Live_Interview_Companion",
+      "enabled": true,
+      "priority": 90,
+      "active_milestone": "M0",
+      "recovery_branch": "main",
+      "milestone_branch": "codex/m0-foundation",
+      "validated_baseline_commit": "8f0d7e3111db316b677d098a621c019b7677c057",
+      "queue_location": "docs/FEATURE_QUEUE.yaml",
+      "autonomy_contract_location": "docs/AUTONOMY_CONTRACT.md",
+      "validation_source": ".factory/project.yaml",
+      "automation_mode": "milestone",
+      "maximum_retries": null,
+      "schedule": null,
+      "human_gates": ["milestone_merge", "product_decision", "destructive_change"],
+      "last_accepted_feature": "F002 — Unified Session Lifecycle",
+      "last_accepted_commit": "3b30adaa1a9829d9e225728c2873a23512086e8b",
+      "current_state": "human_decision_required",
+      "registration_notes": "Verified independently from repository state on 2026-07-17. F002 is integrated at e229b116b2d0979b99449f11d2abb1e812479721. A retained integration writer lease remains after its process exited; preserve it for identity-checked recovery rather than deleting it during deployment."
+    }
+  ]
+}
