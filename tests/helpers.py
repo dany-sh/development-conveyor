@@ -137,6 +137,9 @@ class SyntheticLauncher:
 
     def launch(self, request):
         self.actions.append(request.action)
+        structured = None
+        structured_validation = "not_required"
+        classification = None
         if request.action == "queue_reconciliation":
             queue_path = request.project.repository / request.project.queue_location
             queue = json.loads(queue_path.read_text(encoding="utf-8"))
@@ -144,6 +147,17 @@ class SyntheticLauncher:
             write_json(queue_path, queue)
             git(request.project.repository, "add", request.project.queue_location)
             git(request.project.repository, "commit", "-m", "factory: reconcile M0 queue")
+            structured = {
+                "schema_version": 1,
+                "classification": "reconciled_ready_work",
+                "summary": "Synthetic queue reconciled.",
+                "next_action": "feature_cycle",
+                "queue_validation": {"valid": True, "milestone_found": True, "feature_count": 1},
+                "retryable": False,
+                "human_decision": None,
+            }
+            structured_validation = "valid"
+            classification = "reconciled_ready_work"
         elif request.action == "feature_cycle":
             self._integrate_feature(request.project)
         elif request.action == "milestone_integration":
@@ -159,7 +173,17 @@ class SyntheticLauncher:
             argv=("codex", "exec"), cwd=request.project.repository, prompt="synthetic", prompt_sha256="0" * 64,
             sandbox="workspace-write",
         )
-        return SessionResult(request.action, 0, f"session-{len(self.actions)}", "synthetic", plan)
+        return SessionResult(
+            request.action,
+            0,
+            f"session-{len(self.actions)}",
+            "synthetic",
+            plan,
+            redacted_stdout="synthetic",
+            structured_result=structured,
+            structured_output_validation=structured_validation,
+            result_classification=classification,
+        )
 
     def _integrate_feature(self, project: Project) -> None:
         repository = project.repository
@@ -199,4 +223,3 @@ class SyntheticLauncher:
         write_json(queue_path, queue)
         git(repository, "add", project.queue_location)
         git(repository, "commit", "-m", "factory: record F001 integration")
-

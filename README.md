@@ -80,7 +80,7 @@ For one selected feature, the execution engine:
 3. Persists the preflight, selection, and branch-preparation checkpoints.
 4. Launches a repository-scoped `$feature-factory` session with the exact project, milestone, feature, run identity, mode, and prohibitions.
 5. Requires the installed role-pinned exploration, implementation, test, and adversarial-review workflow.
-6. Resolves any accepted `SELF` commit from the feature branch and verifies exactly one accepted commit relative to the recorded feature base.
+6. Resolves accepted commit evidence; completed legacy `commit: SELF` values use the corroborated registration, queue-at-commit, milestone ancestry, specification, status, and run-log policy documented in `docs/QUEUE_RECONCILIATION_CONTRACT.md`.
 7. Launches `$milestone-integrator` when acceptance exists without integration.
 8. Verifies the accepted and integrated commits are patch-equivalent, the integrated commit is on the milestone branch, queue integration evidence passed, and the repository is clean.
 9. Recalculates readiness and continues according to the requested mode.
@@ -89,7 +89,7 @@ An isolated feature-branch pass is never treated as completion.
 
 ## Queue reconciliation
 
-No ready feature triggers queue reconciliation rather than an immediate blocked result. The repository session first invokes `product-architect` in planning-only mode, then uses `$feature-inventory` for evidence-supported queue or feature-specification edits. Deterministic validation must establish ready work, a complete milestone, or a genuine decision gate before the Conveyor advances.
+No ready feature is classified as planning refinement, a complete milestone, a legitimate blocker, or a human decision from deterministic evidence. When repository reconciliation is required, its session first invokes `product-architect` in planning-only mode, then uses `$feature-inventory` for evidence-supported queue or feature-specification edits. The session must return the structured contract in `docs/QUEUE_RECONCILIATION_CONTRACT.md`; a valid no-ready result succeeds at the controller level and stops at a safe planning checkpoint.
 
 Accepted or integrated work is never reimplemented. The Case Manager registration explicitly preserves P0-002 and commit `4c43aa5cd870ddb4962eceb1fbe35c648efa3e18`.
 
@@ -117,7 +117,7 @@ Sensitive subprocess output is redacted before persistence. Access tokens, API k
 
 | Project | Repository | Active milestone | Current registration | Next safe action |
 | --- | --- | --- | --- | --- |
-| `case-manager` | `${HOME}/Developer/conan-case-manager` | `P0` | `queue_reconciliation` | Queue reconciliation only; P0-002 and both protected commits remain unchanged. |
+| `case-manager` | `${HOME}/Developer/conan-case-manager` | `P0` | Reconciled from legacy failed pilot state | `P0` resolves to queue milestone `phase-0`; P0-002 is completed at the protected accepted commit, so the next action is the milestone gate, not feature implementation. |
 | `interview-companion` | `${HOME}/Developer/Live_Interview_Companion` | `M0` | `human_decision_required` | Preserve and reconcile the retained integration writer lease before scheduling. F002 metadata was independently verified. |
 
 Registration is independent: no Case Manager milestone, branch, feature, or commit is copied into Interview Companion.
@@ -131,13 +131,14 @@ scripts/conveyor validate-config
 scripts/conveyor status
 scripts/conveyor status --project case-manager
 scripts/conveyor plan --project case-manager
+scripts/conveyor reconcile --project case-manager --dry-run
 scripts/conveyor run --project case-manager --mode one_feature
 scripts/conveyor run --project case-manager --mode milestone
 scripts/conveyor resume --project case-manager
 scripts/conveyor run --mode portfolio
 ```
 
-Add `--dry-run` to `run` or `resume` to prevent application writes and session launches. `status` and `plan` are always read-only.
+Add `--dry-run` to `run` or `resume` to prevent application writes and session launches. `status` and `plan` are always read-only. `reconcile --dry-run` validates the exact read-only reconciliation session plan; `reconcile` without that flag updates only Conveyor-owned project state from deterministic evidence.
 
 The exact pilot dry run is:
 
@@ -145,7 +146,7 @@ The exact pilot dry run is:
 scripts/conveyor run --project case-manager --mode milestone --dry-run
 ```
 
-Its detected next action must remain `queue_reconciliation` until the Case Manager queue and configured P0 metadata are reconciled by an authorized repository session.
+It must resolve `docs/FEATURE_QUEUE.yaml`, match configured `P0` to queue milestone `phase-0`, report the actual feature count, recognize completed P0-002 without selecting it, and propose the milestone gate.
 
 ## Goal Mode
 
@@ -183,14 +184,15 @@ Run:
 
 ```bash
 python3 -m unittest discover -s tests -v
+pytest
 scripts/conveyor validate-config
 scripts/conveyor status
+scripts/conveyor reconcile --project case-manager --dry-run
 scripts/conveyor run --project case-manager --mode milestone --dry-run
 ```
 
-Tests use disposable synthetic Git repositories. They cover both state machines, configuration and path expansion, deterministic queue selection, stable repository identity, writer contention and identity-checked stale recovery, interrupted implementation/integration reconciliation, retry rules, multi-project concurrency, output redaction, prohibited actions, a complete accepted-feature integration, a complete milestone gate, idempotent resume, and protection of `main`.
+Tests use disposable synthetic Git repositories. They cover both state machines, configuration and path expansion, safe queue-location resolution, precise malformed-queue diagnostics, milestone/status/dependency normalization, nonempty queue preservation, corroborated and rejected `SELF` cases, every reconciliation classification, exit/result disagreement, report persistence, launch-lock cleanup, idempotent retry, stable repository identity, writer contention and identity-checked stale recovery, multi-project concurrency, output redaction, prohibited actions, accepted-feature integration, milestone gating, idempotent resume, and protection of `main`.
 
 ## Human gates
 
 The Conveyor always stops for milestone merge approval. It also stops for ambiguous state or lock ownership, product/architecture decisions, semantic conflicts, destructive changes, data loss, policy changes, paid dependencies, out-of-scope work, hard content gates, and retry exhaustion. Default-branch integration remains an explicit human-authorized workflow outside the Conveyor.
-

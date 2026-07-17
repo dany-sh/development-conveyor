@@ -8,7 +8,7 @@
     "schema_version": {"type": "integer", "enum": [1]},
     "project_id": {"type": "string"},
     "repository_fingerprint": {"type": "string"},
-    "run_id": {"type": ["string", "null"]},
+    "run_id": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
     "current_state": {"type": "string"},
     "active_milestone": {"type": ["string", "null"]},
     "current_feature": {"type": ["string", "null"]},
@@ -19,4 +19,3 @@
     "updated_at": {"type": "string"}
   }
 }
-

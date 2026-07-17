@@ -35,7 +35,8 @@ Key integration conclusions:
 - Baseline `e4264c6539338320ace2245cc18b05d7150c1358` exists and is an ancestor of the milestone branch.
 - Accepted P0-002 commit `4c43aa5cd870ddb4962eceb1fbe35c648efa3e18` exists and is the current milestone HEAD at deployment discovery.
 - The repository was clean during the final pilot.
-- The configured active milestone `P0` does not yet match the legacy queue milestone identifier, so the first action is necessarily `queue_reconciliation`.
+- The first pilot compared configured `P0` literally with legacy queue milestone `phase-0`. Queue parsing itself succeeded, but milestone filtering therefore reported zero features. Deterministic normalization now matches the identifiers without editing the application queue.
+- The accepted P0-002 queue sentinel `SELF` is corroborated by registered commit `4c43aa5cd870ddb4962eceb1fbe35c648efa3e18`, milestone ancestry from baseline `e4264c6539338320ace2245cc18b05d7150c1358`, the queue stored in that commit, and feature specification/status/run-log evidence.
 
 ### Interview Companion
 
@@ -44,4 +45,3 @@ Key integration conclusions:
 - During read-only discovery, another repository workflow advanced F002 from an active dirty feature worktree to integrated state. No Development Conveyor command caused that change.
 - Final discovery verified accepted F002 commit `3b30adaa1a9829d9e225728c2873a23512086e8b` and integrated commit `e229b116b2d0979b99449f11d2abb1e812479721`.
 - A retained integration writer lease remained after its recorded process exited. Deployment preserved it and registered `human_decision_required`; no stale lock was removed on timestamp evidence.
-

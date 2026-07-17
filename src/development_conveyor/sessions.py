@@ -23,6 +23,18 @@ ACTION_PROMPTS = {
     "human_decision_report": "human-decision-report.md",
 }
 
+RECONCILIATION_CLASSIFICATIONS = {
+    "reconciled_ready_work",
+    "reconciled_no_ready_work",
+    "milestone_complete",
+    "legitimately_blocked",
+    "human_decision_required",
+    "invalid_queue",
+    "session_execution_failed",
+    "structured_output_invalid",
+}
+RESULT_MARKER = "CONVEYOR_RESULT="
+
 
 @dataclass(frozen=True)
 class SessionRequest:
@@ -52,6 +64,154 @@ class SessionResult:
     session_id: str | None
     redacted_output: str
     plan: SessionPlan
+    redacted_stdout: str = ""
+    redacted_stderr: str = ""
+    structured_result: dict[str, Any] | None = None
+    structured_output_validation: str = "not_required"
+    result_classification: str | None = None
+    exit_classification: str | None = None
+    report_path: str | None = None
+
+
+def _content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
+            value = block.get("text")
+            if isinstance(value, str):
+                parts.append(value)
+    return "\n".join(parts)
+
+
+def _assistant_message(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    event_type = value.get("type")
+    if event_type == "item.completed":
+        item = value.get("item")
+        if isinstance(item, dict) and item.get("type") in {"agent_message", "assistant_message"}:
+            text = item.get("text")
+            return text if isinstance(text, str) else _content_text(item.get("content"))
+        return None
+    if event_type == "response_item":
+        payload = value.get("payload")
+        if isinstance(payload, dict) and payload.get("type") == "message" and payload.get("role") == "assistant":
+            return _content_text(payload.get("content"))
+        return None
+    if event_type == "message" and value.get("role") == "assistant":
+        text = value.get("text")
+        return text if isinstance(text, str) else _content_text(value.get("content"))
+    return None
+
+
+def _validate_reconciliation_result(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise SessionError("structured result $: expected an object")
+    required = {"schema_version", "classification", "summary", "next_action", "queue_validation", "retryable"}
+    missing = sorted(required - set(value))
+    if missing:
+        raise SessionError(f"structured result $: missing keys: {', '.join(missing)}")
+    if value.get("schema_version") != 1:
+        raise SessionError("structured result $.schema_version: expected 1")
+    classification = value.get("classification")
+    if classification not in RECONCILIATION_CLASSIFICATIONS:
+        raise SessionError(f"structured result $.classification: unsupported value {classification!r}")
+    if not isinstance(value.get("summary"), str) or not value["summary"].strip():
+        raise SessionError("structured result $.summary: expected a non-empty string")
+    if not isinstance(value.get("next_action"), str) or not value["next_action"].strip():
+        raise SessionError("structured result $.next_action: expected a non-empty string")
+    validation = value.get("queue_validation")
+    if not isinstance(validation, dict):
+        raise SessionError("structured result $.queue_validation: expected an object")
+    for key in ("valid", "milestone_found", "feature_count"):
+        if key not in validation:
+            raise SessionError(f"structured result $.queue_validation: missing key {key}")
+    if not isinstance(validation["valid"], bool):
+        raise SessionError("structured result $.queue_validation.valid: expected a boolean")
+    if not isinstance(validation["milestone_found"], bool):
+        raise SessionError("structured result $.queue_validation.milestone_found: expected a boolean")
+    if not isinstance(validation["feature_count"], int) or isinstance(validation["feature_count"], bool) or validation["feature_count"] < 0:
+        raise SessionError("structured result $.queue_validation.feature_count: expected a non-negative integer")
+    if not isinstance(value.get("retryable"), bool):
+        raise SessionError("structured result $.retryable: expected a boolean")
+    human = value.get("human_decision")
+    if human is not None and not isinstance(human, dict):
+        raise SessionError("structured result $.human_decision: expected an object or null")
+    if classification == "human_decision_required" and not isinstance(human, dict):
+        raise SessionError("structured result $.human_decision: required for human_decision_required")
+    return value
+
+
+def parse_reconciliation_result(output: str) -> tuple[dict[str, Any] | None, str]:
+    """Extract one marker from the terminal assistant message in Codex JSONL."""
+
+    assistant_messages: list[str] = []
+    for line in output.splitlines():
+        try:
+            decoded = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = _assistant_message(decoded)
+        if message is not None:
+            assistant_messages.append(message)
+    if not assistant_messages:
+        return None, "missing_terminal_assistant_message"
+    marker_count = sum(message.count(RESULT_MARKER) for message in assistant_messages)
+    if marker_count == 0:
+        return None, "missing_marker"
+    if marker_count != 1:
+        return None, "duplicate_marker"
+    terminal = assistant_messages[-1].rstrip()
+    final_line = terminal.splitlines()[-1] if terminal else ""
+    if not final_line.startswith(RESULT_MARKER):
+        return None, "marker_not_terminal"
+    if terminal.count(RESULT_MARKER) != 1:
+        return None, "duplicate_marker"
+    payload = final_line.removeprefix(RESULT_MARKER).strip()
+    try:
+        decoded, end = json.JSONDecoder().raw_decode(payload)
+    except json.JSONDecodeError as exc:
+        return None, f"invalid_json: line {exc.lineno}, column {exc.colno}: {exc.msg}"
+    if payload[end:].strip():
+        return None, "invalid_json: trailing content after structured result"
+    try:
+        return _validate_reconciliation_result(decoded), "valid"
+    except SessionError as exc:
+        return None, str(exc)
+
+
+def classify_session_result(returncode: int, structured: dict[str, Any] | None, validation: str) -> str:
+    if structured is not None and validation == "valid":
+        return str(structured["classification"])
+    if validation not in {"missing_marker", "missing_terminal_assistant_message"}:
+        return "structured_output_invalid"
+    return "session_execution_failed" if returncode != 0 else "structured_output_invalid"
+
+
+def classify_exit_contract(
+    returncode: int, structured: dict[str, Any] | None, validation: str, result_classification: str
+) -> str:
+    if structured is not None and validation == "valid":
+        if result_classification == "reconciled_no_ready_work":
+            return "successful_reconciliation_no_ready_work"
+        if result_classification == "human_decision_required":
+            return "human_decision_result"
+        if result_classification == "invalid_queue":
+            return "validation_failure"
+        if result_classification in {"session_execution_failed", "structured_output_invalid"}:
+            return "retryable_failure" if structured.get("retryable") else "terminal_failure"
+        return "structured_result_successfully_returned"
+    if returncode in {130, -2, -15}:
+        return "interrupted_session"
+    if validation not in {"missing_marker", "missing_terminal_assistant_message", "not_required"}:
+        return "structured_output_invalid"
+    if returncode != 0:
+        return "agent_or_skill_execution_failure"
+    return "structured_output_invalid"
 
 
 class SessionLauncher:
@@ -87,7 +247,11 @@ class SessionLauncher:
     def plan(self, request: SessionRequest) -> SessionPlan:
         prompt = self._render_prompt(request)
         executable = str(self.configuration["codex"]["executable"])
-        sandbox = "read-only" if request.action == "human_decision_report" else "workspace-write"
+        sandbox = (
+            "read-only"
+            if request.action == "human_decision_report" or request.mode in {"audit", "dry-run", "dry-run-validation"}
+            else "workspace-write"
+        )
         if request.session_id:
             argv = (executable, "exec", "resume", "--json", request.session_id, "-")
         else:
@@ -115,19 +279,45 @@ class SessionLauncher:
         try:
             result = subprocess.run(
                 list(plan.argv), cwd=plan.cwd, env=environment, input=plan.prompt, text=True,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
                 timeout=int(self.configuration["codex"]["session_timeout_seconds"]),
             )
         except subprocess.TimeoutExpired as exc:
-            output = redact_text(str(exc.stdout or ""))
-            raise SessionError(f"repository session timed out; partial output: {output[-2000:]}") from exc
-        session_id = self._session_id(result.stdout)
+            stdout = redact_text(str(exc.stdout or ""))
+            stderr = redact_text(str(exc.stderr or ""))
+            raise SessionError(
+                f"repository session timed out; redacted stdout: {stdout[-1000:]}; "
+                f"redacted stderr: {stderr[-1000:]}"
+            ) from exc
+        except OSError as exc:
+            raise SessionError(f"repository session process launch failed: {exc}") from exc
+        session_id = self._session_id(result.stdout + "\n" + result.stderr)
+        redacted_stdout = redact_text(result.stdout)
+        redacted_stderr = redact_text(result.stderr)
+        combined = redacted_stdout + (("\n" + redacted_stderr) if redacted_stderr else "")
+        structured = None
+        validation = "not_required"
+        classification = None
+        if request.action == "queue_reconciliation":
+            structured, validation = parse_reconciliation_result(result.stdout)
+            classification = classify_session_result(result.returncode, structured, validation)
+        exit_classification = (
+            classify_exit_contract(result.returncode, structured, validation, classification)
+            if classification is not None else
+            ("structured_result_successfully_returned" if result.returncode == 0 else "agent_or_skill_execution_failure")
+        )
         return SessionResult(
             action=request.action,
             returncode=result.returncode,
             session_id=session_id or request.session_id,
-            redacted_output=redact_text(result.stdout),
+            redacted_output=combined,
             plan=plan,
+            redacted_stdout=redacted_stdout,
+            redacted_stderr=redacted_stderr,
+            structured_result=structured,
+            structured_output_validation=validation,
+            result_classification=classification,
+            exit_classification=exit_classification,
         )
 
     @staticmethod

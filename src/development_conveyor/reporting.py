@@ -8,7 +8,7 @@ from typing import Any
 
 from .errors import ConveyorError, QueueError
 from .locks import DurableLock, inspect_repository_writer_lock
-from .queue import FeatureQueue
+from .queue import FeatureQueue, resolve_feature_commit, resolve_queue_path
 from .registry import Project
 from .repository import RepositoryInspector
 
@@ -25,17 +25,50 @@ def build_project_plan(
         inspector.writer_lock_path(configuration["lock_policy"]["writer_lock_relative_path"]),
         project.repository,
     )
-    queue_path = project.repository / project.queue_location
+    queue_path: Path | None = None
     queue_error: str | None = None
     queue_summary: dict[str, Any]
     selection = None
     try:
-        queue = FeatureQueue.from_path(queue_path)
+        queue_path = resolve_queue_path(project.repository, project.queue_location)
+        queue = FeatureQueue.from_location(project.repository, project.queue_location)
         queue_summary = queue.summary(project.active_milestone or "")
+        queue_summary.update({
+            "configured_queue_location": project.queue_location,
+            "resolved_queue_path": str(queue_path),
+            "source_format": "json-compatible-yaml",
+            "valid": True,
+        })
+        resolved_commits = []
+        for feature in queue.features_for_milestone(project.active_milestone or ""):
+            if feature.get("status") not in {"done", "integrated"}:
+                continue
+            resolution = resolve_feature_commit(
+                feature=feature,
+                queue=queue,
+                repository=inspector,
+                milestone_branch=project.milestone_branch,
+                baseline=project.validated_baseline_commit,
+                registered_commit=project.last_accepted_commit,
+                registered_feature=project.last_accepted_feature,
+            )
+            if resolution:
+                resolved_commits.append({
+                    "feature_id": resolution.feature_id,
+                    "commit": resolution.commit,
+                    "source": resolution.source,
+                })
+        queue_summary["resolved_commits"] = resolved_commits
         selection = queue.select_next(project.active_milestone or "") if queue_summary["milestone_found"] else None
     except (QueueError, OSError) as exc:
         queue_error = str(exc)
-        queue_summary = {"valid": False, "error": queue_error}
+        queue_summary = {
+            "valid": False,
+            "error": queue_error,
+            "configured_queue_location": project.queue_location,
+            "resolved_queue_path": str(queue_path) if queue_path else None,
+            "reconciliation_classification": "invalid_queue",
+        }
 
     active_cycle: dict[str, Any] | None = None
     cycle_path = inspector.cycle_state_path()
@@ -95,9 +128,12 @@ def build_project_plan(
     elif not repository["clean"] or project.current_state == "repository_dirty":
         action = "repository_dirty"
         stop = "Preserve existing work and reconcile the dirty repository before production scheduling."
-    elif project.current_state == "queue_reconciliation" or queue_error or not queue_summary.get("milestone_found", False):
+    elif queue_error or not queue_summary.get("milestone_found", False):
         action = "queue_reconciliation"
         stop = "Continue only when deterministic queue validation finds justified ready work or a genuine gate."
+    elif project.current_state == "paused" and queue_summary.get("reconciliation_classification") == "reconciled_no_ready_work":
+        action = "planning_refinement"
+        stop = "The last reconciliation validated the queue and found no dependency-ready work."
     elif queue_summary.get("active_features"):
         action = "resume_existing_factory_work"
         stop = "Resume the existing repository feature state; do not select duplicate work."
@@ -107,12 +143,22 @@ def build_project_plan(
     elif queue_summary.get("milestone_complete"):
         action = "milestone_gate"
         stop = "Stop for human milestone merge approval after a passing gate."
-    else:
+    elif queue_summary.get("reconciliation_classification") == "human_decision_required":
+        action = "human_decision_required"
+        stop = "Queue evidence identifies an unresolved human decision."
+    elif queue_summary.get("reconciliation_classification") == "legitimately_blocked":
+        action = "legitimately_blocked"
+        stop = "Queue evidence contains only legitimate blockers and no dependency-ready work."
+    elif queue_summary.get("status_counts", {}).get("proposed", 0):
         action = "queue_reconciliation"
-        stop = "Reconcile the queue before declaring the project blocked."
+        stop = "Use planning-only reconciliation to refine proposed work without beginning implementation."
+    else:
+        action = "planning_refinement"
+        stop = "The queue is valid but has no dependency-ready feature; remain at a safe planning checkpoint."
 
     session_actions = {
         "queue_reconciliation": ["product-architect (planning-only)", "$feature-inventory"],
+        "planning_refinement": ["product-architect (planning-only)", "$feature-inventory (read-only validation)"],
         "feature_cycle": ["$feature-factory", "$milestone-integrator"],
         "resume_existing_factory_work": ["resume repository-scoped Codex session"],
         "milestone_gate": ["$milestone-gate", "release-auditor (read-only)"],

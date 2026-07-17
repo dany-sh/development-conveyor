@@ -37,7 +37,7 @@ PORTFOLIO_TRANSITIONS = {
     "next_milestone": {"queue_reconciliation", "feature_ready", "human_decision_required", "paused", "disabled"},
     "human_decision_required": {"discover", "queue_reconciliation", "feature_ready", "feature_running", "milestone_gate", "paused", "disabled"},
     "repository_dirty": {"discover", "queue_reconciliation", "feature_ready", "human_decision_required", "paused", "disabled"},
-    "validation_failed": {"queue_reconciliation", "feature_running", "milestone_gate", "human_decision_required", "paused", "disabled"},
+    "validation_failed": {"queue_reconciliation", "feature_ready", "feature_running", "milestone_gate", "human_decision_required", "paused", "disabled"},
     "architecture_decision_required": {"queue_reconciliation", "feature_ready", "human_decision_required", "paused", "disabled"},
     "destructive_change_required": {"human_decision_required", "paused", "disabled"},
     "conveyor_error": {"discover", "queue_reconciliation", "feature_ready", "feature_running", "human_decision_required", "paused", "disabled"},

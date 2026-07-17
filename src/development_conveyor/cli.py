@@ -15,6 +15,7 @@ from .errors import ConveyorError
 from .redaction import redact_text
 from .registry import ProjectRegistry
 from .reporting import build_project_plan, portfolio_status, render_json
+from .queue import FeatureQueue, resolve_queue_path
 from .scheduler import PortfolioScheduler
 from .sessions import SessionLauncher
 from .validation import SafetyPolicy
@@ -72,6 +73,12 @@ def _parser() -> argparse.ArgumentParser:
     resume = subparsers.add_parser("resume", help="resume a persisted active cycle")
     resume.add_argument("--project", required=True)
     resume.add_argument("--dry-run", action="store_true")
+
+    reconcile = subparsers.add_parser(
+        "reconcile", help="validate queue reconciliation and optionally recover Conveyor-owned project state"
+    )
+    reconcile.add_argument("--project", required=True)
+    reconcile.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -109,14 +116,26 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
     if args.command == "validate-config":
         projects = []
         for project in registry.all():
-            projects.append({
+            item = {
                 "project_id": project.project_id,
                 "repository_exists": project.repository.is_dir(),
                 "enabled": project.enabled,
                 "configured_state": project.current_state,
-            })
+            }
+            try:
+                queue_path = resolve_queue_path(project.repository, project.queue_location)
+                queue = FeatureQueue.from_location(project.repository, project.queue_location)
+                item.update({
+                    "queue_valid": True,
+                    "resolved_queue_path": str(queue_path),
+                    "milestone_found": queue.milestone(project.active_milestone or "") is not None,
+                    "feature_count": len(queue.features_for_milestone(project.active_milestone or "")),
+                })
+            except ConveyorError as exc:
+                item.update({"queue_valid": False, "queue_error": str(exc), "resolved_queue_path": None})
+            projects.append(item)
         return {
-            "valid": True,
+            "valid": all(item["repository_exists"] and item.get("queue_valid") for item in projects),
             "schema_version": configuration.conveyor["schema_version"],
             "project_count": len(projects),
             "projects": projects,
@@ -134,6 +153,9 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
 
     if args.command == "resume":
         return engine.run_project(registry.get(args.project), "resume", dry_run=args.dry_run)
+
+    if args.command == "reconcile":
+        return engine.reconcile_controller_state(registry.get(args.project), dry_run=args.dry_run)
 
     if args.command == "run":
         mode = args.mode or configuration.conveyor["default_mode"]

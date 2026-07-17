@@ -147,6 +147,19 @@ class RepositoryInspector:
     def commit_subject(self, commit: str) -> str:
         return self.git(["show", "-s", "--format=%s", commit]).stdout.strip()
 
+    def file_at_commit(self, commit: str, relative_path: str) -> str | None:
+        """Return a repository file at a commit without reading outside the tree."""
+
+        path = Path(relative_path)
+        if path.is_absolute() or ".." in path.parts:
+            raise RepositoryError(f"unsafe repository-relative path: {relative_path}")
+        result = self.git(["show", f"{commit}:{path.as_posix()}"], check=False)
+        return result.stdout if result.returncode == 0 else None
+
+    def changed_paths(self, commit: str) -> list[str]:
+        output = self.git(["show", "--format=", "--name-only", commit]).stdout
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
     def inspect(self, *, baseline: str | None = None, milestone_branch: str | None = None) -> dict[str, Any]:
         identity = self.identity()
         operations = self.git_operation_state()
