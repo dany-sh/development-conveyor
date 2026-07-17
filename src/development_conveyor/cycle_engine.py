@@ -14,7 +14,7 @@ from .errors import ConveyorError, LockError, QueueError, RecoveryError, Session
 from .locks import DurableLock, inspect_repository_writer_lock, make_lock_record
 from .logging import EventLogger, JsonStateStore, atomic_write_json, run_event, utc_now
 from .queue import FeatureQueue, resolve_queue_path
-from .recovery import assess_recovery
+from .recovery import StartupReconciliation, assess_recovery, assess_startup_reconciliation
 from .registry import Project
 from .reporting import build_project_plan
 from .repository import RepositoryInspector
@@ -67,6 +67,7 @@ class CycleEngine:
             "last_checkpoint": None,
             "stop_reason": None,
             "human_decision_required": None,
+            "state_evidence": None,
             "created_at": stamp,
             "updated_at": stamp,
         }
@@ -82,6 +83,7 @@ class CycleEngine:
         feature: str | None = None,
         stop_reason: str | None = None,
         human_gate: dict[str, Any] | None = None,
+        state_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         transition = PORTFOLIO_MACHINE.transition(document["current_state"], target)
         document.update({
@@ -91,6 +93,7 @@ class CycleEngine:
             "last_checkpoint": checkpoint,
             "stop_reason": stop_reason,
             "human_decision_required": human_gate,
+            "state_evidence": state_evidence,
             "updated_at": utc_now(),
         })
         self.project_store.write(self.project_state_path(project), document)
@@ -108,6 +111,148 @@ class CycleEngine:
             human_gate=human_gate,
         ))
         return document
+
+    @staticmethod
+    def _reconciliation_fields(assessment: StartupReconciliation) -> dict[str, Any]:
+        execution_path = list(assessment.transition_path)
+        if (
+            assessment.classification != "active_cycle_resume"
+            and assessment.derived_state == "feature_ready"
+            and (not execution_path or execution_path[-1] != "feature_running")
+        ):
+            execution_path.append("feature_running")
+        return {
+            "persisted_state": assessment.persisted_state,
+            "derived_state": assessment.derived_state,
+            "state_consistency": assessment.classification,
+            "repair_transition_path": list(assessment.transition_path),
+            "execution_state_path": execution_path,
+            "would_persist_state_repair": assessment.would_persist,
+            "state_reconciliation_reason": assessment.reason,
+            "state_reconciliation_evidence": assessment.evidence,
+            "state_reconciliation_human_decision": assessment.human_decision,
+        }
+
+    def project_plan(self, project: Project) -> dict[str, Any]:
+        effective = self.effective_project(project)
+        persisted = self.load_project_state(project)
+        plan = build_project_plan(effective, self.configuration.conveyor, self.root)
+        assessment = assess_startup_reconciliation(effective, persisted, plan)
+        plan.update(self._reconciliation_fields(assessment))
+        if assessment.classification in {"human_decision_required", "invalid_state_evidence"}:
+            plan["proposed_next_action"] = "human_decision_required"
+            plan["expected_stop_condition"] = assessment.reason
+            plan["sessions_that_would_launch"] = []
+        return plan
+
+    def _persist_startup_reconciliation(
+        self,
+        project: Project,
+        persisted: dict[str, Any],
+        assessment: StartupReconciliation,
+        *,
+        run_id: str,
+    ) -> dict[str, Any]:
+        if not assessment.would_persist:
+            return persisted
+        inspector = RepositoryInspector(project.repository)
+        reservation = self._launch_lock(project, inspector)
+        reservation.acquire(make_lock_record(
+            project_id=project.project_id,
+            repository_identity=inspector.identity()["repository_id"],
+            run_id=run_id,
+            current_feature=assessment.evidence.get("selected_feature"),
+            current_phase="startup_reconciliation",
+        ))
+        try:
+            repository = inspector.inspect(
+                baseline=project.validated_baseline_commit,
+                milestone_branch=project.milestone_branch,
+            )
+            queue = FeatureQueue.from_location(project.repository, project.queue_location)
+            queue_summary = queue.summary(project.active_milestone or "")
+            selection = queue.select_next(project.active_milestone or "")
+            writer = inspect_repository_writer_lock(
+                inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                ),
+                project.repository,
+            )
+            queue_path = resolve_queue_path(project.repository, project.queue_location)
+            current_queue_fingerprint = hashlib.sha256(queue_path.read_bytes()).hexdigest()
+            relative_queue = queue_path.relative_to(project.repository.resolve()).as_posix()
+            committed_queue = inspector.file_at_commit("HEAD", relative_queue)
+            stale_cycle = assessment.evidence.get("stale_cycle_evidence")
+            recorded_cycle_fingerprint = (
+                stale_cycle.get("cycle_fingerprint") if isinstance(stale_cycle, dict) else None
+            )
+            current_cycle_fingerprint = None
+            if recorded_cycle_fingerprint:
+                cycle_path = inspector.cycle_state_path()
+                if cycle_path.exists():
+                    current_cycle_fingerprint = hashlib.sha256(cycle_path.read_bytes()).hexdigest()
+            if (
+                repository.get("clean") is not True
+                or any(repository.get("git_operations", {}).values())
+                or repository.get("head") != assessment.evidence.get("milestone_head")
+                or repository.get("branch") != project.milestone_branch
+                or repository.get("head")
+                != inspector.rev_parse(project.milestone_branch or "", check=False)
+                or repository.get("baseline_exists") is not True
+                or repository.get("milestone_branch_exists") is not True
+                or repository.get("baseline_is_ancestor_of_milestone") is not True
+                or repository.get("worktrees") != assessment.evidence.get("repository_worktrees")
+                or repository.get("local_branches")
+                != assessment.evidence.get("repository_local_branches")
+                or repository.get("cycle_state_exists")
+                != assessment.evidence.get("repository_cycle_state_exists")
+                or current_queue_fingerprint != assessment.evidence.get("queue_fingerprint")
+                or committed_queue is None
+                or committed_queue != queue_path.read_text(encoding="utf-8")
+                or (
+                    recorded_cycle_fingerprint is not None
+                    and current_cycle_fingerprint != recorded_cycle_fingerprint
+                )
+                or queue_summary.get("reconciliation_classification")
+                != assessment.evidence.get("queue_classification")
+                or (selection.feature_id if selection else None)
+                != assessment.evidence.get("selected_feature")
+                or writer.exists
+            ):
+                raise RecoveryError(
+                    "repository, queue, selection, or writer-lock evidence changed during startup reconciliation"
+                )
+            current = self.load_project_state(project)
+            if current is not None and (
+                current.get("current_state") != persisted.get("current_state")
+                or current.get("updated_at") != persisted.get("updated_at")
+            ):
+                raise RecoveryError("persisted project state changed concurrently during startup reconciliation")
+            document = current or persisted
+            evidence = {
+                **assessment.evidence,
+                "classification": assessment.classification,
+                "persisted_state": assessment.persisted_state,
+                "derived_state": assessment.derived_state,
+                "repair_transition_path": list(assessment.transition_path),
+                "reason": assessment.reason,
+                "reconciled_at": utc_now(),
+            }
+            for index, target in enumerate(assessment.transition_path[1:], start=1):
+                final = index == len(assessment.transition_path) - 1
+                document = self._transition_project(
+                    project,
+                    document,
+                    target,
+                    run_id=run_id,
+                    checkpoint=f"startup_state_reconciliation:{assessment.classification}:{target}",
+                    feature=assessment.evidence.get("selected_feature") if target == "feature_ready" else None,
+                    stop_reason=assessment.reason if final else None,
+                    state_evidence=evidence,
+                )
+            return document
+        finally:
+            reservation.release(run_id)
 
     def _new_cycle_state(
         self, project: Project, run_id: str, inspector: RepositoryInspector, feature: dict[str, Any] | None
@@ -155,6 +300,22 @@ class CycleEngine:
             "git_operations": inspector.git_operation_state(),
         }
 
+    @staticmethod
+    def _milestone_state_evidence(project: Project, inspector: RepositoryInspector, *, gate: bool = False) -> dict[str, Any]:
+        queue_path = resolve_queue_path(project.repository, project.queue_location)
+        stamp = utc_now()
+        evidence = {
+            "milestone_head": inspector.rev_parse(project.milestone_branch or "", check=False),
+            "queue_fingerprint": hashlib.sha256(queue_path.read_bytes()).hexdigest(),
+            "recorded_at": stamp,
+        }
+        if gate:
+            evidence.update({
+                "gate_evidence_commit": evidence["milestone_head"],
+                "gate_evidence_timestamp": stamp,
+            })
+        return evidence
+
     def _advance_cycle(
         self,
         path: Path,
@@ -180,6 +341,8 @@ class CycleEngine:
         request: SessionRequest,
         inspector: RepositoryInspector,
         phase: str,
+        *,
+        reservation_held: bool = False,
     ) -> SessionResult:
         writer = inspect_repository_writer_lock(
             inspector.writer_lock_path(self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]),
@@ -197,14 +360,15 @@ class CycleEngine:
             if not matching_resume:
                 raise LockError("repository writer lease exists; refusing duplicate production session")
         identity = inspector.identity()
-        reservation = self._launch_lock(request.project, inspector)
-        reservation.acquire(make_lock_record(
-            project_id=request.project.project_id,
-            repository_identity=identity["repository_id"],
-            run_id=request.run_id,
-            current_feature=request.feature,
-            current_phase=phase,
-        ))
+        reservation = None if reservation_held else self._launch_lock(request.project, inspector)
+        if reservation is not None:
+            reservation.acquire(make_lock_record(
+                project_id=request.project.project_id,
+                repository_identity=identity["repository_id"],
+                run_id=request.run_id,
+                current_feature=request.feature,
+                current_phase=phase,
+            ))
         try:
             try:
                 result = self.launcher.launch(request)
@@ -217,7 +381,8 @@ class CycleEngine:
                     f"resume=scripts/conveyor resume --project {request.project.project_id}"
                 ) from exc
         finally:
-            reservation.release(request.run_id)
+            if reservation is not None:
+                reservation.release(request.run_id)
         report_path = self._persist_session_report(request, result, phase)
         result = replace(result, report_path=str(report_path))
         self.events.append(run_event(
@@ -354,12 +519,14 @@ class CycleEngine:
         inspector: RepositoryInspector,
         phase: str,
         retry_key: str,
+        *,
+        reservation_held: bool = False,
     ) -> tuple[SessionResult, list[dict[str, Any]]]:
         configured = int(self.configuration.conveyor["retries"][retry_key])
         limit = request.project.maximum_retries if request.project.maximum_retries is not None else configured
         budget = RetryBudget(limit)
         attempts: list[dict[str, Any]] = []
-        result = self._launch_session(request, inspector, phase)
+        result = self._launch_session(request, inspector, phase, reservation_held=reservation_held)
         while self._session_requires_retry(result) and budget.remaining:
             evidence = hashlib.sha256(result.redacted_output[-4000:].encode()).hexdigest()
             attempt = budget.record(
@@ -379,7 +546,7 @@ class CycleEngine:
                 session_id=result.session_id,
                 repair_attempt=attempt,
                 repair_evidence=evidence,
-            ), inspector, phase)
+            ), inspector, phase, reservation_held=reservation_held)
         return result, attempts
 
     def _resolve_accepted(self, inspector: RepositoryInspector, feature: dict[str, Any]) -> str:
@@ -426,6 +593,8 @@ class CycleEngine:
         cycle_path: Path,
         state: dict[str, Any],
         result: SessionResult,
+        *,
+        reservation_held: bool = False,
     ) -> dict[str, Any]:
         state["session_id"] = result.session_id
         if result.returncode != 0:
@@ -455,7 +624,7 @@ class CycleEngine:
                 run_id=state["conveyor_run_id"],
                 mode="resume",
                 feature=str(state["current_feature"]),
-            ), inspector, "integrating", "integration_repairs")
+            ), inspector, "integrating", "integration_repairs", reservation_held=reservation_held)
             state["integration_attempts"].extend(integration_repairs)
             if integration_result.returncode != 0:
                 self._advance_cycle(cycle_path, state, "integrating", inspector, "integration_session_started")
@@ -484,40 +653,131 @@ class CycleEngine:
             return {"feature": verified["id"], "accepted_commit": accepted, "integrated_commit": integrated}
         raise QueueError("session completion was not corroborated by accepted or integrated queue evidence")
 
-    def _execute_feature(self, project: Project, mode: str, run_id: str, project_state: dict[str, Any]) -> dict[str, Any]:
+    def _execute_feature(
+        self,
+        project: Project,
+        mode: str,
+        run_id: str,
+        project_state: dict[str, Any],
+        *,
+        reservation_held: bool = False,
+    ) -> dict[str, Any]:
         inspector = RepositoryInspector(project.repository)
         if not inspector.is_clean:
             raise ConveyorError("feature execution requires a clean repository")
-        inspector.ensure_runtime_ignored()
-        queue = FeatureQueue.from_location(project.repository, project.queue_location)
-        selection = queue.select_next(project.active_milestone or "")
-        if selection is None:
-            raise QueueError("no dependency-ready feature exists after queue reconciliation")
-        cycle_path = inspector.cycle_state_path()
-        state = self._new_cycle_state(project, run_id, inspector, selection.feature)
-        self.cycle_store.write(cycle_path, state)
-        self._advance_cycle(cycle_path, state, "preflight", inspector, "preflight_verified")
-        self._advance_cycle(cycle_path, state, "feature_selected", inspector, selection.reason)
-        self._advance_cycle(cycle_path, state, "branch_preparing", inspector, "repository_session_owns_branch_preparation")
-        self._transition_project(project, project_state, "feature_running", run_id=run_id, checkpoint="feature_session_launch", feature=selection.feature_id)
-        result, repairs = self._launch_with_retries(SessionRequest(
-            action="feature_cycle", project=project, run_id=run_id, mode=mode, feature=selection.feature_id
-        ), inspector, "feature_in_progress", "implementation_repairs")
-        state["validation_attempts"].extend(repairs)
-        self.cycle_store.write(cycle_path, state)
-        evidence = self._reconcile_feature_evidence(project, inspector, cycle_path, state, result)
-        self._transition_project(project, project_state, "feature_accepted", run_id=run_id, checkpoint="feature_integrated", feature=selection.feature_id)
-        return evidence
+        reservation = None if reservation_held else self._launch_lock(project, inspector)
+        if reservation is not None:
+            reservation.acquire(make_lock_record(
+                project_id=project.project_id,
+                repository_identity=inspector.identity()["repository_id"],
+                run_id=run_id,
+                current_feature=None,
+                current_phase="feature_preflight",
+            ))
+        try:
+            repository = inspector.inspect(
+                baseline=project.validated_baseline_commit,
+                milestone_branch=project.milestone_branch,
+            )
+            writer = inspect_repository_writer_lock(
+                inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                ),
+                project.repository,
+            )
+            if (
+                repository.get("clean") is not True
+                or any(repository.get("git_operations", {}).values())
+                or repository.get("branch") != project.milestone_branch
+                or repository.get("head") != inspector.rev_parse(project.milestone_branch or "", check=False)
+                or writer.exists
+            ):
+                raise RecoveryError(
+                    "feature preflight requires the clean configured milestone HEAD and no writer lease"
+                )
+            inspector.ensure_runtime_ignored()
+            queue = FeatureQueue.from_location(project.repository, project.queue_location)
+            selection = queue.select_next(project.active_milestone or "")
+            if selection is None:
+                raise QueueError("no dependency-ready feature exists after queue reconciliation")
+            cycle_path = inspector.cycle_state_path()
+            state = self._new_cycle_state(project, run_id, inspector, selection.feature)
+            self.cycle_store.write(cycle_path, state)
+            self._advance_cycle(cycle_path, state, "preflight", inspector, "preflight_verified")
+            self._advance_cycle(cycle_path, state, "feature_selected", inspector, selection.reason)
+            self._advance_cycle(
+                cycle_path,
+                state,
+                "branch_preparing",
+                inspector,
+                "repository_session_owns_branch_preparation",
+            )
+            self._transition_project(
+                project,
+                project_state,
+                "feature_running",
+                run_id=run_id,
+                checkpoint="feature_session_launch",
+                feature=selection.feature_id,
+            )
+            result, repairs = self._launch_with_retries(SessionRequest(
+                action="feature_cycle", project=project, run_id=run_id, mode=mode, feature=selection.feature_id
+            ), inspector, "feature_in_progress", "implementation_repairs", reservation_held=True)
+            state["validation_attempts"].extend(repairs)
+            self.cycle_store.write(cycle_path, state)
+            evidence = self._reconcile_feature_evidence(
+                project,
+                inspector,
+                cycle_path,
+                state,
+                result,
+                reservation_held=True,
+            )
+            self._transition_project(
+                project,
+                project_state,
+                "feature_accepted",
+                run_id=run_id,
+                checkpoint="feature_integrated",
+                feature=selection.feature_id,
+            )
+            return evidence
+        finally:
+            if reservation is not None:
+                reservation.release(run_id)
 
     def _execute_queue_reconciliation(
         self, project: Project, mode: str, run_id: str, project_state: dict[str, Any]
     ) -> dict[str, Any]:
         inspector = RepositoryInspector(project.repository)
+        reservation = self._launch_lock(project, inspector)
+        reservation.acquire(make_lock_record(
+            project_id=project.project_id,
+            repository_identity=inspector.identity()["repository_id"],
+            run_id=run_id,
+            current_feature=None,
+            current_phase="queue_reconciliation",
+        ))
+        try:
+            return self._execute_queue_reconciliation_locked(
+                project, mode, run_id, project_state, inspector
+            )
+        finally:
+            reservation.release(run_id)
+
+    def _execute_queue_reconciliation_locked(
+        self,
+        project: Project,
+        mode: str,
+        run_id: str,
+        project_state: dict[str, Any],
+        inspector: RepositoryInspector,
+    ) -> dict[str, Any]:
         if not inspector.is_clean:
             raise ConveyorError("queue reconciliation cannot mutate a dirty repository")
         result, repairs = self._launch_with_retries(SessionRequest(
             action="queue_reconciliation", project=project, run_id=run_id, mode=mode
-        ), inspector, "queue_reconciliation", "queue_reconciliation_repairs")
+        ), inspector, "queue_reconciliation", "queue_reconciliation_repairs", reservation_held=True)
         classification = result.result_classification
         if classification in {"session_execution_failed", "structured_output_invalid", None}:
             message = self._session_failure_message(project, run_id, result, project_state["current_state"])
@@ -595,32 +855,86 @@ class CycleEngine:
         }
 
     def _execute_milestone_gate(
-        self, project: Project, mode: str, run_id: str, project_state: dict[str, Any]
+        self,
+        project: Project,
+        mode: str,
+        run_id: str,
+        project_state: dict[str, Any],
+        *,
+        reservation_held: bool = False,
     ) -> dict[str, Any]:
         inspector = RepositoryInspector(project.repository)
-        inspector.ensure_runtime_ignored()
+        reservation = None if reservation_held else self._launch_lock(project, inspector)
+        if reservation is not None:
+            reservation.acquire(make_lock_record(
+                project_id=project.project_id,
+                repository_identity=inspector.identity()["repository_id"],
+                run_id=run_id,
+                current_feature=project_state.get("current_feature"),
+                current_phase="milestone_gate_preflight",
+            ))
+        try:
+            repository = inspector.inspect(
+                baseline=project.validated_baseline_commit,
+                milestone_branch=project.milestone_branch,
+            )
+            if (
+                repository.get("clean") is not True
+                or any(repository.get("git_operations", {}).values())
+                or repository.get("branch") != project.milestone_branch
+                or repository.get("head") != repository.get("milestone_branch_head")
+            ):
+                raise RecoveryError("milestone gate requires the clean configured milestone HEAD")
+            inspector.ensure_runtime_ignored()
+            cycle_path = inspector.cycle_state_path()
+            state = self.cycle_store.read(cycle_path)
+            if state is None or state.get("current_phase") == "completed":
+                state = self._new_cycle_state(project, run_id, inspector, None)
+                self.cycle_store.write(cycle_path, state)
+                self._advance_cycle(cycle_path, state, "preflight", inspector, "milestone_preflight")
+                self._advance_cycle(cycle_path, state, "milestone_gate", inspector, "milestone_gate_launch")
+            elif state["current_phase"] == "feature_integrated":
+                self._advance_cycle(cycle_path, state, "milestone_gate", inspector, "milestone_gate_launch")
+            elif state["current_phase"] != "milestone_gate":
+                raise ConveyorError(f"cycle phase {state['current_phase']} cannot enter milestone gate")
+            self._transition_project(
+                project,
+                project_state,
+                "milestone_gate",
+                run_id=run_id,
+                checkpoint="milestone_gate_launch",
+            )
+            result = self._launch_session(SessionRequest(
+                action="milestone_gate", project=project, run_id=run_id, mode=mode
+            ), inspector, "milestone_gate", reservation_held=True)
+            return self._finalize_milestone_gate_result(
+                project, run_id, project_state, inspector, state, result
+            )
+        finally:
+            if reservation is not None:
+                reservation.release(run_id)
+
+    def _finalize_milestone_gate_result(
+        self,
+        project: Project,
+        run_id: str,
+        project_state: dict[str, Any],
+        inspector: RepositoryInspector,
+        state: dict[str, Any],
+        result: SessionResult,
+    ) -> dict[str, Any]:
         cycle_path = inspector.cycle_state_path()
-        state = self.cycle_store.read(cycle_path)
-        if state is None or state.get("current_phase") == "completed":
-            state = self._new_cycle_state(project, run_id, inspector, None)
-            self.cycle_store.write(cycle_path, state)
-            self._advance_cycle(cycle_path, state, "preflight", inspector, "milestone_preflight")
-            self._advance_cycle(cycle_path, state, "milestone_gate", inspector, "milestone_gate_launch")
-        elif state["current_phase"] == "feature_integrated":
-            self._advance_cycle(cycle_path, state, "milestone_gate", inspector, "milestone_gate_launch")
-        elif state["current_phase"] != "milestone_gate":
-            raise ConveyorError(f"cycle phase {state['current_phase']} cannot enter milestone gate")
-        self._transition_project(project, project_state, "milestone_gate", run_id=run_id, checkpoint="milestone_gate_launch")
-        result = self._launch_session(SessionRequest(
-            action="milestone_gate", project=project, run_id=run_id, mode=mode
-        ), inspector, "milestone_gate")
         state["session_id"] = result.session_id
         if result.returncode != 0:
             self._advance_cycle(cycle_path, state, "failed", inspector, "milestone_gate_session_failed")
             raise SessionError("milestone gate session returned non-zero")
         queue = FeatureQueue.from_location(project.repository, project.queue_location)
         milestone = queue.milestone(project.active_milestone or "")
-        if milestone is None or milestone.get("status") != "gate_passed" or not queue.milestone_complete(project.active_milestone or ""):
+        if (
+            milestone is None
+            or milestone.get("status") != "gate_passed"
+            or not queue.milestone_complete(project.active_milestone or "")
+        ):
             raise QueueError("milestone gate response lacks corroborating gate_passed queue evidence")
         if not inspector.is_clean:
             raise ConveyorError("milestone branch is not clean after gate")
@@ -630,7 +944,16 @@ class CycleEngine:
             "milestone_branch": project.milestone_branch,
             "default_branch_merge_performed": False,
         }
-        self._transition_project(project, project_state, "milestone_ready_for_merge", run_id=run_id, checkpoint="milestone_gate_passed", stop_reason="human milestone merge approval required", human_gate=gate)
+        self._transition_project(
+            project,
+            project_state,
+            "milestone_ready_for_merge",
+            run_id=run_id,
+            checkpoint="milestone_gate_passed",
+            stop_reason="human milestone merge approval required",
+            human_gate=gate,
+            state_evidence=self._milestone_state_evidence(project, inspector, gate=True),
+        )
         return {"outcome": "milestone_ready_for_merge", "human_gate": gate}
 
     def _finish_resumed_feature(
@@ -640,6 +963,8 @@ class CycleEngine:
         inspector: RepositoryInspector,
         state: dict[str, Any],
         evidence: dict[str, Any],
+        *,
+        reservation_held: bool = False,
     ) -> dict[str, Any]:
         cycle_path = inspector.cycle_state_path()
         project_state = self._project_document(project, run_id, inspector.identity()["path_fingerprint"])
@@ -652,7 +977,16 @@ class CycleEngine:
         if queue.milestone_complete(project.active_milestone or ""):
             if state["current_phase"] in {"feature_integrated", "next_feature_selection"}:
                 self._advance_cycle(cycle_path, state, "milestone_gate", inspector, "resumed_milestone_complete")
-            return {"project_id": project.project_id, **self._execute_milestone_gate(project, "resume", run_id, project_state)}
+            return {
+                "project_id": project.project_id,
+                **self._execute_milestone_gate(
+                    project,
+                    "resume",
+                    run_id,
+                    project_state,
+                    reservation_held=reservation_held,
+                ),
+            }
         if state["current_phase"] == "feature_integrated":
             self._advance_cycle(cycle_path, state, "next_feature_selection", inspector, "resumed_next_feature_selection")
         if state["current_phase"] == "next_feature_selection":
@@ -661,11 +995,20 @@ class CycleEngine:
             self._transition_project(project, project_state, "feature_ready", run_id=run_id, checkpoint="resumed_next_feature_ready")
         if project.automation_mode == "one_feature":
             return {"project_id": project.project_id, "outcome": "feature_integrated", **evidence}
+        if reservation_held:
+            return {
+                "project_id": project.project_id,
+                "outcome": "feature_integrated",
+                "_continue_mode": project.automation_mode,
+                **evidence,
+            }
         return self.run_project(project, project.automation_mode)
 
     def resume_project(self, project: Project, run_id: str | None = None) -> dict[str, Any]:
         inspector = RepositoryInspector(project.repository)
-        state = self.cycle_store.read(inspector.cycle_state_path())
+        cycle_path = inspector.cycle_state_path()
+        state = self.cycle_store.read(cycle_path)
+        cycle_fingerprint = hashlib.sha256(cycle_path.read_bytes()).hexdigest() if cycle_path.exists() else None
         assessment = assess_recovery(project, state)
         if assessment.outcome != "resume" or state is None:
             return {"project_id": project.project_id, "outcome": assessment.outcome, "human_decision": assessment.human_decision}
@@ -681,44 +1024,113 @@ class CycleEngine:
         phase = str(assessment.resume_phase)
         if phase == "human_decision_required":
             return {"project_id": project.project_id, "outcome": "human_decision_required", "human_decision": state.get("human_decision_required")}
-        if phase in {"feature_integrated", "next_feature_selection"}:
-            feature, accepted, integrated = self._verify_integrated_feature(project, inspector, state)
-            evidence = {"feature": feature["id"], "accepted_commit": accepted, "integrated_commit": integrated}
-            return self._finish_resumed_feature(project, run_id, inspector, state, evidence)
-        if phase == "failed":
-            checkpoint = str(state.get("last_successful_checkpoint") or "")
-            if "milestone_gate" in checkpoint:
-                phase = "milestone_gate"
-            elif "integration" in checkpoint:
-                phase = "integration_pending"
-            else:
-                phase = "feature_in_progress"
-            self._advance_cycle(inspector.cycle_state_path(), state, phase, inspector, "focused_resume_after_failure")
-        if phase in {"integration_pending", "integrating", "integration_validation"}:
-            action = "milestone_integration"
-        elif phase == "milestone_gate":
-            action = "milestone_gate"
-        else:
-            action = "feature_cycle"
-        result = self._launch_session(SessionRequest(
-            action=action,
-            project=project,
+        reservation.acquire(make_lock_record(
+            project_id=project.project_id,
+            repository_identity=inspector.identity()["repository_id"],
             run_id=run_id,
-            mode="resume",
-            feature=state.get("current_feature"),
-            session_id=state.get("session_id"),
-        ), inspector, phase)
-        if action in {"feature_cycle", "milestone_integration"}:
-            evidence = self._reconcile_feature_evidence(project, inspector, inspector.cycle_state_path(), state, result)
-            return self._finish_resumed_feature(project, run_id, inspector, state, evidence)
-        project_state = self._project_document(project, run_id, inspector.identity()["path_fingerprint"])
-        return {"project_id": project.project_id, **self._execute_milestone_gate(project, "resume", run_id, project_state)}
+            current_feature=state.get("current_feature"),
+            current_phase=f"resume:{phase}",
+        ))
+        outcome: dict[str, Any]
+        try:
+            current_cycle_fingerprint = (
+                hashlib.sha256(cycle_path.read_bytes()).hexdigest() if cycle_path.exists() else None
+            )
+            current_assessment = assess_recovery(project, state)
+            writer = inspect_repository_writer_lock(
+                inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                ),
+                project.repository,
+            )
+            if (
+                current_cycle_fingerprint != cycle_fingerprint
+                or current_assessment.outcome != "resume"
+                or current_assessment.resume_phase != assessment.resume_phase
+                or writer.exists
+            ):
+                raise RecoveryError("cycle, Git, or writer-lock evidence changed during resume acquisition")
+            if phase in {"feature_integrated", "next_feature_selection"}:
+                feature, accepted, integrated = self._verify_integrated_feature(project, inspector, state)
+                evidence = {"feature": feature["id"], "accepted_commit": accepted, "integrated_commit": integrated}
+                outcome = self._finish_resumed_feature(
+                    project,
+                    run_id,
+                    inspector,
+                    state,
+                    evidence,
+                    reservation_held=True,
+                )
+            else:
+                if phase == "failed":
+                    checkpoint = str(state.get("last_successful_checkpoint") or "")
+                    if "milestone_gate" in checkpoint:
+                        phase = "milestone_gate"
+                    elif "integration" in checkpoint:
+                        phase = "integration_pending"
+                    else:
+                        phase = "feature_in_progress"
+                    self._advance_cycle(
+                        inspector.cycle_state_path(), state, phase, inspector, "focused_resume_after_failure"
+                    )
+                if phase in {"integration_pending", "integrating", "integration_validation"}:
+                    action = "milestone_integration"
+                elif phase == "milestone_gate":
+                    action = "milestone_gate"
+                else:
+                    action = "feature_cycle"
+                result = self._launch_session(SessionRequest(
+                    action=action,
+                    project=project,
+                    run_id=run_id,
+                    mode="resume",
+                    feature=state.get("current_feature"),
+                    session_id=state.get("session_id"),
+                ), inspector, phase, reservation_held=True)
+                if action in {"feature_cycle", "milestone_integration"}:
+                    evidence = self._reconcile_feature_evidence(
+                        project,
+                        inspector,
+                        inspector.cycle_state_path(),
+                        state,
+                        result,
+                        reservation_held=True,
+                    )
+                    outcome = self._finish_resumed_feature(
+                        project,
+                        run_id,
+                        inspector,
+                        state,
+                        evidence,
+                        reservation_held=True,
+                    )
+                else:
+                    project_state = self._project_document(
+                        project, run_id, inspector.identity()["path_fingerprint"]
+                    )
+                    outcome = {
+                        "project_id": project.project_id,
+                        **self._finalize_milestone_gate_result(
+                            project, run_id, project_state, inspector, state, result
+                        ),
+                    }
+        finally:
+            reservation.release(run_id)
+        continue_mode = outcome.pop("_continue_mode", None)
+        if continue_mode:
+            return self.run_project(project, str(continue_mode))
+        return outcome
 
     def reconcile_controller_state(self, project: Project, *, dry_run: bool) -> dict[str, Any]:
         """Reconcile only Conveyor-owned state from read-only queue and Git evidence."""
 
         effective = self.effective_project(project)
-        plan = build_project_plan(effective, self.configuration.conveyor, self.root)
+        persisted = self.load_project_state(project)
+        plan = self.project_plan(project)
+        reconciliation_document = persisted or self._project_document(
+            effective, None, plan["repository_path_fingerprint"]
+        )
+        assessment = assess_startup_reconciliation(effective, reconciliation_document, plan)
         queue_status = plan["queue_status"]
         classification = queue_status.get("reconciliation_classification", "invalid_queue")
         request = SessionRequest(
@@ -753,20 +1165,21 @@ class CycleEngine:
                 "launch_performed": False,
             },
             "application_repository_written": False,
+            **self._reconciliation_fields(assessment),
         }
         if dry_run:
             return result
-        if classification == "invalid_queue":
+        if classification == "invalid_queue" or assessment.classification == "invalid_state_evidence":
             raise QueueError(str(queue_status.get("error") or "queue validation failed"))
+        if assessment.classification == "human_decision_required":
+            raise RecoveryError(assessment.reason)
+        if assessment.classification == "active_cycle_resume":
+            raise RecoveryError("controller-state reconciliation requires resuming the corroborated active cycle")
         locks = plan["lock_status"]
         if plan.get("existing_active_cycle"):
             raise RecoveryError("controller-state reconciliation refuses an existing application cycle")
         if locks["repository_writer"]["exists"] or locks["controller_launch"]["exists"]:
             raise LockError("controller-state reconciliation refuses while a writer or launch lock exists")
-        if effective.current_state not in {"validation_failed", "queue_reconciliation", "paused", "conveyor_error"}:
-            raise RecoveryError(
-                f"controller-state reconciliation is not permitted from {effective.current_state!r}"
-            )
         inspector = RepositoryInspector(project.repository)
         repository_state = plan["repository_state"]
         if not repository_state["clean"] or any(repository_state["git_operations"].values()):
@@ -787,37 +1200,72 @@ class CycleEngine:
         committed_queue = inspector.file_at_commit("HEAD", relative_queue)
         if committed_queue is None or committed_queue != queue_path.read_text(encoding="utf-8"):
             raise RecoveryError("controller-state reconciliation requires queue evidence committed at HEAD")
-        run_id = f"recovery-{uuid.uuid4()}"
-        document = self._project_document(effective, run_id, inspector.identity()["path_fingerprint"])
         target = targets[classification]
-        self._transition_project(
-            effective,
-            document,
-            target,
-            run_id=run_id,
-            checkpoint=f"controller_state_recovered:{classification}",
-            stop_reason=(
-                "queue validated successfully; no dependency-ready feature exists"
-                if classification == "reconciled_no_ready_work" else None
-            ),
-        )
-        result.update({"run_id": run_id, "current_state": target, "state_recovered": True})
+        if assessment.would_persist:
+            run_id = f"recovery-{uuid.uuid4()}"
+            document = self._persist_startup_reconciliation(
+                effective, reconciliation_document, assessment, run_id=run_id
+            )
+            result.update({"run_id": run_id, "current_state": document["current_state"], "state_recovered": True})
+        else:
+            result.update({"run_id": None, "current_state": target, "state_recovered": False})
         return result
 
     def run_project(self, project: Project, mode: str, *, dry_run: bool = False) -> dict[str, Any]:
         if mode == "resume":
+            plan = self.project_plan(project)
             if dry_run:
-                return build_project_plan(self.effective_project(project), self.configuration.conveyor, self.root)
+                return plan
+            effective = self.effective_project(project)
+            persisted = self.load_project_state(project)
+            assessment = assess_startup_reconciliation(effective, persisted, plan)
+            if assessment.classification in {"human_decision_required", "invalid_state_evidence"}:
+                return {"project_id": project.project_id, "outcome": "human_decision_required", "plan": plan}
+            if assessment.would_persist:
+                if persisted is None:
+                    persisted = self._project_document(
+                        effective, None, plan["repository_path_fingerprint"]
+                    )
+                run_id = f"recovery-{uuid.uuid4()}"
+                document = self._persist_startup_reconciliation(
+                    effective, persisted, assessment, run_id=run_id
+                )
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "state_repaired",
+                    "current_state": document["current_state"],
+                    "selected_feature": assessment.evidence.get("selected_feature"),
+                    "next_action": f"scripts/conveyor run --project {project.project_id} --mode {project.automation_mode}",
+                }
+            if plan.get("stale_cycle_evidence") and not plan.get("existing_active_cycle"):
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "no_active_cycle",
+                    "current_state": assessment.derived_state,
+                    "selected_feature": assessment.evidence.get("selected_feature"),
+                    "next_action": f"scripts/conveyor run --project {project.project_id} --mode {project.automation_mode}",
+                }
             return self.resume_project(self.effective_project(project))
         effective = self.effective_project(project)
-        plan = build_project_plan(effective, self.configuration.conveyor, self.root)
+        plan = self.project_plan(project)
         if dry_run or mode == "audit":
             return plan
         if plan["proposed_next_action"] in {"disabled", "repository_dirty", "writer_locked", "human_decision_required", "conveyor_error"}:
             return {"project_id": project.project_id, "outcome": plan["proposed_next_action"], "plan": plan}
         run_id = str(uuid.uuid4())
         inspector = RepositoryInspector(project.repository)
-        project_state = self._project_document(effective, run_id, inspector.identity()["path_fingerprint"])
+        persisted = self.load_project_state(project)
+        assessment = assess_startup_reconciliation(effective, persisted, plan)
+        if assessment.would_persist:
+            persisted = persisted or self._project_document(
+                effective, None, inspector.identity()["path_fingerprint"]
+            )
+            project_state = self._persist_startup_reconciliation(
+                effective, persisted, assessment, run_id=run_id
+            )
+            effective = replace(effective, current_state=project_state["current_state"])
+        else:
+            project_state = self._project_document(effective, run_id, inspector.identity()["path_fingerprint"])
         completed_features = 0
         while True:
             effective = replace(effective, current_state=project_state["current_state"])
@@ -830,26 +1278,67 @@ class CycleEngine:
                 if mode == "one_feature":
                     continue
             elif action == "feature_cycle":
-                evidence = self._execute_feature(effective, mode, run_id, project_state)
-                completed_features += 1
-                queue = FeatureQueue.from_location(project.repository, project.queue_location)
-                inspector = RepositoryInspector(project.repository)
-                cycle_path = inspector.cycle_state_path()
-                cycle_state = self.cycle_store.read(cycle_path)
-                if cycle_state is None:
-                    raise ConveyorError("feature integration completed without durable cycle state")
-                if queue.milestone_complete(project.active_milestone or ""):
-                    if mode == "one_feature":
-                        self._advance_cycle(cycle_path, cycle_state, "completed", inspector, "one_feature_stop")
-                        self._transition_project(project, project_state, "milestone_gate", run_id=run_id, checkpoint="milestone_complete", feature=evidence["feature"])
-                        return {"project_id": project.project_id, "outcome": "one_feature_integrated", **evidence}
-                    return {"project_id": project.project_id, **self._execute_milestone_gate(effective, mode, run_id, project_state)}
-                else:
-                    self._advance_cycle(cycle_path, cycle_state, "next_feature_selection", inspector, "next_feature_recalculated")
+                cycle_reservation = self._launch_lock(effective, inspector)
+                cycle_reservation.acquire(make_lock_record(
+                    project_id=project.project_id,
+                    repository_identity=inspector.identity()["repository_id"],
+                    run_id=run_id,
+                    current_feature=plan.get("selected_feature"),
+                    current_phase="feature_execution",
+                ))
+                try:
+                    evidence = self._execute_feature(
+                        effective,
+                        mode,
+                        run_id,
+                        project_state,
+                        reservation_held=True,
+                    )
+                    completed_features += 1
+                    queue = FeatureQueue.from_location(project.repository, project.queue_location)
+                    inspector = RepositoryInspector(project.repository)
+                    cycle_path = inspector.cycle_state_path()
+                    cycle_state = self.cycle_store.read(cycle_path)
+                    if cycle_state is None:
+                        raise ConveyorError("feature integration completed without durable cycle state")
+                    if queue.milestone_complete(project.active_milestone or ""):
+                        if mode == "one_feature":
+                            self._advance_cycle(cycle_path, cycle_state, "completed", inspector, "one_feature_stop")
+                            self._transition_project(
+                                project,
+                                project_state,
+                                "milestone_gate",
+                                run_id=run_id,
+                                checkpoint="milestone_complete",
+                                feature=evidence["feature"],
+                            )
+                            return {"project_id": project.project_id, "outcome": "one_feature_integrated", **evidence}
+                        return {
+                            "project_id": project.project_id,
+                            **self._execute_milestone_gate(
+                                effective,
+                                mode,
+                                run_id,
+                                project_state,
+                                reservation_held=True,
+                            ),
+                        }
+                    self._advance_cycle(
+                        cycle_path, cycle_state, "next_feature_selection", inspector, "next_feature_recalculated"
+                    )
                     self._advance_cycle(cycle_path, cycle_state, "completed", inspector, "feature_cycle_complete")
-                    self._transition_project(project, project_state, "feature_ready", run_id=run_id, checkpoint="next_feature_recalculated", feature=None)
-                if mode == "one_feature":
-                    return {"project_id": project.project_id, "outcome": "one_feature_integrated", **evidence}
+                    self._transition_project(
+                        project,
+                        project_state,
+                        "feature_ready",
+                        run_id=run_id,
+                        checkpoint="next_feature_recalculated",
+                        feature=None,
+                    )
+                    if mode == "one_feature":
+                        return {"project_id": project.project_id, "outcome": "one_feature_integrated", **evidence}
+                finally:
+                    cycle_reservation.release(run_id)
             elif action == "milestone_gate":
                 return {"project_id": project.project_id, **self._execute_milestone_gate(effective, mode, run_id, project_state)}
             else:

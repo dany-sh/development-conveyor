@@ -52,7 +52,7 @@ def synthetic_repository(root: Path, feature_status: str = "ready") -> tuple[Pat
             "milestone_branch_pattern": "codex/{milestone_id_lower}-{slug}",
             "branch_after_integration": "milestone",
         },
-        "integration": {"enabled": True, "strategy": "cherry_pick"},
+        "integration": {"enabled": True, "strategy": "cherry_pick", "rerun_milestone_gates": True},
         "commands": {"build": [], "test": [], "lint": [], "package": [], "validate": []},
     }
     queue = {

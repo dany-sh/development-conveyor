@@ -15,6 +15,7 @@
     "last_checkpoint": {"type": ["string", "null"]},
     "stop_reason": {"type": ["string", "null"]},
     "human_decision_required": {"type": ["object", "null"]},
+    "state_evidence": {"type": ["object", "null"]},
     "created_at": {"type": "string"},
     "updated_at": {"type": "string"}
   }

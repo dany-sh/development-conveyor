@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -71,11 +72,16 @@ def build_project_plan(
         }
 
     active_cycle: dict[str, Any] | None = None
+    cycle_document: dict[str, Any] | None = None
+    cycle_fingerprint: str | None = None
     cycle_path = inspector.cycle_state_path()
     if cycle_path.exists():
         try:
-            value = json.loads(cycle_path.read_text(encoding="utf-8"))
+            cycle_bytes = cycle_path.read_bytes()
+            value = json.loads(cycle_bytes)
             if isinstance(value, dict):
+                cycle_document = value
+                cycle_fingerprint = hashlib.sha256(cycle_bytes).hexdigest()
                 active_cycle = {
                     "run_id": value.get("conveyor_run_id"),
                     "phase": value.get("current_phase"),
@@ -98,6 +104,78 @@ def build_project_plan(
     writer_record = lock.record or {}
     writer_run = writer_record.get("agent_run") or writer_record.get("run_id")
     writer_owned_by_active_cycle = bool(active_cycle and writer_run == active_cycle.get("run_id"))
+    stale_cycle_evidence: dict[str, Any] | None = None
+    if active_cycle and cycle_document:
+        if active_cycle.get("phase") == "completed":
+            stale_cycle_evidence = {
+                **active_cycle,
+                "classification": "completed_cycle_evidence",
+                "reason": "The repository-local cycle is complete and is not active work.",
+            }
+            active_cycle = None
+        if active_cycle is not None:
+            expected_head = cycle_document.get("feature_starting_commit") or cycle_document.get(
+                "milestone_pre_integration_commit"
+            )
+            recorded_identity = cycle_document.get("repository_identity")
+            last_git = cycle_document.get("last_verified_git_state")
+            feature_id = str(active_cycle.get("feature") or "")
+            feature_branch_exists = any(
+                feature_id.lower() in branch.lower() for branch in repository.get("local_branches", [])
+            )
+            worktrees = repository.get("worktrees", [])
+            exact_single_worktree = (
+                len(worktrees) == 1
+                and Path(str(worktrees[0].get("worktree"))).resolve() == project.repository.resolve()
+            )
+            orphaned_prelaunch = (
+                active_cycle.get("phase") == "branch_preparing"
+                and active_cycle.get("checkpoint") == "repository_session_owns_branch_preparation"
+                and cycle_document.get("session_id") is None
+                and not lock.exists
+                and not (launch_status and launch_status.exists)
+                and repository["clean"]
+                and not git_operation_active
+                and repository["branch"] == project.milestone_branch
+                and exact_single_worktree
+                and not feature_branch_exists
+                and isinstance(expected_head, str)
+                and repository["head"] == expected_head
+                and cycle_document.get("milestone_pre_integration_commit") == repository["head"]
+                and cycle_document.get("project_id") == project.project_id
+                and cycle_document.get("active_milestone") == project.active_milestone
+                and cycle_document.get("milestone_branch") == project.milestone_branch
+                and cycle_document.get("repository_path_fingerprint")
+                == repository["identity"]["path_fingerprint"]
+                and isinstance(recorded_identity, dict)
+                and recorded_identity.get("repository_id") == repository["identity"]["repository_id"]
+                and cycle_document.get("feature_branch") is None
+                and cycle_document.get("feature_worktree") is None
+                and cycle_document.get("writer_lock_identity") is None
+                and cycle_document.get("validation_attempts") == []
+                and cycle_document.get("review_attempts") == []
+                and cycle_document.get("integration_attempts") == []
+                and cycle_document.get("stop_reason") is None
+                and cycle_document.get("human_decision_required") is None
+                and isinstance(last_git, dict)
+                and last_git.get("branch") == repository["branch"]
+                and last_git.get("head") == repository["head"]
+                and last_git.get("clean") is True
+                and not any((last_git.get("git_operations") or {}).values())
+                and selection is not None
+                and active_cycle.get("feature") == selection.feature_id
+            )
+            if orphaned_prelaunch:
+                stale_cycle_evidence = {
+                    **active_cycle,
+                    "classification": "orphaned_prelaunch_cycle",
+                    "reason": (
+                        "The cycle stopped after its pre-launch checkpoint, before a session, lock, "
+                        "branch change, or repository mutation."
+                    ),
+                    "cycle_fingerprint": cycle_fingerprint,
+                }
+                active_cycle = None
     if not project.enabled:
         action = "disabled"
         stop = "Project is disabled."
@@ -172,6 +250,7 @@ def build_project_plan(
         "repository_path_fingerprint": identity["path_fingerprint"],
         "current_state": project.current_state,
         "existing_active_cycle": active_cycle,
+        "stale_cycle_evidence": stale_cycle_evidence,
         "lock_status": {
             "repository_writer": {
                 "exists": lock.exists,

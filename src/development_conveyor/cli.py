@@ -14,7 +14,7 @@ from .cycle_engine import CycleEngine
 from .errors import ConveyorError
 from .redaction import redact_text
 from .registry import ProjectRegistry
-from .reporting import build_project_plan, portfolio_status, render_json
+from .reporting import render_json
 from .queue import FeatureQueue, resolve_queue_path
 from .scheduler import PortfolioScheduler
 from .sessions import SessionLauncher
@@ -144,9 +144,18 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
 
     if args.command == "status":
         if args.project:
-            project = engine.effective_project(registry.get(args.project))
-            return build_project_plan(project, configuration.conveyor, controller_root)
-        return portfolio_status([engine.effective_project(item) for item in registry.all()], configuration.conveyor, controller_root)
+            return engine.project_plan(registry.get(args.project))
+        projects = [engine.project_plan(item) for item in registry.all()]
+        counts: dict[str, int] = {}
+        for item in projects:
+            action = str(item.get("proposed_next_action"))
+            counts[action] = counts.get(action, 0) + 1
+        return {
+            "schema_version": 1,
+            "project_count": len(projects),
+            "action_counts": counts,
+            "projects": projects,
+        }
 
     if args.command == "plan":
         return engine.run_project(registry.get(args.project), "audit", dry_run=True)

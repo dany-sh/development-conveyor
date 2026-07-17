@@ -56,6 +56,24 @@ class RepositoryInspector:
                 return Path(line.removeprefix("worktree ")).resolve()
         return self.root
 
+    def worktrees(self) -> list[dict[str, str | None]]:
+        entries: list[dict[str, str | None]] = []
+        current: dict[str, str | None] = {}
+        for line in self.git(["worktree", "list", "--porcelain"]).stdout.splitlines() + [""]:
+            if not line:
+                if current:
+                    entries.append(current)
+                    current = {}
+                continue
+            key, _, value = line.partition(" ")
+            if key in {"worktree", "HEAD", "branch"}:
+                current[key] = value or None
+        return entries
+
+    def local_branches(self) -> list[str]:
+        output = self.git(["for-each-ref", "--format=%(refname:short)", "refs/heads/"]).stdout
+        return [line for line in output.splitlines() if line]
+
     @property
     def current_branch(self) -> str | None:
         value = self.git(["branch", "--show-current"]).stdout.strip()
@@ -147,6 +165,9 @@ class RepositoryInspector:
     def commit_subject(self, commit: str) -> str:
         return self.git(["show", "-s", "--format=%s", commit]).stdout.strip()
 
+    def commit_timestamp(self, commit: str) -> str:
+        return self.git(["show", "-s", "--format=%cI", commit]).stdout.strip()
+
     def file_at_commit(self, commit: str, relative_path: str) -> str | None:
         """Return a repository file at a commit without reading outside the tree."""
 
@@ -173,13 +194,17 @@ class RepositoryInspector:
         return {
             "identity": identity,
             "head": self.head,
+            "head_commit_timestamp": self.commit_timestamp(self.head),
             "branch": self.current_branch,
             "clean": self.is_clean,
             "dirty_entry_count": len(self.dirty_entries),
             "git_operations": operations,
             "baseline_exists": baseline_exists,
             "milestone_branch_exists": milestone_exists,
+            "milestone_branch_head": self.rev_parse(milestone_branch, check=False) if milestone_branch else None,
             "baseline_is_ancestor_of_milestone": baseline_is_ancestor,
             "cycle_state_exists": self.cycle_state_path().exists(),
             "writer_lock_exists": self.writer_lock_path().exists(),
+            "worktrees": self.worktrees(),
+            "local_branches": self.local_branches(),
         }

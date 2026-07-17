@@ -95,7 +95,9 @@ Accepted or integrated work is never reimplemented. The Case Manager registratio
 
 ## Interruption and resume
 
-Startup reconciliation compares portfolio state, repository cycle state, writer lock, identity and path fingerprint, HEAD, branch, worktrees, Git operations, queue evidence, and accepted/integrated commits. Matching evidence resumes from the last verified checkpoint. A material disagreement produces a human-decision report with safe options and an exact resume command.
+Startup reconciliation compares portfolio state, repository cycle state, writer and controller locks, identity and path fingerprint, HEAD, branch, Git operations, queue evidence, selected ready work, accepted/integrated commits, and timestamped milestone-gate evidence. Matching evidence resumes from the last verified checkpoint. A safely repairable stale conclusion is checkpointed through `queue_reconciliation` before scheduling; material disagreement produces a human-decision report with safe options and an exact resume command.
+
+A pre-launch `branch_preparing` checkpoint is treated as an orphan rather than resumable work only when there is no session ID, lock, branch change, Git operation, or repository mutation and the recorded feature and starting commit still match deterministic selection. The controller leaves that repository-local evidence untouched while repairing only its portfolio state. A previously passed `milestone_ready_for_merge` gate is reopened only when timestamped gate inputs changed and `.factory/project.yaml` explicitly permits rerunning milestone gates.
 
 Resume never resets, cleans, stashes, force-checks out, abandons a conflict, duplicates a branch, creates a second accepted commit, or repeats integration.
 
@@ -117,7 +119,7 @@ Sensitive subprocess output is redacted before persistence. Access tokens, API k
 
 | Project | Repository | Active milestone | Current registration | Next safe action |
 | --- | --- | --- | --- | --- |
-| `case-manager` | `${HOME}/Developer/conan-case-manager` | `P0` | Reconciled from legacy failed pilot state | `P0` resolves to queue milestone `phase-0`; P0-002 is completed at the protected accepted commit, so the next action is the milestone gate, not feature implementation. |
+| `case-manager` | `${HOME}/Developer/conan-case-manager` | `P0` | Startup reconciliation preserves P0-002 and selects P0-001 | `P0` resolves to queue milestone `phase-0`; P0-002 remains completed and P0-001 is the deterministic next feature. |
 | `interview-companion` | `${HOME}/Developer/Live_Interview_Companion` | `M0` | `human_decision_required` | Preserve and reconcile the retained integration writer lease before scheduling. F002 metadata was independently verified. |
 
 Registration is independent: no Case Manager milestone, branch, feature, or commit is copied into Interview Companion.
@@ -138,7 +140,7 @@ scripts/conveyor resume --project case-manager
 scripts/conveyor run --mode portfolio
 ```
 
-Add `--dry-run` to `run` or `resume` to prevent application writes and session launches. `status` and `plan` are always read-only. `reconcile --dry-run` validates the exact read-only reconciliation session plan; `reconcile` without that flag updates only Conveyor-owned project state from deterministic evidence.
+Add `--dry-run` to `run` or `resume` to prevent application writes and session launches. `status` and `plan` are always read-only. Dry-run output reports `persisted_state`, `derived_state`, `state_consistency`, `repair_transition_path`, `execution_state_path`, and `would_persist_state_repair`. `reconcile --dry-run` validates the exact read-only reconciliation session plan; `reconcile` without that flag updates only Conveyor-owned project state from deterministic evidence.
 
 The exact pilot dry run is:
 
@@ -146,7 +148,7 @@ The exact pilot dry run is:
 scripts/conveyor run --project case-manager --mode milestone --dry-run
 ```
 
-It must resolve `docs/FEATURE_QUEUE.yaml`, match configured `P0` to queue milestone `phase-0`, report the actual feature count, recognize completed P0-002 without selecting it, and propose the milestone gate.
+It must resolve `docs/FEATURE_QUEUE.yaml`, match configured `P0` to queue milestone `phase-0`, report the actual feature count, preserve completed P0-002, select ready P0-001, and show `feature_ready` before `feature_running` in the proposed execution path.
 
 ## Goal Mode
 

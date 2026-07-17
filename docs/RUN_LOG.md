@@ -66,3 +66,46 @@ This log records model configuration and deterministic deployment evidence. It n
 - `scripts/conveyor run --project case-manager --mode milestone --dry-run`: P0 matched `phase-0`; P0-002 completed at `4c43aa5cd870ddb4962eceb1fbe35c648efa3e18`; no selected feature; next action `milestone_gate`.
 - Controller-only state recovery moved Case Manager from the failed pilot state to `milestone_gate`; no application cycle or writer lock was created.
 - Adversarial re-review: no Critical, High, or Medium findings remain.
+
+### Model execution — 2026-07-17T20:26:16+00:00
+
+- Agent role: `deterministic-validation`
+- Effective model: `none (deterministic script)`
+- Effective reasoning effort: `none`
+- Configuration source: `deterministic_script`
+- Event: `start`
+- Reason code: `stale_state_synthetic_test_suite`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-17T20:26:39+00:00
+
+- Agent role: `controller-repair-writer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `global_default`
+- Event: `start`
+- Reason code: `stale_state_reconciliation_repair`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-17T20:51:09+00:00
+
+- Agent role: `adversarial-reviewer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `xhigh`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `stale_state_reconciliation_adversarial_review`
+- Safety and autonomy contracts unchanged: `true`
+
+### Stale-state reconciliation repair — 2026-07-17
+
+- Root cause: startup trusted a persisted `milestone_gate` state after repository evidence changed, so execution attempted an invalid direct `milestone_gate -> feature_running` transition even though milestone P0 was incomplete and P0-001 was dependency-ready.
+- Repair: startup now derives controller state from queue, milestone, Git, cycle, gate-provenance, and lock evidence; stale execution state is repaired only through `queue_reconciliation`, with the persisted path `milestone_gate -> queue_reconciliation -> feature_ready` before any feature launch.
+- Dry-run diagnostics now report persisted state, derived state, consistency classification, proposed repair path, execution path, and whether execution would persist the repair without mutating state.
+- Reservation coverage now includes reconciliation, feature launch/result processing, resume, and milestone-gate launch/finalization, with under-lock revalidation of Git, queue, selection, cycle fingerprint, worktrees, branches, and writer-lock evidence.
+- Synthetic validation: `python3 -m unittest discover -s tests -q` passed all 89 tests; isolated-environment `pytest` passed all 89 tests in 47.98 seconds.
+- Compile validation: `python3 -m compileall src scripts` passed. The exact `python -m compileall src scripts` command was unavailable on this host because no `python` executable is installed.
+- Configuration validation: `scripts/conveyor validate-config` passed with Goal Mode enabled and two registered projects.
+- Live controller recovery: Case Manager moved from `milestone_gate` to `feature_ready` through `queue_reconciliation`; P0-001 remains selected, P0-002 remains completed, P0 remains incomplete, and no feature session was launched.
+- Application isolation: exact before/after comparison of Case Manager tracked-file hashes, refs, branch/HEAD, cycle bytes, and writer-lock absence matched; no Case Manager file, branch, commit, cycle record, or lock changed.
+- Adversarial re-review: no Critical, High, or Medium findings remain.
