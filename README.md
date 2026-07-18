@@ -49,6 +49,8 @@ Portfolio project states:
 ```text
 discover bootstrap_required baseline_required queue_reconciliation
 feature_ready feature_running feature_review feature_accepted
+integration_pending integration_ready integrating integration_validation
+integration_blocked feature_integrated
 milestone_gate milestone_ready_for_merge human_merge_approval next_milestone
 human_decision_required repository_dirty validation_failed
 architecture_decision_required destructive_change_required conveyor_error
@@ -59,14 +61,14 @@ Repository cycle phases:
 
 ```text
 idle preflight feature_selected branch_preparing feature_in_progress
-feature_review feature_repair feature_accepted integration_pending integrating
+feature_review feature_repair feature_accepted integration_pending integration_ready integrating
 integration_validation feature_integrated next_feature_selection milestone_gate
 completed blocked human_decision_required failed
 ```
 
 Every allowed edge is explicit in `state_machine.py`; unknown and invalid edges fail. Reapplying the current state is an idempotent no-op.
 
-Portfolio project state is stored under `state/projects/<project-id>.json`. Active repository cycle state is stored under `<application-repository>/.factory/conveyor-state.json`. State writes are atomic and schema-validated. Repository-local runtime paths are ignored through local Git metadata, not tracked application files.
+Portfolio project state is stored under `state/projects/<project-id>.json`. Active repository cycle state is stored under `<application-repository>/.factory/conveyor-state.json`. Milestone-integration runtime evidence is stored under `<application-repository>/.factory/runtime/milestone-integration/`; legacy `.git/factory-integration` records are read-only recovery evidence. Reads never create either directory, simultaneous disagreeing records stop, and new runtime writes require the controller to verify `.factory/runtime/` in local Git exclude first. State writes are atomic and schema-validated.
 
 ### Explicit human-decision resolution
 
@@ -103,7 +105,7 @@ Read-only status remains available while either lock exists. A timestamp never p
 For one selected feature, the execution engine:
 
 1. Verifies exact repository identity, clean state, queue validity, active milestone, baseline, milestone branch, dependencies, active cycles, and locks.
-2. Selects exactly one ready feature by numeric/P-level priority, dependency depth, queue order, then feature ID.
+2. Selects a unique `accepted` or `integration_pending` feature before any new ready feature. Only when no integration candidate exists does it select ready work by numeric/P-level priority, dependency depth, queue order, then feature ID.
 3. Resolves a null queue integration base to the verified milestone HEAD, validates repository identity, clean Git state, queue fingerprint, selected feature, dependency evidence, feature starting commit, and milestone pre-integration commit, then persists the preflight, selection, and branch-preparation checkpoints.
 4. Launches a repository-scoped `$feature-factory` session with the exact project, milestone, feature, run identity, mode, and prohibitions.
 5. Requires the installed role-pinned exploration, implementation, test, and adversarial-review workflow.
@@ -119,6 +121,8 @@ An isolated feature-branch pass is never treated as completion.
 No ready feature is classified as planning refinement, a complete milestone, a legitimate blocker, or a human decision from deterministic evidence. When repository reconciliation is required, its session first invokes `product-architect` in planning-only mode, then uses `$feature-inventory` for evidence-supported queue or feature-specification edits. The session must return the structured contract in `docs/QUEUE_RECONCILIATION_CONTRACT.md`; a valid no-ready result succeeds at the controller level and stops at a safe planning checkpoint.
 
 Accepted or integrated work is never reimplemented. The Case Manager registration explicitly preserves P0-002 and commit `4c43aa5cd870ddb4962eceb1fbe35c648efa3e18`.
+
+Milestone integration has its own terminal contract. The final nonblank line of the terminal assistant result must contain exactly one of `INTEGRATED`, `VALIDATION_FAILED`, `HUMAN_DECISION_REQUIRED`, `SEMANTIC_CONFLICT`, `RETRYABLE_INTEGRATION_FAILURE`, or `TERMINAL_INTEGRATION_FAILURE`. Prompt/user/tool echoes, earlier assistant messages, missing markers, trailing text, and duplicates cannot authorize success. A live human gate additionally requires one validated `CONVEYOR_INTEGRATION_GATE=` descriptor; the one pinned legacy Case Manager report is the only descriptor-free recovery exception. A valid human gate is persisted as `integration_blocked -> human_decision_required`, releases its owned integration lease, and refuses ordinary resume.
 
 ## Interruption and resume
 
@@ -172,7 +176,7 @@ scripts/conveyor run --mode portfolio
 
 Add `--dry-run` to `run` or `resume` to prevent application writes and session launches. `status` and `plan` are always read-only. Dry-run output reports `persisted_state`, `derived_state`, `state_consistency`, `repair_transition_path`, `execution_state_path`, and `would_persist_state_repair`. `reconcile --dry-run` validates the exact read-only reconciliation session plan; `reconcile` without that flag updates only Conveyor-owned project state from deterministic evidence.
 
-Human-resolution output includes `resolution_accepted`, `resolution_rejected`, or `already_resolved`; the deterministic resolution ID and fingerprint; original gate; expected identity, milestone, branch, and HEAD; every validator and result; previous and approved next state; transition path; application/write flags; report and audit locations; and the next safe action. Rejections exit nonzero. Resolution does not launch Product Architect, Feature Inventory, or Feature Factory; the next normal run performs queue reconciliation.
+Human-resolution output includes `resolution_accepted`, `resolution_rejected`, or `already_resolved`; the deterministic resolution ID and fingerprint; original gate; expected identity, milestone, branch, and HEAD; every validator and result; previous and approved next state; transition path; application/write flags; report and audit locations; and the next safe action. Rejections exit nonzero. Resolution does not launch Product Architect, Feature Inventory, Feature Factory, or Milestone Integrator. A planning-baseline integration approval durably enters `integration_ready`; the next normal run launches a fresh role-pinned Milestone Integrator session, while other gate types continue through queue reconciliation.
 
 The exact pilot dry run is:
 

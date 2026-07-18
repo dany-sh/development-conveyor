@@ -12,7 +12,7 @@ from .locks import DurableLock, inspect_repository_writer_lock
 from .queue import FeatureQueue, resolve_feature_commit, resolve_queue_path
 from .registry import Project
 from .repository import RepositoryInspector
-from .sessions import classify_codex_failure
+from .sessions import classify_codex_failure, parse_integration_terminal_result
 
 
 DETERMINISTIC_CONFIGURATION_FAILURES = {
@@ -22,6 +22,137 @@ DETERMINISTIC_CONFIGURATION_FAILURES = {
     "unsupported_reasoning_effort",
     "model_policy_invalid",
 }
+
+INTEGRATION_RUNTIME_LOCATION = ".factory/runtime/milestone-integration"
+LEGACY_PLANNING_GATE_PIN = {
+    "project_id": "case-manager",
+    "run_id": "99c2f421-6b5a-4f8a-ae43-a5aefc12657e",
+    "integration_session_id": "019f740b-df98-70c3-8b6f-2c4449051544",
+    "accepted_commit": "dc4fe99a562d253dfba6b8eac1d2b3c81fc49b19",
+    "candidate_commit": "826de2ab2c517e4bba53ed54f0cf2ddee50f38ef",
+}
+
+
+def _milestone_label(value: str | None) -> str:
+    if isinstance(value, str) and value.upper().startswith("P") and value[1:].isdigit():
+        return f"Phase {int(value[1:])}"
+    return str(value or "milestone")
+
+
+def _historical_integration_gate(
+    controller_root: Path,
+    configuration: dict[str, Any],
+    project: Project,
+    inspector: RepositoryInspector,
+    cycle: dict[str, Any] | None,
+    queue: FeatureQueue | None,
+) -> dict[str, Any] | None:
+    if cycle and (
+        cycle.get("current_phase") == "integration_ready"
+        or isinstance(cycle.get("validated_planning_baseline"), dict)
+    ):
+        return None
+    if not cycle or not cycle.get("accepted_feature_commit") or not cycle.get("integration_session_id"):
+        # The first failed integration predates integration_session_id persistence in cycle state.
+        pass
+    run_id = str(cycle.get("conveyor_run_id") or "") if cycle else ""
+    if not run_id:
+        return None
+    pin = LEGACY_PLANNING_GATE_PIN
+    if (
+        project.project_id != pin["project_id"]
+        or run_id != pin["run_id"]
+        or cycle.get("integration_session_id") not in {None, pin["integration_session_id"]}
+        or cycle.get("accepted_feature_commit") != pin["accepted_commit"]
+        or cycle.get("milestone_pre_integration_commit") != pin["candidate_commit"]
+    ):
+        return None
+    report_root = Path(configuration["report_directory"])
+    if not report_root.is_absolute():
+        report_root = controller_root / report_root
+    report_path = report_root.resolve() / run_id / "milestone_integration.json"
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if report.get("session_id") != pin["integration_session_id"]:
+        return None
+    terminal, validation = parse_integration_terminal_result(
+        str(report.get("redacted_stdout") or ""), allow_legacy_human_gate=True
+    )
+    if validation != "valid" or (terminal or {}).get("classification") != "HUMAN_DECISION_REQUIRED":
+        return None
+    feature_id = str(cycle.get("current_feature") or "")
+    feature = queue.feature(feature_id) if queue and feature_id else None
+    milestone = queue.milestone(project.active_milestone or "") if queue else None
+    if not feature or feature.get("status") not in {"accepted", "integration_pending"}:
+        return None
+    accepted = cycle.get("accepted_feature_commit")
+    candidate = cycle.get("milestone_pre_integration_commit")
+    milestone_head = inspector.rev_parse(project.milestone_branch or "", check=False)
+    if not all(isinstance(value, str) and value for value in (accepted, candidate, milestone_head)):
+        return None
+    if candidate != milestone_head or cycle.get("feature_starting_commit") != candidate:
+        return None
+    session_id = report.get("session_id") or cycle.get("integration_session_id")
+    gate = {
+        "gate_id": f"{project.project_id}-{feature_id}-integration-planning-baseline-{candidate[:12]}",
+        "classification": "integration_planning_baseline_approval",
+        "reason": (
+            "Milestone integration stopped before mutation because validated planning-baseline "
+            "provenance requires explicit approval."
+        ),
+        "project_id": project.project_id,
+        "expected_repository_id": inspector.identity()["repository_id"],
+        "expected_path_fingerprint": inspector.identity()["path_fingerprint"],
+        "expected_milestone": project.active_milestone,
+        "approved_next_state": "queue_reconciliation",
+        "feature_id": feature_id,
+        "feature": feature_id,
+        "feature_branch": cycle.get("feature_branch"),
+        "accepted_commit": accepted,
+        "accepted_feature_commit": accepted,
+        "feature_starting_commit": cycle.get("feature_starting_commit"),
+        "milestone_branch": project.milestone_branch,
+        "milestone_head": milestone_head,
+        "previous_last_validated_commit": (milestone or {}).get("last_validated_commit"),
+        "candidate_validated_planning_commit": candidate,
+        "queue_feature_status": feature.get("status"),
+        "queue_accepted_commit": feature.get("accepted_commit"),
+        "integration_session_id": session_id,
+        "integration_report_path": str(report_path),
+        "integration_terminal_classification": "HUMAN_DECISION_REQUIRED",
+        "integration_runtime_issue": "sandbox-incompatible .git runtime path",
+        "integration_runtime_location": INTEGRATION_RUNTIME_LOCATION,
+        "blocker_categories": [
+            {"classification": "deterministic_tooling_defect", "blocker": "integration_runtime_path", "resolved_by_repair": True},
+            {"classification": "explicit_human_decision", "blocker": "validated_planning_baseline_provenance", "resolved_by_repair": False},
+        ],
+        "retryable": False,
+        "ordinary_resume_allowed": False,
+        "resolved": False,
+    }
+    planning_evidence = {
+        "schema_version": 1,
+        "commit": candidate,
+        "previous_validated_commit": (milestone or {}).get("last_validated_commit"),
+        "milestone_branch": project.milestone_branch,
+        "feature_id": feature_id,
+        "feature_starting_commit": cycle.get("feature_starting_commit"),
+        "milestone_pre_integration_commit": cycle.get("milestone_pre_integration_commit"),
+        "reconciliation_run": "phase-0-feature-inventory-reconciliation",
+        "conveyor_run_id": run_id,
+    }
+    gate["planning_baseline_evidence"] = planning_evidence
+    gate["planning_baseline_evidence_fingerprint"] = hashlib.sha256(
+        json.dumps(planning_evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    gate["safe_continuation_command"] = (
+        f"scripts/conveyor reconcile --project {project.project_id} --resolve-human-decision "
+        f"--reason \"Approve {candidate} as the validated {_milestone_label(project.active_milestone)} planning baseline "
+        f"for integration of accepted {feature_id}.\""
+    )
+    return gate
 
 
 def _failed_cycle_reports(controller_root: Path, configuration: dict[str, Any], run_id: str) -> list[dict[str, Any]]:
@@ -68,9 +199,11 @@ def build_project_plan(
         project.repository,
     )
     queue_path: Path | None = None
+    queue: FeatureQueue | None = None
     queue_error: str | None = None
     queue_summary: dict[str, Any]
     selection = None
+    integration_selection = None
     try:
         queue_path = resolve_queue_path(project.repository, project.queue_location)
         queue = FeatureQueue.from_location(project.repository, project.queue_location)
@@ -101,7 +234,9 @@ def build_project_plan(
                     "source": resolution.source,
                 })
         queue_summary["resolved_commits"] = resolved_commits
-        selection = queue.select_next(project.active_milestone or "") if queue_summary["milestone_found"] else None
+        if queue_summary["milestone_found"]:
+            integration_selection = queue.select_integration(project.active_milestone or "")
+            selection = queue.select_next(project.active_milestone or "")
     except (QueueError, OSError) as exc:
         queue_error = str(exc)
         queue_summary = {
@@ -174,6 +309,13 @@ def build_project_plan(
         production_resume_phase
         and cycle_document
         and cycle_document.get("accepted_feature_commit") is None
+    )
+    integration_gate = (
+        _historical_integration_gate(
+            controller_root, configuration, project, inspector, cycle_document, queue
+        )
+        if controller_root is not None
+        else None
     )
     if active_cycle and cycle_document:
         if active_cycle.get("phase") == "completed":
@@ -298,6 +440,15 @@ def build_project_plan(
     if not project.enabled:
         action = "disabled"
         stop = "Project is disabled."
+    elif project.current_state == "human_decision_required" and isinstance(
+        (cycle_document or {}).get("human_decision_required"), dict
+    ):
+        action = "human_decision_required"
+        stop = "Explicit human resolution is required; ordinary resume is refused."
+        integration_gate = (cycle_document or {}).get("human_decision_required")
+    elif integration_gate is not None:
+        action = "human_decision_required"
+        stop = "The terminal milestone-integration result requires explicit human resolution."
     elif lock.exists and lock.process_alive is True:
         action = "writer_locked"
         stop = "A live repository writer lock exists; read-only inspection remains available."
@@ -319,6 +470,9 @@ def build_project_plan(
     elif branch_recovery_required:
         action = "branch_recovery_required"
         stop = "Recover the persisted feature branch without changing dirty file bytes before any session resume."
+    elif active_cycle and active_cycle.get("phase") == "integration_ready":
+        action = "milestone_integration"
+        stop = "Launch a fresh milestone-integration session for the preserved accepted feature."
     elif active_cycle and active_cycle.get("phase") not in {"completed", None}:
         action = "resume"
         stop = "Resume until the current cycle reaches its configured stop condition."
@@ -328,6 +482,9 @@ def build_project_plan(
     elif not repository["clean"] or project.current_state == "repository_dirty":
         action = "repository_dirty"
         stop = "Preserve existing work and reconcile the dirty repository before production scheduling."
+    elif integration_selection is not None:
+        action = "milestone_integration"
+        stop = "Integrate the unique accepted feature before selecting any new ready work."
     elif queue_error or not queue_summary.get("milestone_found", False):
         action = "queue_reconciliation"
         stop = "Continue only when deterministic queue validation finds justified ready work or a genuine gate."
@@ -363,6 +520,7 @@ def build_project_plan(
         "resume_existing_factory_work": ["resume repository-scoped Codex session"],
         "milestone_gate": ["$milestone-gate", "release-auditor (read-only)"],
         "resume": ["resume persisted Conveyor cycle"],
+        "milestone_integration": ["$milestone-integrator (fresh integration session)"],
     }
     identity = repository["identity"]
     historical_failure = bool(
@@ -401,6 +559,20 @@ def build_project_plan(
             and not lock.ambiguous
         )
     )
+    if integration_gate is not None:
+        resume_allowed = False
+    cycle_feature = (cycle_document or {}).get("current_feature")
+    cycle_feature_entry = queue.feature(str(cycle_feature)) if queue and cycle_feature else None
+    feature_status = (
+        "accepted"
+        if cycle_feature_entry and cycle_feature_entry.get("status") in {"accepted", "integration_pending"}
+        else (cycle_feature_entry or {}).get("status")
+    )
+    integration_status = (
+        "blocked"
+        if integration_gate is not None
+        else (cycle_feature_entry or {}).get("integration_status")
+    )
     return {
         "project_id": project.project_id,
         "repository_path": str(project.repository),
@@ -428,16 +600,45 @@ def build_project_plan(
         "validated_baseline": project.validated_baseline_commit,
         "repository_state": repository,
         "queue_status": queue_summary,
-        "selected_feature": selection.feature_id if selection else None,
-        "selection_reason": selection.reason if selection else None,
+        "selected_feature": (
+            integration_selection.feature_id if action == "milestone_integration" and integration_selection
+            else (selection.feature_id if selection else None)
+        ),
+        "selection_reason": (
+            integration_selection.reason if action == "milestone_integration" and integration_selection
+            else (selection.reason if selection else None)
+        ),
         "proposed_next_action": action,
         "sessions_that_would_launch": session_actions.get(action, []),
         "prohibited_actions": list(configuration["prohibited_operations"]),
         "expected_stop_condition": stop,
         "dry_run_writes_application_repository": False,
-        "feature_starting_commit": repository.get("milestone_branch_head") if selection else None,
+        "feature_starting_commit": (
+            (cycle_document or {}).get("feature_starting_commit")
+            or (repository.get("milestone_branch_head") if selection else None)
+        ),
+        "feature_status": feature_status,
+        "integration_status": integration_status,
+        "accepted_feature_commit": (cycle_document or {}).get("accepted_feature_commit"),
+        "milestone_pre_integration_commit": (cycle_document or {}).get("milestone_pre_integration_commit"),
+        "milestone_post_integration_commit": (cycle_document or {}).get("milestone_post_integration_commit"),
+        "validated_planning_baseline": (cycle_document or {}).get("validated_planning_baseline"),
+        "integration_gate": integration_gate,
+        "integration_runtime_location": INTEGRATION_RUNTIME_LOCATION,
+        "integration_session_id": (
+            (integration_gate or {}).get("integration_session_id")
+            or (cycle_document or {}).get("integration_session_id")
+        ),
+        "next_action": action,
+        "ordinary_resume_allowed": resume_allowed,
+        "human_resolution_required": integration_gate is not None,
+        "human_resolution_command": (integration_gate or {}).get("safe_continuation_command"),
+        "feature_factory_would_launch": action == "feature_cycle",
+        "milestone_integrator_would_launch": action == "milestone_integration",
+        "writer_lock_would_be_acquired_before_mutation": action == "milestone_integration",
         "old_session_will_resume": False if historical_failure else action == "resume",
         "new_session_would_launch": bool(historical_failure and action == "feature_cycle"),
+        "new_or_recovered_integration_session": action == "milestone_integration",
         "actual_branch": actual_branch,
         "expected_branch": expected_branch,
         "branch_recovery_required": branch_recovery_required,

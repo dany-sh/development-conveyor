@@ -48,6 +48,29 @@
     "session_id": {"type": ["string", "null"]},
     "feature_session_id": {"type": ["string", "null"]},
     "integration_session_id": {"type": ["string", "null"]},
+    "prior_integration_session_ids": {"type": "array", "items": {"type": "string"}},
+    "integration_status": {"type": ["string", "null"], "enum": [null, "pending", "ready", "running", "validation", "blocked", "passed", "failed"]},
+    "integration_gate": {"type": ["object", "null"]},
+    "validated_planning_baseline": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "commit", "previous_validated_commit", "evidence_fingerprint", "reconciliation_run", "validated_at", "approval_resolution_id", "approval_resolution_fingerprint"],
+          "properties": {
+            "schema_version": {"type": "integer", "enum": [1]},
+            "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "previous_validated_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "evidence_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "reconciliation_run": {"type": "string", "minLength": 1},
+            "validated_at": {"type": "string", "minLength": 1},
+            "approval_resolution_id": {"type": "string", "minLength": 1},
+            "approval_resolution_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        }
+      ]
+    },
     "milestone_gate_session_id": {"type": ["string", "null"]},
     "created_at": {"type": "string"},
     "updated_at": {"type": "string"}

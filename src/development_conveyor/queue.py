@@ -336,6 +336,34 @@ class FeatureQueue:
         )
         return Selection(feature_id=feature["id"], title=feature["title"], reason=reason, feature=feature)
 
+    def integration_candidates(self, milestone_id: str) -> list[dict[str, Any]]:
+        """Return accepted work awaiting integration before any new ready work."""
+
+        candidates = [
+            item for item in self.features_for_milestone(milestone_id)
+            if item.get("status") in {"accepted", "integration_pending"}
+            and item.get("integration_status", "pending") == "pending"
+        ]
+        candidates.sort(key=lambda item: (_priority(item.get("priority")), self.features.index(item), item["id"]))
+        return candidates
+
+    def select_integration(self, milestone_id: str) -> Selection | None:
+        candidates = self.integration_candidates(milestone_id)
+        if len(candidates) > 1:
+            raise QueueError(
+                "multiple accepted features await integration; deterministic single-feature integration is required: "
+                + ", ".join(item["id"] for item in candidates)
+            )
+        if not candidates:
+            return None
+        feature = candidates[0]
+        return Selection(
+            feature_id=feature["id"],
+            title=feature["title"],
+            reason="Accepted integration-pending work takes precedence over selection of any new ready feature.",
+            feature=feature,
+        )
+
     def milestone_complete(self, milestone_id: str) -> bool:
         features = [
             item for item in self.features_for_milestone(milestone_id)
@@ -347,6 +375,8 @@ class FeatureQueue:
         features = self.features_for_milestone(milestone_id)
         if self.milestone(milestone_id) is None:
             return "invalid_queue"
+        if self.integration_candidates(milestone_id):
+            return "reconciled_integration_pending"
         if self.ready(milestone_id):
             return "reconciled_ready_work"
         if self.milestone_complete(milestone_id):
@@ -369,6 +399,7 @@ class FeatureQueue:
             status = str(item.get("status"))
             counts[status] = counts.get(status, 0) + 1
         selection = self.select_next(milestone_id)
+        integration = self.select_integration(milestone_id)
         milestone = self.milestone(milestone_id)
         return {
             "milestone_found": milestone is not None,
@@ -381,6 +412,8 @@ class FeatureQueue:
             "completed_features": [item["id"] for item in milestone_features if item["status"] in COMPLETE_STATUSES],
             "ready_features": [item["id"] for item in self.ready(milestone_id)] if milestone else [],
             "selected_feature": selection.feature_id if selection else None,
+            "integration_candidates": [item["id"] for item in self.integration_candidates(milestone_id)],
+            "selected_integration_feature": integration.feature_id if integration else None,
             "milestone_complete": self.milestone_complete(milestone_id),
             "reconciliation_classification": self.reconciliation_classification(milestone_id),
         }

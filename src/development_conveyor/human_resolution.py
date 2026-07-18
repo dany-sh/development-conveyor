@@ -5,7 +5,9 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 import socket
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -183,6 +185,173 @@ def _recovery_record_valid(
     return all(facts.values()), facts
 
 
+def _evaluate_planning_baseline_resolution(
+    *,
+    project: Project,
+    persisted: dict[str, Any] | None,
+    gate: dict[str, Any],
+    reason: str,
+    inspector: RepositoryInspector,
+    writer_lock_exists: bool,
+    controller_reservation_exists: bool,
+    reason_rejected_sensitive: bool,
+) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+
+    def check(name: str, passed: bool, evidence: Any) -> None:
+        checks.append({"validator": name, "passed": bool(passed), "evidence": evidence})
+
+    reason = reason.strip()
+    check("approval_reason_present", bool(reason), {"present": bool(reason)})
+    check("approval_reason_sensitive_content_absent", not reason_rejected_sensitive, {
+        "sensitive_content_detected": reason_rejected_sensitive,
+    })
+    fingerprint = gate_fingerprint(gate)
+    active = (persisted or {}).get("human_decision_required")
+    active_fingerprint = (
+        active.get("gate_fingerprint") or gate_fingerprint(active)
+        if isinstance(active, dict) else None
+    )
+    check("project_in_human_decision_state", (persisted or {}).get("current_state") == "human_decision_required", {
+        "current_state": (persisted or {}).get("current_state"),
+    })
+    check("active_gate_matches_persisted_gate", isinstance(active, dict) and active.get("gate_id") == gate.get("gate_id") and active_fingerprint == fingerprint, {
+        "gate_id": gate.get("gate_id"), "fingerprint_matches": active_fingerprint == fingerprint,
+    })
+    identity = inspector.identity()
+    repository = inspector.inspect(
+        baseline=project.validated_baseline_commit, milestone_branch=project.milestone_branch
+    )
+    check("repository_identity_matches", identity.get("repository_id") == gate.get("expected_repository_id"), {
+        "matches": identity.get("repository_id") == gate.get("expected_repository_id"),
+    })
+    check("repository_path_fingerprint_matches", identity.get("path_fingerprint") == gate.get("expected_path_fingerprint"), {
+        "matches": identity.get("path_fingerprint") == gate.get("expected_path_fingerprint"),
+    })
+    check("accepted_feature_branch_preserved", repository.get("branch") == gate.get("feature_branch"), {
+        "branch": repository.get("branch"), "expected": gate.get("feature_branch"),
+    })
+    check("accepted_feature_head_preserved", repository.get("head") == gate.get("accepted_feature_commit"), {
+        "head": repository.get("head"), "expected": gate.get("accepted_feature_commit"),
+    })
+    check("milestone_ref_preserved", repository.get("milestone_branch_head") == gate.get("milestone_head"), {
+        "head": repository.get("milestone_branch_head"), "expected": gate.get("milestone_head"),
+    })
+    check("worktree_clean", repository.get("clean") is True, {"clean": repository.get("clean")})
+    check("git_operations_absent", not any((repository.get("git_operations") or {}).values()), repository.get("git_operations"))
+    check("repository_writer_lease_absent", not writer_lock_exists, {"exists": writer_lock_exists})
+    check("controller_reservation_absent", not controller_reservation_exists, {"exists": controller_reservation_exists})
+    candidate = gate.get("candidate_validated_planning_commit")
+    previous = gate.get("previous_last_validated_commit")
+    candidate_exists = isinstance(candidate, str) and inspector.ref_exists(candidate)
+    check("planning_candidate_exists", candidate_exists, {"commit": candidate, "exists": candidate_exists})
+    ancestry = bool(candidate_exists and isinstance(previous, str) and inspector.ref_exists(previous) and inspector.is_ancestor(previous, candidate))
+    check("planning_candidate_descends_from_previous_validated_commit", ancestry, {"previous": previous, "candidate": candidate, "is_ancestor": ancestry})
+    check("planning_candidate_is_milestone_head", candidate == repository.get("milestone_branch_head"), {
+        "candidate": candidate, "milestone_head": repository.get("milestone_branch_head"),
+    })
+    approved_prefixes = (
+        ".factory/project.yaml", "docs/FEATURE_QUEUE.yaml", "docs/FEATURE_CATALOG.md",
+        "docs/CURRENT_STATUS.md", "docs/RUN_LOG.md", "docs/README.md", "docs/ROADMAP.md",
+        "docs/roadmap/", "docs/features/", "docs/product/", "docs/architecture/",
+        "docs/architecture.md", "docs/data-flow.md", "docs/testing/",
+    )
+    changed = inspector.changed_paths(str(candidate)) if candidate_exists else []
+    paths_allowed = bool(changed) and all(
+        path in approved_prefixes or any(path.startswith(prefix) for prefix in approved_prefixes if prefix.endswith("/"))
+        for path in changed
+    )
+    product_tests_absent = not any(path.startswith(("Tests/", "tests/", "Sources/", "src/")) for path in changed)
+    check("planning_paths_confined", paths_allowed, {"changed_paths": changed})
+    check("production_and_product_test_implementation_absent", product_tests_absent, {"restricted_paths_present": not product_tests_absent})
+    queue_path = resolve_queue_path(project.repository, project.queue_location)
+    queue = load_json(queue_path)
+    features = queue.get("features") if isinstance(queue.get("features"), list) else []
+    matching = [item for item in features if isinstance(item, dict) and item.get("id") == gate.get("feature_id")]
+    feature = matching[0] if len(matching) == 1 else {}
+    queue_valid = len(matching) == 1 and feature.get("status") == "integration_pending" and feature.get("accepted_commit") == "SELF"
+    check("integration_pending_queue_evidence_matches", queue_valid, {
+        "match_count": len(matching), "status": feature.get("status"), "accepted_commit": feature.get("accepted_commit"),
+    })
+    start = gate.get("feature_starting_commit")
+    accepted = gate.get("accepted_feature_commit")
+    unique = bool(
+        isinstance(start, str) and isinstance(accepted, str)
+        and inspector.ref_exists(accepted) and inspector.commit_count(start, accepted) == 1
+        and inspector.rev_parse(str(gate.get("feature_branch")), check=False) == accepted
+    )
+    check("self_accepted_commit_resolves_uniquely", unique, {"accepted_commit": accepted, "starting_commit": start})
+    cycle: dict[str, Any] | None = None
+    try:
+        cycle_value = load_json(inspector.cycle_state_path())
+        cycle = cycle_value if isinstance(cycle_value, dict) else None
+    except (OSError, ValueError):
+        cycle = None
+    cycle_matches = bool(
+        cycle
+        and cycle.get("accepted_feature_commit") == accepted
+        and cycle.get("feature_starting_commit") == candidate
+        and cycle.get("milestone_pre_integration_commit") == candidate
+        and cycle.get("human_decision_required", {}).get("gate_id") == gate.get("gate_id")
+    )
+    check("persisted_cycle_gate_and_commits_match", cycle_matches, {"matches": cycle_matches})
+    evidence = gate.get("planning_baseline_evidence")
+    evidence_valid = isinstance(evidence, dict) and evidence.get("commit") == candidate and evidence.get("previous_validated_commit") == previous and evidence.get("feature_starting_commit") == start and evidence.get("milestone_pre_integration_commit") == candidate
+    evidence_fingerprint = canonical_fingerprint(evidence) if isinstance(evidence, dict) else None
+    check("planning_baseline_evidence_fingerprint_matches", evidence_valid and evidence_fingerprint == gate.get("planning_baseline_evidence_fingerprint"), {
+        "matches": evidence_valid and evidence_fingerprint == gate.get("planning_baseline_evidence_fingerprint"),
+    })
+    integrator = Path.home() / ".agents/skills/milestone-integrator/scripts/integrationctl.py"
+    try:
+        integrator_text = integrator.read_text(encoding="utf-8")
+    except OSError:
+        integrator_text = ""
+    runtime_repaired = ".factory/runtime/milestone-integration" in integrator_text
+    check("sandbox_runtime_repair_installed", runtime_repaired, {"runtime_location": ".factory/runtime/milestone-integration", "installed": runtime_repaired})
+    provenance: dict[str, Any] | None = None
+    if runtime_repaired:
+        environment = dict(os.environ)
+        environment.update({
+            "CONVEYOR_PROJECT_ID": project.project_id,
+            "CONVEYOR_RUN_ID": str((cycle or {}).get("conveyor_run_id") or "human-resolution-validation"),
+        })
+        completed = subprocess.run(
+            ["python3", str(integrator.with_name("discover-integration.py")), "--root", str(project.repository), "--feature", str(gate.get("feature_id"))],
+            cwd=project.repository, env=environment, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=120,
+        )
+        if completed.returncode == 0:
+            try:
+                discovered = json.loads(completed.stdout)
+            except json.JSONDecodeError:
+                discovered = {}
+            value = discovered.get("planning_baseline_provenance") if isinstance(discovered, dict) else None
+            provenance = value if isinstance(value, dict) else None
+    provenance_valid = bool(
+        provenance
+        and provenance.get("valid") is True
+        and provenance.get("commit") == candidate
+        and provenance.get("previous_validated_commit") == previous
+        and provenance.get("approval_required") is True
+        and isinstance(provenance.get("evidence_fingerprint"), str)
+    )
+    check("full_integrator_planning_provenance_revalidated", provenance_valid, {
+        "valid": provenance_valid,
+        "evidence_fingerprint": (provenance or {}).get("evidence_fingerprint"),
+    })
+    check("approved_transition_is_queue_reconciliation", gate.get("approved_next_state") == "queue_reconciliation", {
+        "approved_next_state": gate.get("approved_next_state"),
+    })
+    return {
+        "accepted": all(item["passed"] for item in checks),
+        "gate": gate,
+        "gate_fingerprint": fingerprint,
+        "checks": checks,
+        "repository_identity": identity,
+        "planning_baseline_provenance": provenance,
+    }
+
+
 def evaluate_human_resolution(
     *,
     project: Project,
@@ -195,7 +364,20 @@ def evaluate_human_resolution(
 ) -> dict[str, Any]:
     """Return complete, non-mutating gate evidence and explicit failed checks."""
 
-    gate = project.human_decision_gate if isinstance(project.human_decision_gate, dict) else None
+    persisted_gate = (persisted or {}).get("human_decision_required")
+    gate = (
+        persisted_gate
+        if isinstance(persisted_gate, dict)
+        and persisted_gate.get("classification") == "integration_planning_baseline_approval"
+        else (project.human_decision_gate if isinstance(project.human_decision_gate, dict) else None)
+    )
+    if isinstance(gate, dict) and gate.get("classification") == "integration_planning_baseline_approval":
+        return _evaluate_planning_baseline_resolution(
+            project=project, persisted=persisted, gate=gate, reason=reason, inspector=inspector,
+            writer_lock_exists=writer_lock_exists,
+            controller_reservation_exists=controller_reservation_exists,
+            reason_rejected_sensitive=reason_rejected_sensitive,
+        )
     checks: list[dict[str, Any]] = []
 
     def check(name: str, passed: bool, evidence: Any) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,15 @@ RECONCILIATION_CLASSIFICATIONS = {
 }
 RESULT_MARKER = "CONVEYOR_RESULT="
 RETRY_MARKER = "CONVEYOR_RETRY="
+INTEGRATION_TERMINAL_CLASSIFICATIONS = {
+    "INTEGRATED",
+    "VALIDATION_FAILED",
+    "HUMAN_DECISION_REQUIRED",
+    "SEMANTIC_CONFLICT",
+    "RETRYABLE_INTEGRATION_FAILURE",
+    "TERMINAL_INTEGRATION_FAILURE",
+}
+INTEGRATION_GATE_MARKER = "CONVEYOR_INTEGRATION_GATE="
 RETRYABLE_FAILURE_CLASSIFICATIONS = {
     "build_failure",
     "implementation_validation_failure",
@@ -213,7 +223,9 @@ def parse_reconciliation_result(output: str) -> tuple[dict[str, Any] | None, str
         return None, str(exc)
 
 
-def parse_retry_contract(output: str) -> tuple[dict[str, Any] | None, str]:
+def parse_retry_contract(
+    output: str, *, before_integration_terminal: bool = False
+) -> tuple[dict[str, Any] | None, str]:
     """Parse a terminal, validated retry authorization from a production session."""
 
     assistant_messages: list[str] = []
@@ -228,7 +240,14 @@ def parse_retry_contract(output: str) -> tuple[dict[str, Any] | None, str]:
     if not assistant_messages:
         return None, "missing_terminal_assistant_message"
     terminal = assistant_messages[-1].rstrip()
-    final_line = terminal.splitlines()[-1] if terminal else ""
+    terminal_lines = terminal.splitlines()
+    final_line = terminal_lines[-1] if terminal_lines else ""
+    if before_integration_terminal and len(terminal_lines) >= 2:
+        heading = re.compile(
+            r"^\s*(?:#{1,6}\s*)?(" + "|".join(sorted(INTEGRATION_TERMINAL_CLASSIFICATIONS)) + r")\s*$"
+        )
+        if heading.fullmatch(final_line):
+            final_line = terminal_lines[-2]
     if not final_line.startswith(RETRY_MARKER):
         return None, "missing_retry_marker"
     if sum(message.count(RETRY_MARKER) for message in assistant_messages) != 1:
@@ -253,6 +272,67 @@ def parse_retry_contract(output: str) -> tuple[dict[str, Any] | None, str]:
     if value["failure_classification"] not in RETRYABLE_FAILURE_CLASSIFICATIONS:
         return None, "retry contract failure_classification is not an allowed repository-scoped retry cause"
     return value, "retry_contract_valid"
+
+
+def parse_integration_terminal_result(
+    output: str, *, allow_legacy_human_gate: bool = False
+) -> tuple[dict[str, Any] | None, str]:
+    """Classify exactly one marker in the terminal assistant result only."""
+
+    assistant_messages: list[str] = []
+    for line in output.splitlines():
+        try:
+            decoded = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = _assistant_message(decoded)
+        if message is not None:
+            assistant_messages.append(message)
+    if not assistant_messages:
+        return None, "missing_terminal_assistant_message"
+    terminal = assistant_messages[-1]
+    markers: list[str] = []
+    pattern = re.compile(
+        r"^\s*(?:#{1,6}\s*)?(" + "|".join(sorted(INTEGRATION_TERMINAL_CLASSIFICATIONS)) + r")\s*$"
+    )
+    terminal_lines = terminal.splitlines()
+    for line in terminal_lines:
+        match = pattern.fullmatch(line)
+        if match:
+            markers.append(match.group(1))
+    if not markers:
+        return None, "missing_integration_terminal_marker"
+    if len(markers) != 1:
+        return None, "duplicate_or_ambiguous_integration_terminal_marker"
+    final_nonblank = next((line for line in reversed(terminal_lines) if line.strip()), "")
+    if not pattern.fullmatch(final_nonblank) and not (
+        allow_legacy_human_gate and markers[0] == "HUMAN_DECISION_REQUIRED"
+    ):
+        return None, "integration_terminal_marker_not_final"
+    result: dict[str, Any] = {"schema_version": 1, "classification": markers[0]}
+    if markers[0] == "HUMAN_DECISION_REQUIRED" and not allow_legacy_human_gate:
+        descriptors = [line.removeprefix(INTEGRATION_GATE_MARKER) for line in terminal_lines if line.startswith(INTEGRATION_GATE_MARKER)]
+        if len(descriptors) != 1:
+            return None, "human_decision_descriptor_missing_or_duplicate"
+        try:
+            descriptor = json.loads(descriptors[0])
+        except json.JSONDecodeError:
+            return None, "human_decision_descriptor_invalid"
+        if (
+            not isinstance(descriptor, dict)
+            or descriptor.get("schema_version") != 1
+            or not isinstance(descriptor.get("gate_classification"), str)
+            or not descriptor.get("gate_classification")
+            or not isinstance(descriptor.get("reason"), str)
+            or not descriptor.get("reason").strip()
+            or not isinstance(descriptor.get("blocker_categories"), list)
+            or not descriptor.get("blocker_categories")
+            or not all(isinstance(item, str) and item for item in descriptor["blocker_categories"])
+            or descriptor.get("retryable") is not False
+        ):
+            return None, "human_decision_descriptor_invalid"
+        result["human_decision"] = descriptor
+    return result, "valid"
 
 
 def classify_session_result(returncode: int, structured: dict[str, Any] | None, validation: str) -> str:
@@ -368,6 +448,34 @@ class SessionLauncher:
             project_id=project_id,
         )
 
+    def _trusted_resolution_environment(self, request: SessionRequest) -> dict[str, str]:
+        if request.action != "milestone_integration":
+            return {}
+        cycle_path = request.project.repository / ".factory/conveyor-state.json"
+        try:
+            cycle = json.loads(cycle_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        baseline = cycle.get("validated_planning_baseline") if isinstance(cycle, dict) else None
+        resolution_id = baseline.get("approval_resolution_id") if isinstance(baseline, dict) else None
+        if not isinstance(resolution_id, str) or not re.fullmatch(r"human-resolution-[0-9a-f]{24}", resolution_id):
+            return {}
+        report_root = Path(str(self.configuration["report_directory"]))
+        if not report_root.is_absolute():
+            report_root = self.controller_root / report_root
+        report_root = report_root.resolve()
+        report = (report_root / resolution_id / "human-decision-resolution.json").resolve()
+        try:
+            report.relative_to(report_root)
+        except ValueError:
+            return {}
+        if not report.is_file():
+            return {}
+        return {
+            "CONVEYOR_CONTROLLER_REPORT_ROOT": str(report_root),
+            "CONVEYOR_PLANNING_RESOLUTION_REPORT": str(report),
+        }
+
     def _render_prompt(self, request: SessionRequest) -> str:
         try:
             filename = ACTION_PROMPTS[request.action]
@@ -411,13 +519,18 @@ class SessionLauncher:
                 "\n## Controller retry contract\n\n"
                 "Do not request a retry for deterministic environment or configuration failures. If and only if "
                 "the session fails with a retryable repository-scoped cause and a materially different repair is "
-                "justified by evidence, end the terminal assistant message with exactly one line: "
+                "justified by evidence, emit exactly one line: "
                 "`CONVEYOR_RETRY={\"schema_version\":1,\"retryable\":true,"
                 "\"failure_classification\":\"...\",\"hypothesis\":\"...\","
                 "\"remediation_action\":\"...\",\"supporting_evidence\":\"...\"}`. "
                 "The classification must be one of the controller's documented repository-scoped validation, "
                 "build, test, lint, packaging, review, structured-output, or session-execution causes. "
-                "Otherwise emit no retry marker and stop at the precise failure or human gate.\n"
+                + (
+                    "For milestone integration, place this retry line immediately before the required final terminal heading. "
+                    if request.action == "milestone_integration" else
+                    "For a feature session, this retry line must be the final line. "
+                )
+                + "Otherwise emit no retry marker and stop at the precise failure or human gate.\n"
             )
         return prompt
 
@@ -474,6 +587,7 @@ class SessionLauncher:
             "CONVEYOR_MODE": request.mode,
             "CONVEYOR_FEATURE": request.feature or "",
         })
+        environment.update(self._trusted_resolution_environment(request))
         try:
             result = subprocess.run(
                 list(plan.argv), cwd=plan.cwd, env=environment, input=plan.prompt, text=True,
@@ -505,6 +619,27 @@ class SessionLauncher:
         if request.action == "queue_reconciliation":
             structured, validation = parse_reconciliation_result(result.stdout)
             classification = classify_session_result(result.returncode, structured, validation)
+        elif request.action == "milestone_integration":
+            structured, validation = parse_integration_terminal_result(result.stdout)
+            if structured is not None:
+                classification = str(structured["classification"])
+                retry_contract = None
+                if classification == "RETRYABLE_INTEGRATION_FAILURE":
+                    retry_contract, retry_validation = parse_retry_contract(
+                        result.stdout, before_integration_terminal=True
+                    )
+                    if retry_contract is not None:
+                        structured.update(retry_contract)
+                    else:
+                        validation = retry_validation
+                failure = {
+                    **failure,
+                    "classification": classification,
+                    "retryable": bool(retry_contract),
+                }
+            else:
+                classification = "TERMINAL_INTEGRATION_FAILURE"
+                failure = {**failure, "classification": classification, "retryable": False}
         elif result.returncode != 0 and failure["classification"] not in {
             "cli_upgrade_required", "configuration_incompatible", "cli_missing",
             "cli_version_too_old", "unsupported_model", "unsupported_reasoning_effort",
@@ -522,7 +657,9 @@ class SessionLauncher:
                 }
         if failure["classification"] == "cli_upgrade_required":
             classification = "cli_upgrade_required"
-        if failure["retryable"]:
+        if request.action == "milestone_integration" and structured is not None:
+            exit_classification = classification
+        elif failure["retryable"]:
             exit_classification = "retryable_failure"
         elif failure["classification"]:
             exit_classification = failure["classification"]

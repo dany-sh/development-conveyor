@@ -12,6 +12,15 @@ This log records model configuration and deterministic deployment evidence. It n
 - Reason code: `direct_user_wide_controller_implementation`
 - Safety and autonomy contracts unchanged: `true`
 
+### Milestone-integration recovery contract repair — 2026-07-18
+
+- Terminal contract: integration now requires exactly one authoritative terminal assistant classification and persists a valid zero-exit human gate instead of treating process success as integration success.
+- State and routing: accepted or integration-pending work precedes new ready work; `integration_ready`, `integrating`, `integration_validation`, `integration_blocked`, and `feature_integrated` remain distinct from feature implementation state; planning-baseline approval launches no session and routes the next normal action to the role-pinned Milestone Integrator.
+- Runtime and lease safety: new atomic runtime evidence is repository/project/run/milestone/feature bound under `.factory/runtime/milestone-integration`; legacy Git runtime is read-only; unignored or disagreeing runtime state stops; terminal evidence is written before release of only the owned integration lease.
+- History provenance: commits beyond the recorded milestone validation point are structurally classified, and the Phase 0 planning baseline requires direct ancestry, exact milestone head and subject, planning-only paths, cross-document inventory agreement, validator success, cycle/base agreement, a canonical evidence fingerprint, and explicit bound approval.
+- Isolation: the controller repair writes no Case Manager tracked file or Git ref. Historical-gate persistence is controller-only plus the local `.git/info/exclude` runtime pattern; integration and P0-003 remain prohibited until the explicit gate is resolved.
+- Acceptance hardening: the final marker and structured blocker/retry descriptors are classification-specific; the legacy planning gate is exact-evidence pinned; planning inventory validation uses the candidate snapshot; applied approval requires a recomputed controller-owned resolution report; arbitrary ignored-cycle approval strings and arbitrary `factory:` queue rewrites are rejected; the integration lease precedes audit worktree creation; and partial resolution apply is replayable without launching a session.
+
 ### Model execution — 2026-07-17T08:54:36+00:00
 
 - Agent role: `deterministic-validation`
@@ -217,3 +226,53 @@ This log records model configuration and deterministic deployment evidence. It n
 - Final controller state: `queue_reconciliation`; selected feature `null`; next action `queue_reconciliation`; the next repository sessions are planning-only `product-architect` and `$feature-inventory`.
 - Application isolation: the exact Interview Companion before/after snapshot matched. No application file, branch, commit, writer lock, controller cycle, or repository-local state changed during resolution.
 - Registration/runtime distinction: `config/projects.yaml` intentionally retains `current_state: human_decision_required` as the immutable registration seed and original-gate context. The schema-validated runtime project state under `state/projects/` is authoritative after the accepted resolution; the seed is not rewritten as operational state.
+
+### Model execution — 2026-07-18T21:18:57+00:00
+
+- Agent role: `feature-worker`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `integration_recovery_contract_repair`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-18T22:13:31+00:00
+
+- Agent role: `repository-explorer`
+- Effective model: `gpt-5.6-terra`
+- Effective reasoning effort: `medium`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `integration_recovery_readonly_map`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-18T22:13:31+00:00
+
+- Agent role: `milestone_integrator`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `integration_repair_readonly_review`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-18T22:13:31+00:00
+
+- Agent role: `test-engineer`
+- Effective model: `gpt-5.6-terra`
+- Effective reasoning effort: `high`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `integration_recovery_validation`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-18T22:13:32+00:00
+
+- Agent role: `adversarial-reviewer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `xhigh`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `integration_recovery_adversarial_review`
+- Safety and autonomy contracts unchanged: `true`

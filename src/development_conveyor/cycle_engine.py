@@ -177,6 +177,7 @@ class CycleEngine:
         compatibility_action = {
             "queue_reconciliation": "queue_reconciliation",
             "planning_refinement": "queue_reconciliation",
+            "milestone_integration": "milestone_integration",
             "milestone_gate": "milestone_gate",
         }.get(str(proposed), "feature_cycle")
         compatibility = self._compatibility_snapshot(project, compatibility_action)
@@ -394,6 +395,10 @@ class CycleEngine:
             "session_id": None,
             "feature_session_id": None,
             "integration_session_id": None,
+            "prior_integration_session_ids": [],
+            "integration_status": None,
+            "integration_gate": None,
+            "validated_planning_baseline": None,
             "milestone_gate_session_id": None,
             "created_at": stamp,
             "updated_at": stamp,
@@ -1097,6 +1102,62 @@ class CycleEngine:
             raise QueueError("repository is not clean after integration")
         return feature, accepted, integrated
 
+    def _integration_human_gate(
+        self,
+        project: Project,
+        inspector: RepositoryInspector,
+        state: dict[str, Any],
+        result: SessionResult,
+    ) -> dict[str, Any]:
+        queue = FeatureQueue.from_location(project.repository, project.queue_location)
+        feature = queue.feature(str(state.get("current_feature") or "")) or {}
+        descriptor = (
+            (result.structured_result or {}).get("human_decision")
+            if isinstance(result.structured_result, dict) else None
+        )
+        if not isinstance(descriptor, dict):
+            raise RecoveryError("live integration human gate lacks a validated structured blocker descriptor")
+        accepted = state.get("accepted_feature_commit")
+        milestone_head = inspector.rev_parse(project.milestone_branch or "", check=False)
+        descriptor_fingerprint = hashlib.sha256(
+            json.dumps(descriptor, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        gate = {
+            "gate_id": f"{project.project_id}-{state.get('current_feature')}-integration-{descriptor_fingerprint[:12]}",
+            "classification": descriptor["gate_classification"],
+            "reason": descriptor["reason"],
+            "project_id": project.project_id,
+            "expected_repository_id": inspector.identity()["repository_id"],
+            "expected_path_fingerprint": inspector.identity()["path_fingerprint"],
+            "expected_milestone": project.active_milestone,
+            "approved_next_state": "queue_reconciliation",
+            "feature_id": state.get("current_feature"),
+            "feature": state.get("current_feature"),
+            "feature_branch": state.get("feature_branch"),
+            "accepted_commit": accepted,
+            "accepted_feature_commit": accepted,
+            "feature_starting_commit": state.get("feature_starting_commit"),
+            "milestone_branch": project.milestone_branch,
+            "milestone_head": milestone_head,
+            "queue_feature_status": feature.get("status"),
+            "queue_accepted_commit": feature.get("accepted_commit"),
+            "integration_session_id": result.session_id,
+            "integration_report_path": result.report_path,
+            "integration_terminal_classification": "HUMAN_DECISION_REQUIRED",
+            "integration_runtime_location": ".factory/runtime/milestone-integration",
+            "blocker_categories": list(descriptor["blocker_categories"]),
+            "blocker_descriptor": descriptor,
+            "blocker_descriptor_fingerprint": descriptor_fingerprint,
+            "retryable": False,
+            "ordinary_resume_allowed": False,
+            "safe_continuation_command": (
+                f"scripts/conveyor reconcile --project {project.project_id} "
+                "--resolve-human-decision --reason <approved-reason>"
+            ),
+            "resolved": False,
+        }
+        return gate
+
     def _reconcile_feature_evidence(
         self,
         project: Project,
@@ -1119,6 +1180,138 @@ class CycleEngine:
         else:
             state["feature_session_id"] = result.session_id
             state["session_id"] = result.session_id
+        if (
+            result.action == "milestone_integration"
+            and result.result_classification == "HUMAN_DECISION_REQUIRED"
+            and result.structured_output_validation == "valid"
+        ):
+            gate = self._integration_human_gate(project, inspector, state, result)
+            state.update({
+                "failure_classification": "HUMAN_DECISION_REQUIRED",
+                "retry_exhausted": True,
+                "next_safe_action": gate["safe_continuation_command"],
+                "stop_reason": gate["reason"],
+                "human_decision_required": gate,
+                "integration_gate": gate,
+                "integration_status": "blocked",
+            })
+            self._advance_cycle(
+                cycle_path, state, "human_decision_required", inspector,
+                "integration_terminal_human_decision_required",
+            )
+            writer = inspect_repository_writer_lock(
+                inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                ),
+                project.repository,
+            )
+            if writer.exists:
+                raise LockError("terminal integration human gate retained a repository writer lease")
+            project_state = self._project_document(
+                project, str(state["conveyor_run_id"]), inspector.identity()["path_fingerprint"]
+            )
+            if project_state["current_state"] != "human_decision_required":
+                if project_state["current_state"] in {"feature_running", "feature_accepted", "integration_pending", "integration_ready", "integrating"}:
+                    self._transition_project(
+                        project, project_state, "integration_blocked",
+                        run_id=str(state["conveyor_run_id"]),
+                        checkpoint="integration_blocked",
+                        feature=str(state.get("current_feature")),
+                        stop_reason=gate["reason"],
+                        state_evidence={"integration_gate": gate},
+                    )
+                self._transition_project(
+                    project, project_state, "human_decision_required",
+                    run_id=str(state["conveyor_run_id"]),
+                    checkpoint="integration_terminal_human_decision_required",
+                    feature=str(state.get("current_feature")),
+                    stop_reason=gate["reason"],
+                    human_gate=gate,
+                    state_evidence={"integration_gate": gate},
+                )
+            return {
+                "outcome": "human_decision_required",
+                "feature": state.get("current_feature"),
+                "accepted_commit": accepted if (accepted := state.get("accepted_feature_commit")) else None,
+                "human_decision": gate,
+                "ordinary_resume_allowed": False,
+                "retryable": False,
+            }
+        if result.action == "milestone_integration" and result.result_classification in {
+            "VALIDATION_FAILED", "SEMANTIC_CONFLICT", "RETRYABLE_INTEGRATION_FAILURE",
+            "TERMINAL_INTEGRATION_FAILURE",
+        }:
+            classification = str(result.result_classification)
+            semantic = classification == "SEMANTIC_CONFLICT"
+            retryable = bool(
+                classification == "RETRYABLE_INTEGRATION_FAILURE"
+                and result.retryable
+                and result.retry_hypothesis
+                and result.remediation_action
+                and result.retry_evidence
+                and not retry_status.get("exhausted")
+            )
+            outcome = {
+                "VALIDATION_FAILED": "integration_validation_failed",
+                "SEMANTIC_CONFLICT": "human_decision_required",
+                "RETRYABLE_INTEGRATION_FAILURE": (
+                    "retryable_integration_failure" if retryable else "terminal_integration_failure"
+                ),
+                "TERMINAL_INTEGRATION_FAILURE": "terminal_integration_failure",
+            }[classification]
+            continuation = (
+                f"scripts/conveyor resume --project {project.project_id}"
+                if retryable else f"scripts/conveyor status --project {project.project_id}"
+            )
+            state.update({
+                "failure_classification": classification,
+                "retry_exhausted": not retryable,
+                "integration_status": "blocked" if semantic else "failed",
+                "next_safe_action": continuation,
+                "stop_reason": outcome,
+            })
+            project_state = self._project_document(
+                project, str(state["conveyor_run_id"]), inspector.identity()["path_fingerprint"]
+            )
+            if semantic:
+                gate = {
+                    "gate_id": f"{project.project_id}-{state.get('current_feature')}-semantic-conflict-{str(result.session_id or 'unknown')}",
+                    "classification": "semantic_integration_conflict",
+                    "reason": "Milestone integration reported a semantic conflict that requires explicit human direction.",
+                    "project_id": project.project_id,
+                    "feature_id": state.get("current_feature"),
+                    "accepted_feature_commit": state.get("accepted_feature_commit"),
+                    "feature_starting_commit": state.get("feature_starting_commit"),
+                    "integration_session_id": result.session_id,
+                    "retryable": False,
+                    "ordinary_resume_allowed": False,
+                    "safe_continuation_command": continuation,
+                    "resolved": False,
+                }
+                state["human_decision_required"] = gate
+                state["integration_gate"] = gate
+                self._advance_cycle(cycle_path, state, "human_decision_required", inspector, "integration_semantic_conflict")
+                if project_state["current_state"] != "human_decision_required":
+                    if project_state["current_state"] in {"feature_running", "feature_accepted", "integration_pending", "integration_ready", "integrating"}:
+                        project_state = self._transition_project(
+                            project, project_state, "integration_blocked", run_id=str(state["conveyor_run_id"]),
+                            checkpoint="integration_semantic_conflict_blocked", feature=str(state.get("current_feature")),
+                        )
+                    self._transition_project(
+                        project, project_state, "human_decision_required", run_id=str(state["conveyor_run_id"]),
+                        checkpoint="integration_semantic_conflict", feature=str(state.get("current_feature")),
+                        human_gate=gate, stop_reason=gate["reason"],
+                    )
+                return {"outcome": outcome, "human_decision": gate, "retryable": False}
+            self._advance_cycle(cycle_path, state, "failed", inspector, f"integration_terminal_{classification.lower()}")
+            if project_state["current_state"] != "validation_failed":
+                self._transition_project(
+                    project, project_state, "validation_failed", run_id=str(state["conveyor_run_id"]),
+                    checkpoint=f"integration_terminal_{classification.lower()}",
+                    feature=str(state.get("current_feature")), stop_reason=outcome,
+                    state_evidence={"integration_terminal_classification": classification, "retryable": retryable},
+                )
+            return {"outcome": outcome, "retryable": retryable, "classification": classification}
         if result.returncode != 0:
             classification = result.failure_classification or result.result_classification or "session_execution_failed"
             deterministic = classification in {
@@ -1282,6 +1475,7 @@ class CycleEngine:
                 self._advance_cycle(
                     cycle_path, state, "integrating", inspector, "integration_session_launch"
                 )
+            inspector.ensure_runtime_ignored()
             integration_result, integration_repairs, integration_retry = self._launch_with_retries(SessionRequest(
                 action="milestone_integration",
                 project=project,
@@ -1468,6 +1662,8 @@ class CycleEngine:
                 retry_status=retry_status,
                 reservation_held=True,
             )
+            if evidence.get("outcome") == "human_decision_required":
+                return evidence
             self._transition_project(
                 project,
                 project_state,
@@ -1808,6 +2004,8 @@ class CycleEngine:
         *,
         reservation_held: bool = False,
     ) -> dict[str, Any]:
+        if evidence.get("outcome") == "human_decision_required":
+            return {"project_id": project.project_id, **evidence}
         cycle_path = inspector.cycle_state_path()
         project_state = self._project_document(project, run_id, inspector.identity()["path_fingerprint"])
         if project_state["current_state"] in {"feature_running", "feature_review"}:
@@ -1868,7 +2066,7 @@ class CycleEngine:
         elif state.get("integration_session_id") or "integration" in checkpoint:
             action = "milestone_integration"
             target_phase = "integrating"
-            target_project_state = "feature_running"
+            target_project_state = "integrating"
             prior_session_id = state.get("integration_session_id")
         else:
             # Pre-feature deterministic failures are recovered by startup reconciliation and a
@@ -2094,7 +2292,7 @@ class CycleEngine:
                     self._advance_cycle(
                         inspector.cycle_state_path(), state, phase, inspector, "focused_resume_after_failure"
                     )
-                if phase in {"integration_pending", "integrating", "integration_validation"}:
+                if phase in {"integration_pending", "integration_ready", "integrating", "integration_validation"}:
                     action = "milestone_integration"
                 elif phase == "milestone_gate":
                     action = "milestone_gate"
@@ -2135,6 +2333,7 @@ class CycleEngine:
                 elif writer.exists:
                     raise LockError("non-feature continuation cannot reuse a feature writer lease")
                 if action == "milestone_integration":
+                    inspector.ensure_runtime_ignored()
                     resume_session_id = state.get("integration_session_id")
                 elif action == "milestone_gate":
                     resume_session_id = state.get("milestone_gate_session_id") or state.get("session_id")
@@ -2397,6 +2596,104 @@ class CycleEngine:
         effective = self.effective_project(project)
         persisted = self.load_project_state(project)
         plan = self.project_plan(project)
+        historical_gate = plan.get("integration_gate")
+        if isinstance(historical_gate, dict):
+            result = {
+                "project_id": project.project_id,
+                "dry_run": dry_run,
+                "classification": "integration_human_gate_recovery",
+                "current_state": effective.current_state,
+                "proposed_state": "human_decision_required",
+                "integration_gate": historical_gate,
+                "ordinary_resume_allowed": False,
+                "human_resolution_required": True,
+                "human_resolution_command": historical_gate.get("safe_continuation_command"),
+                "application_repository_written": False,
+                "application_tracked_files_written": False,
+                "git_refs_written": False,
+                "session_launch_performed": False,
+                "would_persist_controller_state": not dry_run,
+                "would_persist_repository_runtime_state": not dry_run,
+            }
+            if dry_run:
+                return result
+            inspector = RepositoryInspector(project.repository)
+            writer = inspect_repository_writer_lock(
+                inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                ), project.repository,
+            )
+            if writer.exists or any(inspector.git_operation_state().values()) or not inspector.is_clean:
+                raise RecoveryError("integration-gate recovery requires a clean repository, no Git operation, and no writer lease")
+            cycle_path = inspector.cycle_state_path()
+            cycle = self.cycle_store.read(cycle_path)
+            if cycle is None or cycle.get("accepted_feature_commit") != historical_gate.get("accepted_feature_commit"):
+                raise RecoveryError("integration-gate recovery cannot corroborate the accepted feature cycle")
+            existing_document = self.load_project_state(project)
+            existing_gate = cycle.get("human_decision_required")
+            existing_project_gate = (
+                existing_document.get("human_decision_required")
+                if isinstance(existing_document, dict) else None
+            )
+            if (
+                cycle.get("current_phase") == "human_decision_required"
+                and isinstance(existing_gate, dict)
+                and existing_gate.get("gate_id") == historical_gate.get("gate_id")
+                and isinstance(existing_project_gate, dict)
+                and existing_project_gate.get("gate_id") == historical_gate.get("gate_id")
+                and existing_document.get("current_state") == "human_decision_required"
+            ):
+                result.update({
+                    "current_state": "human_decision_required",
+                    "gate_persisted": True,
+                    "already_persisted": True,
+                    "would_persist_controller_state": False,
+                    "would_persist_repository_runtime_state": False,
+                })
+                return result
+            inspector.ensure_runtime_ignored()
+            if inspector.git(
+                ["check-ignore", "-q", ".factory/runtime/milestone-integration/latest.json"],
+                check=False,
+            ).returncode != 0:
+                raise RecoveryError("integration runtime local exclude could not be verified")
+            run_id = str(cycle.get("conveyor_run_id") or f"recovery-{uuid.uuid4()}")
+            cycle.update({
+                "integration_gate": historical_gate,
+                "integration_status": "blocked",
+                "human_decision_required": historical_gate,
+                "failure_classification": "HUMAN_DECISION_REQUIRED",
+                "retry_exhausted": True,
+                "next_safe_action": historical_gate.get("safe_continuation_command"),
+                "stop_reason": historical_gate.get("reason"),
+                "integration_session_id": historical_gate.get("integration_session_id"),
+            })
+            self._advance_cycle(
+                cycle_path, cycle, "human_decision_required", inspector,
+                "integration_terminal_human_decision_required_recovered",
+            )
+            document = self.load_project_state(project) or self._project_document(
+                project, run_id, inspector.identity()["path_fingerprint"]
+            )
+            if document["current_state"] != "human_decision_required":
+                if document["current_state"] in {"feature_running", "feature_accepted", "integration_pending", "integration_ready", "integrating"}:
+                    document = self._transition_project(
+                        project, document, "integration_blocked", run_id=run_id,
+                        checkpoint="integration_blocked_recovered",
+                        feature=str(cycle.get("current_feature")),
+                        stop_reason=str(historical_gate.get("reason")),
+                        state_evidence={"integration_gate": historical_gate},
+                    )
+                document = self._transition_project(
+                    project, document, "human_decision_required", run_id=run_id,
+                    checkpoint="integration_terminal_human_decision_required_recovered",
+                    feature=str(cycle.get("current_feature")),
+                    stop_reason=str(historical_gate.get("reason")),
+                    human_gate=historical_gate,
+                    state_evidence={"integration_gate": historical_gate},
+                )
+            result.update({"current_state": "human_decision_required", "gate_persisted": True})
+            return result
         reconciliation_document = persisted or self._project_document(
             effective, None, plan["repository_path_fingerprint"]
         )
@@ -2489,7 +2786,35 @@ class CycleEngine:
         supplied_reason = reason.strip()
         reason_rejected_sensitive = redact_text(supplied_reason) != supplied_reason
         reason = "" if reason_rejected_sensitive else supplied_reason
-        gate = project.human_decision_gate if isinstance(project.human_decision_gate, dict) else {}
+        initial_persisted = self.load_project_state(project)
+        persisted_gate = (
+            initial_persisted.get("human_decision_required")
+            if isinstance(initial_persisted, dict)
+            and initial_persisted.get("current_state") == "human_decision_required"
+            else None
+        )
+        historical_gate = None
+        if persisted_gate is None and isinstance(initial_persisted, dict):
+            history = initial_persisted.get("human_decision_history")
+            matches = [
+                item.get("gate")
+                for item in history or []
+                if isinstance(item, dict)
+                and isinstance(item.get("gate"), dict)
+                and isinstance(item.get("resolution"), dict)
+                and item["resolution"].get("user_provided_reason") == supplied_reason
+            ] if isinstance(history, list) else []
+            if len(matches) == 1:
+                historical_gate = matches[0]
+        gate = (
+            persisted_gate
+            if isinstance(persisted_gate, dict)
+            else (
+                project.human_decision_gate
+                if isinstance(project.human_decision_gate, dict)
+                else (historical_gate or {})
+            )
+        )
         fingerprint_reason = reason if not reason_rejected_sensitive else "[REJECTED_SENSITIVE_REASON]"
         fingerprint = resolution_fingerprint(project.project_id, gate, fingerprint_reason)
         resolution_id = f"human-resolution-{fingerprint[:24]}"
@@ -2535,7 +2860,8 @@ class CycleEngine:
                 source="deterministic_script",
                 milestone=prior.get("expected_milestone"),
                 branch=prior.get("expected_branch"),
-                commit=prior.get("expected_milestone_head"),
+                commit=(prior.get("original_gate") or {}).get("accepted_feature_commit")
+                or prior.get("expected_milestone_head"),
                 command_category="human_decision_resolution",
                 result="explicit_human_decision_resolved",
                 validation_outcome="passed",
@@ -2661,6 +2987,63 @@ class CycleEngine:
                     "repair_attempted": audit_repair_started,
                 },
             })
+            original_gate = prior.get("original_gate") or {}
+            if original_gate.get("classification") == "integration_planning_baseline_approval":
+                cycle_path = RepositoryInspector(project.repository).cycle_state_path()
+                cycle = self.cycle_store.read(cycle_path)
+                provenance = prior.get("planning_baseline_provenance") or {}
+                expected_baseline = {
+                    "schema_version": 1,
+                    "commit": original_gate.get("candidate_validated_planning_commit"),
+                    "previous_validated_commit": original_gate.get("previous_last_validated_commit"),
+                    "evidence_fingerprint": provenance.get("evidence_fingerprint"),
+                    "reconciliation_run": (original_gate.get("planning_baseline_evidence") or {}).get("reconciliation_run"),
+                    "validated_at": prior.get("timestamp"),
+                    "approval_resolution_id": prior.get("resolution_id"),
+                    "approval_resolution_fingerprint": prior.get("resolution_fingerprint"),
+                }
+                cycle_valid = bool(
+                    cycle
+                    and cycle.get("current_phase") == "integration_ready"
+                    and cycle.get("validated_planning_baseline") == expected_baseline
+                    and cycle.get("human_decision_required") is None
+                    and cycle.get("integration_gate") is None
+                )
+                repair_attempted = False
+                if not cycle_valid and repair and cycle and (
+                    cycle.get("accepted_feature_commit") == original_gate.get("accepted_feature_commit")
+                    and (cycle.get("human_decision_required") or {}).get("gate_id") == original_gate.get("gate_id")
+                ):
+                    repair_attempted = True
+                    prior_session = cycle.get("integration_session_id")
+                    prior_sessions = list(cycle.get("prior_integration_session_ids") or [])
+                    if isinstance(prior_session, str) and prior_session not in prior_sessions:
+                        prior_sessions.append(prior_session)
+                    cycle.update({
+                        "validated_planning_baseline": expected_baseline,
+                        "integration_status": "ready",
+                        "integration_gate": None,
+                        "human_decision_required": None,
+                        "failure_classification": None,
+                        "retry_exhausted": False,
+                        "next_safe_action": "milestone_integration",
+                        "stop_reason": None,
+                        "prior_integration_session_ids": prior_sessions,
+                        "integration_session_id": None,
+                    })
+                    try:
+                        self._advance_cycle(
+                            cycle_path, cycle, "integration_ready", RepositoryInspector(project.repository),
+                            "explicit_human_decision_replay_repaired_integration_ready",
+                        )
+                        cycle_valid = True
+                    except (ConveyorError, OSError, ValueError) as exc:
+                        repair_failure = repair_failure or f"integration cycle replay repair failed: {type(exc).__name__}"
+                checks.append({
+                    "validator": "applied_integration_cycle_matches_resolution",
+                    "passed": cycle_valid,
+                    "evidence": {"phase": (cycle or {}).get("current_phase"), "repair_attempted": repair_attempted},
+                })
             return checks, repair_failure
 
         persisted = self.load_project_state(project)
@@ -2777,7 +3160,9 @@ class CycleEngine:
                 "artifact_repair_required": not artifacts_valid,
                 "dry_run": dry_run,
                 "next_normal_action": (
-                    "queue_reconciliation" if artifacts_valid else "human_resolution_artifact_repair"
+                    "milestone_integration"
+                    if artifacts_valid and (prior.get("original_gate") or {}).get("classification") == "integration_planning_baseline_approval"
+                    else ("queue_reconciliation" if artifacts_valid else "human_resolution_artifact_repair")
                 ),
                 "safe_next_action": f"scripts/conveyor status --project {project.project_id}",
             })
@@ -2815,6 +3200,7 @@ class CycleEngine:
             "actor_classification": "explicit_user_approval",
             "original_gate": gate_value,
             "original_gate_fingerprint": evaluation.get("gate_fingerprint"),
+            "planning_baseline_provenance": evaluation.get("planning_baseline_provenance"),
             "expected_repository_identity": (
                 {
                     "repository_id": gate.get("expected_repository_id"),
@@ -2824,8 +3210,8 @@ class CycleEngine:
                 else None
             ),
             "expected_milestone": gate.get("expected_milestone"),
-            "expected_branch": gate.get("expected_branch"),
-            "expected_milestone_head": gate.get("expected_head"),
+            "expected_branch": gate.get("expected_branch") or gate.get("feature_branch"),
+            "expected_milestone_head": gate.get("expected_head") or gate.get("milestone_head"),
             "evidence_validators_executed": [item["validator"] for item in evaluation["checks"]],
             "evidence_results": evaluation["checks"],
             "previous_state": (
@@ -2846,13 +3232,23 @@ class CycleEngine:
             "audit_log_location": audit_log_location,
             "report_location": str(accepted_report_path),
             "next_normal_action": (
-                "queue_reconciliation" if evaluation["accepted"] else "human_decision_required"
+                "milestone_integration"
+                if evaluation["accepted"] and gate.get("classification") == "integration_planning_baseline_approval"
+                else ("queue_reconciliation" if evaluation["accepted"] else "human_decision_required")
             ),
             "next_sessions": (
-                ["product-architect (planning-only)", "$feature-inventory"]
-                if evaluation["accepted"]
-                else []
+                []
+                if gate.get("classification") == "integration_planning_baseline_approval"
+                else (["product-architect (planning-only)", "$feature-inventory"]
+                if evaluation["accepted"] else [])
             ),
+            "feature_factory_would_launch": False,
+            "product_architect_would_launch": False if gate.get("classification") == "integration_planning_baseline_approval" else bool(evaluation["accepted"]),
+            "feature_inventory_would_launch": False if gate.get("classification") == "integration_planning_baseline_approval" else bool(evaluation["accepted"]),
+            "milestone_integrator_would_launch": bool(
+                evaluation["accepted"] and gate.get("classification") == "integration_planning_baseline_approval"
+            ),
+            "session_launched_during_resolution": False,
             "safe_next_action": (
                 f"scripts/conveyor reconcile --project {project.project_id} "
                 "--resolve-human-decision --reason <approved-reason>"
@@ -3089,6 +3485,44 @@ class CycleEngine:
                 event_command_category="human_decision_resolution",
                 event_validation_outcome="passed",
             )
+            if gate.get("classification") == "integration_planning_baseline_approval":
+                cycle_path = inspector.cycle_state_path()
+                cycle = self.cycle_store.read(cycle_path)
+                if cycle is None or cycle.get("human_decision_required", {}).get("gate_id") != gate.get("gate_id"):
+                    raise RecoveryError("resolved integration gate is not bound to the persisted repository cycle")
+                prior_session = cycle.get("integration_session_id")
+                prior_sessions = list(cycle.get("prior_integration_session_ids") or [])
+                if isinstance(prior_session, str) and prior_session not in prior_sessions:
+                    prior_sessions.append(prior_session)
+                planning_baseline = {
+                    "schema_version": 1,
+                    "commit": gate.get("candidate_validated_planning_commit"),
+                    "previous_validated_commit": gate.get("previous_last_validated_commit"),
+                    "evidence_fingerprint": (
+                        revalidated.get("planning_baseline_provenance") or {}
+                    ).get("evidence_fingerprint"),
+                    "reconciliation_run": (gate.get("planning_baseline_evidence") or {}).get("reconciliation_run"),
+                    "validated_at": report["timestamp"],
+                    "approval_resolution_id": resolution_id,
+                    "approval_resolution_fingerprint": fingerprint,
+                }
+                cycle.update({
+                    "validated_planning_baseline": planning_baseline,
+                    "integration_status": "ready",
+                    "integration_gate": None,
+                    "human_decision_required": None,
+                    "failure_classification": None,
+                    "retry_exhausted": False,
+                    "next_safe_action": "milestone_integration",
+                    "stop_reason": None,
+                    "prior_integration_session_ids": prior_sessions,
+                    "integration_session_id": None,
+                    "resume_instructions": f"scripts/conveyor run --project {project.project_id} --mode {project.automation_mode}",
+                })
+                self._advance_cycle(
+                    cycle_path, cycle, "integration_ready", inspector,
+                    "explicit_human_decision_resolved_integration_ready",
+                )
             atomic_write_json(accepted_report_path, report)
             return report
         finally:
@@ -3173,6 +3607,8 @@ class CycleEngine:
             action = plan["proposed_next_action"]
             if action == "resume":
                 return self.resume_project(effective)
+            if action == "milestone_integration":
+                return self.resume_project(effective, run_id=run_id)
             if action == "queue_reconciliation":
                 self._execute_queue_reconciliation(effective, mode, run_id, project_state)
                 if mode == "one_feature":
@@ -3194,6 +3630,8 @@ class CycleEngine:
                         project_state,
                         reservation_held=True,
                     )
+                    if evidence.get("outcome") == "human_decision_required":
+                        return {"project_id": project.project_id, **evidence}
                     completed_features += 1
                     queue = FeatureQueue.from_location(project.repository, project.queue_location)
                     inspector = RepositoryInspector(project.repository)

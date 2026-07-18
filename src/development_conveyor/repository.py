@@ -207,7 +207,11 @@ class RepositoryInspector:
     def ensure_runtime_ignored(self) -> list[str]:
         """Ignore runtime-only state in local Git metadata, never tracked source."""
 
-        patterns = [".factory/conveyor-state.json", ".factory/locks/writer.json"]
+        patterns = [
+            ".factory/conveyor-state.json",
+            ".factory/locks/writer.json",
+            ".factory/runtime/",
+        ]
         exclude = self.common_git_dir / "info/exclude"
         existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
         lines = existing.splitlines()

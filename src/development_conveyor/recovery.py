@@ -327,7 +327,7 @@ def assess_recovery(project: Project, state: dict[str, Any] | None) -> RecoveryA
 
     phase = state.get("current_phase")
     operations = [name for name, active in current["git_operations"].items() if active]
-    integration_phases = {"integration_pending", "integrating", "integration_validation"}
+    integration_phases = {"integration_pending", "integration_ready", "integrating", "integration_validation"}
     if operations and phase not in integration_phases:
         conflicts.append("active Git operation is inconsistent with the recorded cycle phase")
 
