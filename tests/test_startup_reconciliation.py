@@ -473,14 +473,15 @@ class StartupReconciliationTests(unittest.TestCase):
             self.assertEqual(result["outcome"], "milestone_ready_for_merge")
             self.assertEqual(launcher.actions, ["milestone_gate"])
 
-    def test_resolved_human_decision_and_repaired_validation_use_reconciliation_checkpoint(self):
+    def test_bare_resolution_marker_cannot_bypass_human_gate(self):
         with tempfile.TemporaryDirectory() as temporary:
             _, project, engine = self._engine(Path(temporary))
             self._persist_state(
                 engine, project, "human_decision_required", decision={"resolved": True}
             )
             human_plan = engine.project_plan(project)
-            self.assertEqual(human_plan["repair_transition_path"][1], "queue_reconciliation")
+            self.assertEqual(human_plan["state_consistency"], "human_decision_required")
+            self.assertEqual(human_plan["repair_transition_path"], [])
             self._persist_state(engine, project, "validation_failed")
             validation_plan = engine.project_plan(project)
             self.assertEqual(

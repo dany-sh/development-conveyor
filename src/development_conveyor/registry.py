@@ -31,6 +31,7 @@ class Project:
     last_accepted_commit: str | None
     current_state: str
     registration_notes: str
+    human_decision_gate: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "Project":
@@ -54,6 +55,7 @@ class Project:
             last_accepted_commit=value["last_accepted_commit"],
             current_state=value["current_state"],
             registration_notes=value["registration_notes"],
+            human_decision_gate=value.get("human_decision_gate"),
         )
 
 
@@ -73,4 +75,3 @@ class ProjectRegistry:
 
     def all(self) -> list[Project]:
         return sorted(self._projects.values(), key=lambda item: (-item.priority, item.project_id))
-

@@ -31,7 +31,31 @@
           "last_accepted_feature": {"type": ["string", "null"]},
           "last_accepted_commit": {"type": ["string", "null"]},
           "current_state": {"type": "string", "enum": ["discover", "bootstrap_required", "baseline_required", "queue_reconciliation", "feature_ready", "feature_running", "feature_review", "feature_accepted", "milestone_gate", "milestone_ready_for_merge", "human_merge_approval", "next_milestone", "human_decision_required", "repository_dirty", "validation_failed", "architecture_decision_required", "destructive_change_required", "conveyor_error", "paused", "disabled"]},
-          "registration_notes": {"type": "string"}
+          "registration_notes": {"type": "string"},
+          "human_decision_gate": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["gate_id", "classification", "reason", "expected_repository_id", "expected_path_fingerprint", "expected_milestone", "expected_branch", "expected_head", "approved_next_state", "retained_process_id", "feature_id", "accepted_commit", "integrated_commit", "recovery_record", "recovery_record_sha256", "integration_record", "integration_record_sha256"],
+            "properties": {
+              "gate_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"},
+              "classification": {"type": "string", "enum": ["retained_integration_writer_lease"]},
+              "reason": {"type": "string", "minLength": 1},
+              "expected_repository_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "expected_path_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "expected_milestone": {"type": "string", "minLength": 1},
+              "expected_branch": {"type": "string", "minLength": 1},
+              "expected_head": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+              "approved_next_state": {"type": "string", "enum": ["queue_reconciliation"]},
+              "retained_process_id": {"type": "integer", "minimum": 1},
+              "feature_id": {"type": "string", "minLength": 1},
+              "accepted_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+              "integrated_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+              "recovery_record": {"type": "string", "pattern": "^factory-integration/forced-lease-release-[0-9]{8}T[0-9]{6}Z\\.json$"},
+              "recovery_record_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "integration_record": {"type": "string", "pattern": "^factory-integration/[A-Za-z0-9_.-]+\\.json$"},
+              "integration_record_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
         }
       }
     }

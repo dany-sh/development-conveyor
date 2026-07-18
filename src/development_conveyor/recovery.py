@@ -55,18 +55,6 @@ def _gate_reopen_policy(project: Project) -> tuple[bool, str]:
     return False, "repository policy does not explicitly permit rerunning milestone gates"
 
 
-def _decision_resolved(document: dict[str, Any] | None) -> bool:
-    decision = document.get("human_decision_required") if document else None
-    if not isinstance(decision, dict):
-        return False
-    return bool(
-        decision.get("resolved") is True
-        or decision.get("resolved_at")
-        or decision.get("resolution")
-        or decision.get("status") == "resolved"
-    )
-
-
 def _timestamp_after(value: str | None, baseline: str | None) -> bool:
     if not value or not baseline:
         return False
@@ -276,7 +264,6 @@ def assess_startup_reconciliation(
 
     if (
         persisted_state == "human_decision_required"
-        and not _decision_resolved(persisted)
         and not (deterministic_failure and deterministic_failure.get("environment_remediation_verified"))
     ):
         return StartupReconciliation(

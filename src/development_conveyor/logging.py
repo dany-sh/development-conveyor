@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -76,12 +78,25 @@ class JsonStateStore:
 class EventLogger:
     def __init__(self, path: Path, schema_path: Path):
         self.path = path
+        self.lock_path = path.with_name(f"{path.name}.lock")
         self.schema = load_json(schema_path)
 
-    def append(self, event: dict[str, Any]) -> None:
-        value = redact_value(event)
-        validate_schema(value, self.schema)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    @contextmanager
+    def synchronized(self):
+        """Serialize every read-modify-write and append operation on the shared event log."""
+
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+    def _append_locked(self, value: dict[str, Any]) -> None:
+        """Append one already-redacted, schema-validated event while synchronized."""
+
         encoded = (json.dumps(value, sort_keys=True) + "\n").encode("utf-8")
         descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
@@ -89,6 +104,13 @@ class EventLogger:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+    def append(self, event: dict[str, Any]) -> None:
+        value = redact_value(event)
+        validate_schema(value, self.schema)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.synchronized():
+            self._append_locked(value)
 
 
 def run_event(

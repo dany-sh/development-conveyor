@@ -165,3 +165,55 @@ This log records model configuration and deterministic deployment evidence. It n
 - Configuration and live dry-run validation: `scripts/conveyor validate-config`, `scripts/conveyor status --project case-manager`, and `scripts/conveyor resume --project case-manager --dry-run` passed. Before recovery the dry-run classified `branch_invariant_violated` with `uncommitted_feature_work`, required branch recovery and a future writer lock, and denied resume.
 - Controlled Case Manager recovery: `recover-feature-branch` recorded the three dirty-file hashes, used only non-forced `git switch -c`, created `codex/p0-001-decide-and-record-the-per-case-persistence-authority` at `826de2ab2c517e4bba53ed54f0cf2ddee50f38ef`, preserved all three hashes and dirty entries byte-for-byte, and left `codex/p0-foundation` at the same commit. Report: `reports/99c2f421-6b5a-4f8a-ae43-a5aefc12657e/feature-branch-recovery.json`.
 - Final live state: P0-001 remains `ready`; `accepted_feature_commit` remains null; the three original files remain modified; no Git operation or writer lease exists; no repository session launched; `branch_recovery_required` is false; `writer_lock_required_before_resume` is true; and `resume_allowed_after_lock` is true.
+
+### Model execution — 2026-07-18T06:44:37+00:00
+
+- Agent role: `feature-worker`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `explicit_human_decision_resolution_repair`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-18T07:05:26+00:00
+
+- Agent role: `test-engineer`
+- Effective model: `gpt-5.6-terra`
+- Effective reasoning effort: `high`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `human_resolution_test_evidence`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-18T07:05:26+00:00
+
+- Agent role: `adversarial-reviewer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `xhigh`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `human_resolution_adversarial_review`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-18T07:19:21+00:00
+
+- Agent role: `adversarial-reviewer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `xhigh`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `human_resolution_second_adversarial_review`
+- Safety and autonomy contracts unchanged: `true`
+
+### Explicit human-decision resolution repair — accepted 2026-07-18
+
+- Root cause: the controller could record `human_decision_required` but exposed no supported interface for attaching explicit user approval to the exact recorded gate. Normal reconciliation therefore continued to stop after the retained F002 integration writer lease had been safely recovered and removed.
+- CLI and contract: `scripts/conveyor reconcile --project PROJECT --resolve-human-decision --reason REASON [--dry-run]` binds the normalized non-sensitive reason to a deterministic project-and-gate fingerprint. Resolution requires the pinned repository identity, milestone, branch, exact HEAD, clean worktree, no Git operation, application cycle, writer lease, or foreign controller reservation, local dead-process proof, hash-pinned structured forced-release and integration records, successful integration validation, present accepted/integrated commits, and matching committed queue evidence.
+- Safety and idempotency: apply revalidates under the controller reservation, transitions only `human_decision_required -> queue_reconciliation`, clears only the matching active gate, and preserves the exact original gate and resolution in immutable history. Exact replay verifies and, when safe, atomically repairs deterministic report/audit artifacts. Normal event appends and healing share the controller-wide event-log lock, and a newer interleaved gate or evidence change returns structured rejection without partial state mutation.
+- Validation: all 169 unittest cases and all 169 pytest cases passed. The final adversarial re-review reported 0 Critical, 0 High, and 0 Medium findings.
+- Live dry-run: all 29 validators passed; controller state, application repository, locks, branches, commits, reports intended to represent applied resolution, and application runtime state were not written.
+- Applied resolution: `human-resolution-2afcf2ce9e4ad9478ddc3772` recorded explicit user approval and the state transition `human_decision_required -> queue_reconciliation`.
+- Final controller state: `queue_reconciliation`; selected feature `null`; next action `queue_reconciliation`; the next repository sessions are planning-only `product-architect` and `$feature-inventory`.
+- Application isolation: the exact Interview Companion before/after snapshot matched. No application file, branch, commit, writer lock, controller cycle, or repository-local state changed during resolution.
+- Registration/runtime distinction: `config/projects.yaml` intentionally retains `current_state: human_decision_required` as the immutable registration seed and original-gate context. The schema-validated runtime project state under `state/projects/` is authoritative after the accepted resolution; the seed is not rewritten as operational state.
