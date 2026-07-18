@@ -96,6 +96,7 @@ class SafetyPolicy:
 
     SAFE_GIT_READ_COMMANDS = {
         "branch",
+        "check-ref-format",
         "check-ignore",
         "diff",
         "for-each-ref",
@@ -149,3 +150,25 @@ class SafetyPolicy:
 
         raise SafetyViolation(f"controller executable is not allowlisted: {executable}")
 
+    @classmethod
+    def validate_feature_branch_switch(
+        cls,
+        argv: list[str],
+        *,
+        cwd: Path,
+        registered_repository: Path,
+        branch: str,
+        starting_commit: str | None,
+    ) -> None:
+        """Allow only a non-forced feature-branch switch at an exact repository root."""
+
+        resolved_cwd = cwd.expanduser().resolve()
+        if resolved_cwd != registered_repository.expanduser().resolve():
+            raise SafetyViolation("feature-branch recovery is outside the registered repository")
+        expected = (
+            ["git", "switch", "-c", branch, starting_commit]
+            if starting_commit is not None
+            else ["git", "switch", branch]
+        )
+        if argv != expected:
+            raise SafetyViolation("only the exact non-forced feature-branch switch is allowed")

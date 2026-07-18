@@ -21,7 +21,7 @@ from development_conveyor.sessions import (
     classify_codex_failure,
     parse_retry_contract,
 )
-from tests.helpers import controller_configuration, git, synthetic_repository, write_json
+from tests.helpers import SyntheticLauncher, controller_configuration, git, synthetic_repository, write_json
 
 
 MODEL = "gpt-5.6-sol"
@@ -205,14 +205,7 @@ class IntegrationUpgradeFailureLauncher:
         self.actions.append(request.action)
         plan = self._plan(request)
         if request.action == "feature_cycle":
-            path = request.project.repository / request.project.queue_location
-            queue = json.loads(path.read_text())
-            queue["features"][0].update({
-                "status": "accepted",
-                "branch": "codex/f001-synthetic-feature",
-                "integration_base_commit": git(request.project.repository, "rev-parse", "HEAD"),
-            })
-            write_json(path, queue)
+            SyntheticLauncher()._accept_feature(request.project)
             return SessionResult(request.action, 0, "feature-session", "accepted", plan)
         return SessionResult(
             request.action,

@@ -90,12 +90,77 @@ class RepositoryInspector:
     def dirty_entries(self) -> list[str]:
         return [line for line in self.git(["status", "--porcelain"]).stdout.splitlines() if line]
 
+    def modified_file_hashes(self) -> dict[str, str]:
+        """Hash an unambiguous dirty set consisting only of tracked modified files."""
+
+        raw = self.git(["status", "--porcelain=v1", "-z"]).stdout
+        hashes: dict[str, str] = {}
+        for entry in (item for item in raw.split("\0") if item):
+            if len(entry) < 4 or entry[:2] not in {" M", "M ", "MM"} or entry[2] != " ":
+                raise RepositoryError(
+                    "dirty-state recovery supports only tracked modified files; "
+                    f"ambiguous status entry: {entry[:2]!r}"
+                )
+            relative = entry[3:]
+            candidate = (self.root / relative).resolve()
+            try:
+                candidate.relative_to(self.root)
+            except ValueError as exc:
+                raise RepositoryError("dirty path escapes the registered repository") from exc
+            if not candidate.is_file():
+                raise RepositoryError(f"dirty path is not a regular file: {relative}")
+            hashes[relative] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        return dict(sorted(hashes.items()))
+
     @property
     def is_clean(self) -> bool:
         return not self.dirty_entries
 
     def ref_exists(self, value: str) -> bool:
         return self.rev_parse(f"{value}^{{commit}}", check=False) is not None
+
+    def branch_worktree(self, branch: str) -> Path | None:
+        reference = f"refs/heads/{branch}"
+        matches = [
+            Path(str(item["worktree"])).resolve()
+            for item in self.worktrees()
+            if item.get("branch") == reference and item.get("worktree")
+        ]
+        if len(matches) > 1:
+            raise RepositoryError(f"feature branch is checked out in multiple worktrees: {branch}")
+        return matches[0] if matches else None
+
+    def switch_feature_branch(self, branch: str, *, starting_commit: str | None = None) -> GitResult:
+        """Switch without force, checkout, stash, reset, clean, or content regeneration."""
+
+        valid = self.git(["check-ref-format", "--branch", branch], check=False)
+        if valid.returncode != 0:
+            raise RepositoryError(f"invalid feature branch name: {branch}")
+        argv = (
+            ["git", "switch", "-c", branch, starting_commit]
+            if starting_commit is not None
+            else ["git", "switch", branch]
+        )
+        SafetyPolicy.validate_feature_branch_switch(
+            argv,
+            cwd=self.root,
+            registered_repository=self.root,
+            branch=branch,
+            starting_commit=starting_commit,
+        )
+        result = subprocess.run(
+            argv,
+            cwd=self.root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RepositoryError(
+                result.stderr.strip() or result.stdout.strip() or "feature branch switch failed"
+            )
+        return GitResult(tuple(argv), result.stdout, result.stderr, result.returncode)
 
     def is_ancestor(self, ancestor: str, descendant: str) -> bool:
         result = self.git(["merge-base", "--is-ancestor", ancestor, descendant], check=False)

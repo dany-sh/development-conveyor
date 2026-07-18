@@ -344,6 +344,32 @@ def assess_recovery(project: Project, state: dict[str, Any] | None) -> RecoveryA
     if operations and phase not in integration_phases:
         conflicts.append("active Git operation is inconsistent with the recorded cycle phase")
 
+    feature_phases = {"branch_preparing", "feature_in_progress", "feature_review", "feature_repair"}
+    expected_feature_branch = state.get("feature_branch")
+    if (
+        not conflicts
+        and phase in feature_phases
+        and isinstance(expected_feature_branch, str)
+        and (
+            not inspector.ref_exists(expected_feature_branch)
+            or current.get("branch") != expected_feature_branch
+            or inspector.branch_worktree(expected_feature_branch) != project.repository.resolve()
+        )
+    ):
+        return RecoveryAssessment(
+            "branch_recovery_required",
+            None,
+            {"git": current, "state": state},
+            {
+                "reason": "persisted feature branch is not the actual repository session branch",
+                "actual_branch": current.get("branch"),
+                "expected_branch": expected_feature_branch,
+                "branch_recovery_required": True,
+                "resume_allowed": False,
+                "safe_action": f"scripts/conveyor recover-feature-branch --project {project.project_id}",
+            },
+        )
+
     last_git = state.get("last_verified_git_state")
     if isinstance(last_git, dict):
         expected_branch = last_git.get("branch")

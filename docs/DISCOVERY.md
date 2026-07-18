@@ -13,7 +13,7 @@ The implementation inspected the installed `app-bootstrap`, `feature-inventory`,
 Key integration conclusions:
 
 - Queue and adapter files are JSON-compatible YAML.
-- Feature Factory owns branch preparation and the application production writer lease.
+- The controller owns deterministic creation and verification of the selected feature branch plus the outer writer-lease lifetime. Feature Factory owns queue-state reconciliation on that branch, application implementation, review, acceptance, and lease heartbeats under the matching agent-run identity.
 - Milestone Integrator owns accepted-commit discovery, cherry-pick integration, combined validation, and recovery.
 - Milestone Gate owns deterministic gate evidence and requires a read-only release-auditor result.
 - The controller must coordinate these surfaces, not embed a second application writer or integration implementation.

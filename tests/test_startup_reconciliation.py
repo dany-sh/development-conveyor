@@ -414,7 +414,7 @@ class StartupReconciliationTests(unittest.TestCase):
             engine = CycleEngine(controller_configuration(Path(temporary), project), launcher)
             result = engine.run_project(project, "one_feature")
             self.assertEqual(result["outcome"], "one_feature_integrated")
-            self.assertEqual(launcher.actions, ["feature_cycle"])
+            self.assertEqual(launcher.actions, ["feature_cycle", "milestone_integration"])
             queue = json.loads((repository / project.queue_location).read_text(encoding="utf-8"))
             self.assertEqual(queue["features"][1]["status"], "ready")
 

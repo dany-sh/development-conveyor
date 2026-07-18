@@ -18,7 +18,10 @@ class SyntheticIntegrationTests(unittest.TestCase):
             engine = CycleEngine(controller_configuration(root, project), launcher)
             result = engine.run_project(project, "milestone")
             self.assertEqual(result["outcome"], "milestone_ready_for_merge")
-            self.assertEqual(launcher.actions, ["feature_cycle", "milestone_gate"])
+            self.assertEqual(
+                launcher.actions,
+                ["feature_cycle", "milestone_integration", "milestone_gate"],
+            )
             self.assertEqual(git(repository, "rev-parse", "main"), baseline)
             self.assertNotEqual(git(repository, "rev-parse", project.milestone_branch), baseline)
             queue = json.loads((repository / project.queue_location).read_text())
@@ -42,4 +45,7 @@ class SyntheticIntegrationTests(unittest.TestCase):
             engine.project_store.write(engine.project_state_path(project), project_state)
             result = engine.resume_project(project)
             self.assertEqual(result["outcome"], "milestone_ready_for_merge")
-            self.assertEqual(launcher.actions, ["feature_cycle", "milestone_gate"])
+            self.assertEqual(
+                launcher.actions,
+                ["feature_cycle", "milestone_integration", "milestone_gate"],
+            )

@@ -63,6 +63,7 @@ class SessionRequest:
     repair_hypothesis: str | None = None
     remediation_action: str | None = None
     repair_supporting_evidence: str | None = None
+    continuation_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -392,6 +393,18 @@ class SessionLauncher:
                 "Reinspect current repository evidence, record the changed hypothesis in the repository run log, "
                 "and do not repeat the failed approach. Stop if the authorized remediation is no longer justified "
                 "or a human-decision condition is reached.\n"
+            )
+        if request.continuation_reason == "uncorroborated_completion":
+            prompt += (
+                "\n## Uncorroborated completion continuation\n\n"
+                "The previous session exited normally, but its claimed completion was not corroborated by Git "
+                "and queue evidence. The feature branch and worktree are now verified, and the controller has "
+                "reacquired the matching repository writer lease before this continuation. Do not acquire a "
+                "second lease and do not release the controller-owned lease. Continue this same session through "
+                "implementation, repository-required validation, adversarial review, queue and documentation "
+                "updates, and exactly one accepted feature commit. Run acceptance preflight with the existing "
+                "agent-run identity. Do not invoke milestone integration and do not switch to the milestone "
+                "branch; the controller will verify the accepted commit before integration is authorized.\n"
             )
         if request.action in {"feature_cycle", "milestone_integration"}:
             prompt += (

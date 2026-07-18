@@ -12,7 +12,12 @@ from typing import Any
 
 from .config import Configuration
 from .errors import ConveyorError, LockError, QueueError, RecoveryError, SessionError
-from .locks import DurableLock, inspect_repository_writer_lock, make_lock_record
+from .locks import (
+    DurableLock,
+    RepositoryWriterLease,
+    inspect_repository_writer_lock,
+    make_lock_record,
+)
 from .logging import EventLogger, JsonStateStore, atomic_write_bytes, atomic_write_json, run_event, utc_now
 from .queue import FeatureQueue, resolve_queue_path
 from .recovery import StartupReconciliation, assess_recovery, assess_startup_reconciliation
@@ -320,6 +325,7 @@ class CycleEngine:
         project_state = self.load_project_state(project) or {}
         prior_evidence = project_state.get("state_evidence") if isinstance(project_state.get("state_evidence"), dict) else {}
         superseded = prior_evidence.get("superseded_cycle") if isinstance(prior_evidence, dict) else None
+        feature_branch = self._expected_feature_branch(project, feature) if feature else None
         return {
             "schema_version": 1,
             "conveyor_run_id": run_id,
@@ -336,8 +342,12 @@ class CycleEngine:
                 "all_complete": all(value in {"done", "integrated"} for value in dependency_statuses.values()),
             },
             "queue_fingerprint": queue_fingerprint,
-            "feature_branch": feature.get("branch") if feature else None,
+            "feature_branch": feature_branch,
             "feature_worktree": None,
+            "session_completion_classification": None,
+            "session_completion_flags": [],
+            "session_completion_evidence": None,
+            "branch_recovery": None,
             "feature_starting_commit": starting_commit,
             "accepted_feature_commit": None,
             "milestone_branch": project.milestone_branch,
@@ -368,6 +378,29 @@ class CycleEngine:
             "created_at": stamp,
             "updated_at": stamp,
         }
+
+    @staticmethod
+    def _expected_feature_branch(project: Project, feature: dict[str, Any]) -> str:
+        recorded = feature.get("branch")
+        if isinstance(recorded, str) and recorded:
+            return recorded
+        try:
+            adapter = json.loads((project.repository / project.validation_source).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RecoveryError(f"cannot derive feature branch from repository adapter: {exc}") from exc
+        pattern = (adapter.get("git") or {}).get("feature_branch_pattern")
+        feature_id = feature.get("id")
+        title = feature.get("name") or feature.get("title")
+        if not isinstance(pattern, str) or not isinstance(feature_id, str) or not isinstance(title, str):
+            raise RecoveryError("feature branch is absent and adapter branch metadata is incomplete")
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+        try:
+            branch = pattern.format(feature_id=feature_id, feature_id_lower=feature_id.lower(), slug=slug)
+        except (KeyError, ValueError) as exc:
+            raise RecoveryError(f"feature branch pattern is unsupported: {pattern}") from exc
+        if not branch:
+            raise RecoveryError("derived feature branch is empty")
+        return branch
 
     def _archive_superseded_cycle(
         self,
@@ -435,6 +468,7 @@ class CycleEngine:
             "queue_fingerprint": state.get("queue_fingerprint"),
             "selected_feature": state.get("selected_feature"),
             "dependency_evidence": state.get("dependency_evidence"),
+            "feature_branch": state.get("feature_branch"),
         }
         missing = sorted(key for key, value in required.items() if value is None or value == "")
         if missing:
@@ -453,6 +487,83 @@ class CycleEngine:
         compatibility = state.get("preflight_compatibility")
         if compatibility is not None and compatibility.get("compatible") is not True:
             raise RecoveryError("feature cycle launch requires compatible Codex preflight evidence")
+
+    def _writer_lease(self, project: Project, inspector: RepositoryInspector) -> RepositoryWriterLease:
+        return RepositoryWriterLease(
+            inspector.writer_lock_path(
+                self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+            ),
+            project.repository,
+        )
+
+    def _verify_feature_branch_runtime(
+        self,
+        project: Project,
+        inspector: RepositoryInspector,
+        state: dict[str, Any],
+        *,
+        require_starting_head: bool,
+    ) -> dict[str, Any]:
+        branch = state.get("feature_branch")
+        starting = state.get("feature_starting_commit")
+        milestone = state.get("milestone_branch")
+        milestone_start = state.get("milestone_pre_integration_commit")
+        if not all(isinstance(item, str) and item for item in (branch, starting, milestone, milestone_start)):
+            raise RecoveryError("feature branch runtime evidence is incomplete")
+        branch_head = inspector.rev_parse(str(branch), check=False)
+        milestone_head = inspector.rev_parse(str(milestone), check=False)
+        worktree = inspector.branch_worktree(str(branch)) if branch_head else None
+        evidence = {
+            "expected_branch": branch,
+            "actual_branch": inspector.current_branch,
+            "feature_branch_head": branch_head,
+            "feature_starting_commit": starting,
+            "actual_worktree": str(worktree) if worktree else None,
+            "milestone_branch": milestone,
+            "milestone_branch_head": milestone_head,
+            "milestone_pre_integration_commit": milestone_start,
+            "head": inspector.head,
+            "git_operations": inspector.git_operation_state(),
+        }
+        if branch_head is None:
+            raise RecoveryError("persisted feature branch is missing from Git")
+        if worktree != project.repository.resolve() or inspector.current_branch != branch:
+            raise RecoveryError("repository session is not executing in the verified feature worktree")
+        if any(evidence["git_operations"].values()):
+            raise RecoveryError("feature branch runtime has an unfinished Git operation")
+        if milestone_head != milestone_start:
+            raise RecoveryError("milestone branch ref changed during the feature cycle")
+        if require_starting_head and (branch_head != starting or inspector.head != starting):
+            raise RecoveryError("feature branch does not point to the verified feature starting commit")
+        return evidence
+
+    def _prepare_feature_branch(
+        self,
+        project: Project,
+        inspector: RepositoryInspector,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        branch = str(state["feature_branch"])
+        starting = str(state["feature_starting_commit"])
+        milestone_head = inspector.rev_parse(str(state["milestone_branch"]), check=False)
+        if milestone_head != state.get("milestone_pre_integration_commit") or milestone_head != starting:
+            raise RecoveryError("milestone branch changed before feature branch preparation")
+        branch_head = inspector.rev_parse(branch, check=False)
+        if branch_head is None:
+            inspector.switch_feature_branch(branch, starting_commit=starting)
+        elif branch_head == starting:
+            existing_worktree = inspector.branch_worktree(branch)
+            if existing_worktree not in {None, project.repository.resolve()}:
+                raise RecoveryError("feature branch already belongs to another worktree")
+            if inspector.current_branch != branch:
+                inspector.switch_feature_branch(branch)
+        else:
+            raise RecoveryError("existing feature branch does not point to the verified starting commit")
+        evidence = self._verify_feature_branch_runtime(
+            project, inspector, state, require_starting_head=True
+        )
+        state["feature_worktree"] = str(project.repository.resolve())
+        return evidence
 
     @staticmethod
     def _git_checkpoint(inspector: RepositoryInspector) -> dict[str, Any]:
@@ -514,13 +625,15 @@ class CycleEngine:
         if writer.exists:
             record = writer.record or {}
             recorded_run = record.get("agent_run") or record.get("run_id")
-            matching_resume = (
-                request.mode in {"resume", "repair"}
+            matching_feature_lease = (
+                request.action == "feature_cycle"
                 and recorded_run == request.run_id
-                and writer.process_alive is False
-                and not writer.ambiguous
+                and record.get("feature_id") == request.feature
+                and record.get("branch") == inspector.current_branch
+                and Path(str(record.get("worktree"))).expanduser().resolve()
+                == request.project.repository.resolve()
             )
-            if not matching_resume:
+            if not matching_feature_lease:
                 raise LockError("repository writer lease exists; refusing duplicate production session")
         identity = inspector.identity()
         reservation = None if reservation_held else self._launch_lock(request.project, inspector)
@@ -839,6 +952,105 @@ class CycleEngine:
             raise QueueError("accepted feature commit cannot be resolved")
         return accepted
 
+    def _verify_accepted_feature(
+        self,
+        project: Project,
+        inspector: RepositoryInspector,
+        state: dict[str, Any],
+        feature: dict[str, Any],
+    ) -> str:
+        if feature.get("status") not in {"accepted", "integration_pending"}:
+            raise QueueError("feature is not backed by accepted queue evidence")
+        if feature.get("integration_status") != "pending":
+            raise QueueError("accepted feature integration status is not pending")
+        acceptance = feature.get("acceptance")
+        if not isinstance(acceptance, dict) or not all(
+            acceptance.get(key) is True
+            for key in ("tests_passed", "review_passed", "documentation_current")
+        ):
+            raise QueueError("accepted feature acceptance evidence is incomplete")
+        accepted = self._resolve_accepted(inspector, feature)
+        starting = feature.get("integration_base_commit") or state.get("feature_starting_commit")
+        branch = state.get("feature_branch")
+        if not isinstance(starting, str) or not inspector.ref_exists(starting):
+            raise QueueError("feature starting commit evidence is missing")
+        if not isinstance(branch, str) or inspector.rev_parse(branch, check=False) != accepted:
+            raise QueueError("accepted commit is not the verified feature branch HEAD")
+        if inspector.commit_count(starting, accepted) != 1:
+            raise QueueError("feature does not have exactly one accepted commit relative to its recorded start")
+        if str(feature["id"]).lower() not in inspector.commit_subject(accepted).lower():
+            raise QueueError("accepted commit message does not identify the feature")
+        self._verify_feature_branch_runtime(
+            project, inspector, state, require_starting_head=False
+        )
+        if not inspector.is_clean:
+            raise QueueError("accepted feature worktree is not clean")
+        return accepted
+
+    def _classify_successful_feature_result(
+        self,
+        project: Project,
+        inspector: RepositoryInspector,
+        state: dict[str, Any],
+        feature: dict[str, Any] | None,
+    ) -> tuple[str, list[str], dict[str, Any], str | None]:
+        expected = state.get("feature_branch")
+        branch_head = inspector.rev_parse(str(expected), check=False) if isinstance(expected, str) else None
+        worktree = inspector.branch_worktree(str(expected)) if branch_head and isinstance(expected, str) else None
+        milestone_head = inspector.rev_parse(str(state.get("milestone_branch")), check=False)
+        dirty = inspector.dirty_entries
+        evidence: dict[str, Any] = {
+            "actual_branch": inspector.current_branch,
+            "expected_branch": expected,
+            "actual_worktree": str(worktree) if worktree else None,
+            "expected_worktree": state.get("feature_worktree"),
+            "feature_branch_head": branch_head,
+            "feature_starting_commit": state.get("feature_starting_commit"),
+            "milestone_branch_head": milestone_head,
+            "milestone_pre_integration_commit": state.get("milestone_pre_integration_commit"),
+            "dirty_entry_count": len(dirty),
+            "queue_feature_status": feature.get("status") if feature else None,
+            "queue_accepted_commit": feature.get("accepted_commit") if feature else None,
+        }
+        branch_violated = bool(
+            not isinstance(expected, str)
+            or branch_head is None
+            or inspector.current_branch != expected
+            or worktree != project.repository.resolve()
+            or milestone_head != state.get("milestone_pre_integration_commit")
+        )
+        if branch_violated:
+            flags = ["branch_invariant_violated"]
+            if dirty:
+                flags.append("uncommitted_feature_work")
+            return "branch_invariant_violated", flags, evidence, None
+        if feature is None:
+            return "queue_evidence_missing", ["queue_evidence_missing"], evidence, None
+        accepted: str | None = None
+        if feature.get("status") in {"accepted", "integration_pending"}:
+            try:
+                accepted = self._verify_accepted_feature(project, inspector, state, feature)
+            except QueueError as exc:
+                evidence["accepted_verification_error"] = str(exc)
+                flags = ["feature_commit_missing"]
+                if dirty:
+                    flags.append("uncommitted_feature_work")
+                return "feature_commit_missing", flags, evidence, None
+            return "accepted_feature", ["accepted_feature"], evidence, accepted
+        if dirty:
+            return (
+                "uncommitted_feature_work",
+                ["uncommitted_feature_work", "incomplete_feature_result"],
+                evidence,
+                None,
+            )
+        return (
+            "session_claimed_completion_without_evidence",
+            ["session_claimed_completion_without_evidence", "incomplete_feature_result"],
+            evidence,
+            None,
+        )
+
     def _verify_integrated_feature(
         self, project: Project, inspector: RepositoryInspector, state: dict[str, Any]
     ) -> tuple[dict[str, Any], str, str]:
@@ -957,15 +1169,85 @@ class CycleEngine:
                 )
             raise SessionError(message)
 
-        queue = FeatureQueue.from_location(project.repository, project.queue_location)
+        try:
+            queue = FeatureQueue.from_location(project.repository, project.queue_location)
+        except QueueError as exc:
+            if result.action == "feature_cycle":
+                state["session_completion_classification"] = "queue_evidence_missing"
+                state["session_completion_flags"] = ["queue_evidence_missing"]
+                if inspector.dirty_entries:
+                    state["session_completion_flags"].append("uncommitted_feature_work")
+                state["session_completion_evidence"] = {
+                    "queue_error": str(exc),
+                    "actual_branch": inspector.current_branch,
+                    "expected_branch": state.get("feature_branch"),
+                    "dirty_entry_count": len(inspector.dirty_entries),
+                }
+                self._advance_cycle(
+                    cycle_path,
+                    state,
+                    str(state["current_phase"]),
+                    inspector,
+                    "feature_session_incomplete",
+                )
+                raise RecoveryError(
+                    "successful feature session lacked queue evidence: "
+                    "classification=queue_evidence_missing"
+                ) from exc
+            raise
         feature = queue.feature(str(state["current_feature"]))
-        if feature is None:
-            raise QueueError("selected feature disappeared from the queue")
+        if result.action == "feature_cycle":
+            classification, flags, completion_evidence, accepted_result = (
+                self._classify_successful_feature_result(
+                    project, inspector, state, feature
+                )
+            )
+            state["session_completion_classification"] = classification
+            state["session_completion_flags"] = flags
+            state["session_completion_evidence"] = completion_evidence
+            if classification != "accepted_feature" or accepted_result is None:
+                state["next_safe_action"] = f"scripts/conveyor resume --project {project.project_id}"
+                self._advance_cycle(
+                    cycle_path,
+                    state,
+                    str(state["current_phase"]),
+                    inspector,
+                    "feature_session_incomplete",
+                )
+                raise RecoveryError(
+                    "successful feature session lacked accepted evidence: "
+                    f"classification={classification}; flags={','.join(flags)}"
+                )
+            writer = inspect_repository_writer_lock(
+                inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                ),
+                project.repository,
+            )
+            writer_record = writer.record or {}
+            if (
+                not writer.exists
+                or (writer_record.get("agent_run") or writer_record.get("run_id"))
+                != state["conveyor_run_id"]
+            ):
+                state["session_completion_classification"] = "incomplete_feature_result"
+                state["session_completion_flags"] = ["incomplete_feature_result"]
+                state["session_completion_evidence"]["writer_lease_verified"] = False
+                self._advance_cycle(
+                    cycle_path,
+                    state,
+                    str(state["current_phase"]),
+                    inspector,
+                    "feature_session_incomplete",
+                )
+                raise LockError("accepted evidence appeared after the feature writer lease was released")
+            state["session_completion_evidence"]["writer_lease_verified"] = True
+            state["accepted_feature_commit"] = accepted_result
 
         if result.action == "feature_cycle" and state["current_phase"] == "branch_preparing":
-            state["feature_branch"] = feature.get("branch")
-            state["feature_starting_commit"] = feature.get("integration_base_commit") or state["feature_starting_commit"]
-            self._advance_cycle(cycle_path, state, "feature_in_progress", inspector, "feature_session_completed")
+            self._advance_cycle(cycle_path, state, "feature_in_progress", inspector, "accepted_feature_observed")
+        if feature is None:
+            raise QueueError("selected feature disappeared from the queue")
         if result.action == "feature_cycle" and feature.get("status") in {"review", "accepted", "integration_pending", "integrated"}:
             self._advance_cycle(cycle_path, state, "feature_review", inspector, "review_evidence_observed")
         if result.action == "feature_cycle" and feature.get("status") in {"accepted", "integration_pending", "integrated"}:
@@ -973,6 +1255,9 @@ class CycleEngine:
             self._advance_cycle(cycle_path, state, "integration_pending", inspector, "integration_pending_observed")
 
         if result.action == "feature_cycle" and feature.get("status") in {"accepted", "integration_pending"}:
+            self._writer_lease(project, inspector).release(run_id=str(state["conveyor_run_id"]))
+            state["writer_lock_identity"] = None
+            self.cycle_store.write(cycle_path, state)
             if state["current_phase"] == "integration_pending":
                 self._advance_cycle(
                     cycle_path, state, "integrating", inspector, "integration_session_launch"
@@ -1058,6 +1343,8 @@ class CycleEngine:
                 f"continue={compatibility.get('validation_command')}"
             )
         reservation = None if reservation_held else self._launch_lock(project, inspector)
+        feature_writer_acquired = False
+        session_attempted = False
         if reservation is not None:
             reservation.acquire(make_lock_record(
                 project_id=project.project_id,
@@ -1109,7 +1396,26 @@ class CycleEngine:
                 state,
                 "branch_preparing",
                 inspector,
-                "repository_session_owns_branch_preparation",
+                "feature_branch_preparation_started",
+            )
+            branch_evidence = self._prepare_feature_branch(project, inspector, state)
+            state["session_completion_evidence"] = {"prelaunch_branch": branch_evidence}
+            writer_record = self._writer_lease(project, inspector).acquire_or_resume(
+                feature=selection.feature_id,
+                branch=str(state["feature_branch"]),
+                run_id=run_id,
+            )
+            feature_writer_acquired = True
+            state["writer_lock_identity"] = writer_record
+            self._verify_feature_branch_runtime(
+                project, inspector, state, require_starting_head=True
+            )
+            self._advance_cycle(
+                cycle_path,
+                state,
+                "branch_preparing",
+                inspector,
+                "feature_branch_and_writer_lease_verified",
             )
             self._transition_project(
                 project,
@@ -1127,6 +1433,7 @@ class CycleEngine:
                     "superseded_cycle_archive": superseded_archive,
                 },
             )
+            session_attempted = True
             result, repairs, retry_status = self._launch_with_retries(SessionRequest(
                 action="feature_cycle", project=project, run_id=run_id, mode=mode, feature=selection.feature_id
             ), inspector, "feature_in_progress", "implementation_repairs", reservation_held=True)
@@ -1151,6 +1458,8 @@ class CycleEngine:
             )
             return evidence
         finally:
+            if feature_writer_acquired and not session_attempted:
+                self._writer_lease(project, inspector).release(run_id=run_id)
             if reservation is not None:
                 reservation.release(run_id)
 
@@ -1736,7 +2045,6 @@ class CycleEngine:
                 current_cycle_fingerprint != cycle_fingerprint
                 or current_assessment.outcome != "resume"
                 or current_assessment.resume_phase != assessment.resume_phase
-                or writer.exists
             ):
                 raise RecoveryError("cycle, Git, or writer-lock evidence changed during resume acquisition")
             if compatibility_remediation:
@@ -1772,6 +2080,40 @@ class CycleEngine:
                     action = "milestone_gate"
                 else:
                     action = "feature_cycle"
+                uncorroborated_continuation = bool(
+                    action == "feature_cycle"
+                    and state.get("feature_session_id")
+                    and state.get("failure_classification") is None
+                    and (
+                        state.get("last_successful_checkpoint") == "feature_branch_recovered"
+                        or state.get("session_completion_classification")
+                        in {
+                            "branch_invariant_violated",
+                            "uncommitted_feature_work",
+                            "incomplete_feature_result",
+                            "session_claimed_completion_without_evidence",
+                        }
+                    )
+                )
+                if action == "feature_cycle":
+                    self._verify_feature_branch_runtime(
+                        project, inspector, state, require_starting_head=False
+                    )
+                    lease_record = self._writer_lease(project, inspector).acquire_or_resume(
+                        feature=str(state.get("current_feature")),
+                        branch=str(state.get("feature_branch")),
+                        run_id=run_id,
+                    )
+                    state["writer_lock_identity"] = lease_record
+                    self._advance_cycle(
+                        cycle_path,
+                        state,
+                        str(state["current_phase"]),
+                        inspector,
+                        "writer_lease_acquired_before_resume",
+                    )
+                elif writer.exists:
+                    raise LockError("non-feature continuation cannot reuse a feature writer lease")
                 if action == "milestone_integration":
                     resume_session_id = state.get("integration_session_id")
                 elif action == "milestone_gate":
@@ -1785,6 +2127,9 @@ class CycleEngine:
                     mode="resume",
                     feature=state.get("current_feature"),
                     session_id=resume_session_id,
+                    continuation_reason=(
+                        "uncorroborated_completion" if uncorroborated_continuation else None
+                    ),
                 ), inspector, phase, reservation_held=True)
                 if action in {"feature_cycle", "milestone_integration"}:
                     evidence = self._reconcile_feature_evidence(
@@ -1819,6 +2164,212 @@ class CycleEngine:
         if continue_mode:
             return self.run_project(project, str(continue_mode))
         return outcome
+
+    def recover_feature_branch(self, project: Project, *, dry_run: bool) -> dict[str, Any]:
+        """Recover an exact dirty milestone checkout by creating its persisted feature branch."""
+
+        inspector = RepositoryInspector(project.repository)
+        cycle_path = inspector.cycle_state_path()
+        state = self.cycle_store.read(cycle_path)
+        if state is None:
+            return {
+                "project_id": project.project_id,
+                "outcome": "human_decision_required",
+                "reason": "no durable feature cycle exists",
+            }
+        expected_branch = state.get("feature_branch")
+        starting = state.get("feature_starting_commit")
+        milestone_branch = state.get("milestone_branch")
+        run_id = str(state.get("conveyor_run_id") or "")
+        preconditions = {
+            "project_id": state.get("project_id") == project.project_id,
+            "expected_branch_recorded": isinstance(expected_branch, str) and bool(expected_branch),
+            "starting_commit_recorded": isinstance(starting, str) and bool(starting),
+            "milestone_branch_matches": milestone_branch == project.milestone_branch,
+            "current_branch_is_milestone": inspector.current_branch == project.milestone_branch,
+            "head_is_starting_commit": inspector.head == starting,
+            "milestone_ref_is_starting_commit": inspector.rev_parse(project.milestone_branch or "", check=False)
+            == starting,
+            "feature_branch_absent": not (
+                isinstance(expected_branch, str) and inspector.ref_exists(expected_branch)
+            ),
+            "no_git_operation": not any(inspector.git_operation_state().values()),
+            "no_writer_lease": not inspector.writer_lock_path(
+                self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+            ).exists(),
+            "no_accepted_commit": state.get("accepted_feature_commit") is None,
+            "normal_session_completion": bool(
+                state.get("feature_session_id")
+                and state.get("failure_classification") is None
+                and state.get("last_successful_checkpoint")
+                in {"feature_session_completed", "feature_session_incomplete"}
+            ),
+        }
+        try:
+            before_hashes = inspector.modified_file_hashes()
+        except ConveyorError as exc:
+            before_hashes = {}
+            preconditions["dirty_state_unambiguous"] = False
+            ambiguity = str(exc)
+        else:
+            preconditions["dirty_state_unambiguous"] = bool(before_hashes)
+            ambiguity = None
+        before_status = inspector.dirty_entries
+        if not all(preconditions.values()):
+            return {
+                "project_id": project.project_id,
+                "outcome": "human_decision_required",
+                "reason": ambiguity or "feature branch recovery preconditions do not match exactly",
+                "preconditions": preconditions,
+                "actual_branch": inspector.current_branch,
+                "expected_branch": expected_branch,
+                "resume_allowed": False,
+            }
+        evidence = {
+            "schema_version": 1,
+            "project_id": project.project_id,
+            "run_id": run_id,
+            "expected_branch": expected_branch,
+            "milestone_branch": milestone_branch,
+            "starting_commit": starting,
+            "before": {
+                "branch": inspector.current_branch,
+                "head": inspector.head,
+                "milestone_ref": inspector.rev_parse(str(milestone_branch), check=False),
+                "dirty_entries": before_status,
+                "dirty_file_sha256": before_hashes,
+                "worktrees": inspector.worktrees(),
+                "local_branches": inspector.local_branches(),
+            },
+            "prohibited_operations_used": [],
+            "session_launched": False,
+        }
+        if dry_run:
+            return {
+                "project_id": project.project_id,
+                "outcome": "branch_recovery_ready",
+                "dry_run": True,
+                "application_repository_written": False,
+                "actual_branch": inspector.current_branch,
+                "expected_branch": expected_branch,
+                "branch_recovery_required": True,
+                "writer_lock_required_before_resume": True,
+                "writer_lock_currently_held": False,
+                "resume_allowed": False,
+                "evidence": evidence,
+            }
+
+        reservation = self._launch_lock(project, inspector)
+        reservation.acquire(make_lock_record(
+            project_id=project.project_id,
+            repository_identity=inspector.identity()["repository_id"],
+            run_id=run_id,
+            current_feature=str(state.get("current_feature")),
+            current_phase="feature_branch_recovery",
+        ))
+        report_root = self.configuration.owned_path(
+            self.configuration.conveyor["report_directory"]
+        )
+        preflight_path = self._report_path(
+            report_root, run_id, "feature-branch-recovery-preflight.json"
+        )
+        try:
+            current_hashes = inspector.modified_file_hashes()
+            if (
+                inspector.current_branch != project.milestone_branch
+                or inspector.head != starting
+                or inspector.rev_parse(project.milestone_branch or "", check=False) != starting
+                or inspector.ref_exists(str(expected_branch))
+                or any(inspector.git_operation_state().values())
+                or current_hashes != before_hashes
+                or inspector.dirty_entries != before_status
+                or inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                ).exists()
+            ):
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "human_decision_required",
+                    "reason": "feature branch recovery evidence changed before mutation",
+                    "resume_allowed": False,
+                }
+            atomic_write_json(preflight_path, evidence)
+            inspector.switch_feature_branch(str(expected_branch), starting_commit=str(starting))
+            after_hashes = inspector.modified_file_hashes()
+            after_status = inspector.dirty_entries
+            after_worktree = inspector.branch_worktree(str(expected_branch))
+            postconditions = {
+                "actual_branch_is_expected": inspector.current_branch == expected_branch,
+                "head_unchanged": inspector.head == starting,
+                "feature_ref_is_starting_commit": inspector.rev_parse(str(expected_branch), check=False)
+                == starting,
+                "milestone_ref_unchanged": inspector.rev_parse(str(milestone_branch), check=False)
+                == starting,
+                "feature_worktree_is_registered_root": after_worktree == project.repository.resolve(),
+                "dirty_entries_unchanged": after_status == before_status,
+                "dirty_file_hashes_unchanged": after_hashes == before_hashes,
+                "no_git_operation": not any(inspector.git_operation_state().values()),
+                "no_writer_lease": not inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                ).exists(),
+            }
+            evidence["after"] = {
+                "branch": inspector.current_branch,
+                "head": inspector.head,
+                "milestone_ref": inspector.rev_parse(str(milestone_branch), check=False),
+                "feature_ref": inspector.rev_parse(str(expected_branch), check=False),
+                "dirty_entries": after_status,
+                "dirty_file_sha256": after_hashes,
+                "worktrees": inspector.worktrees(),
+                "local_branches": inspector.local_branches(),
+            }
+            evidence["postconditions"] = postconditions
+            if not all(postconditions.values()):
+                raise RecoveryError(
+                    "feature branch was created but post-recovery evidence is ambiguous; preserve all work"
+                )
+            state["feature_worktree"] = str(project.repository.resolve())
+            state["writer_lock_identity"] = None
+            state["session_completion_classification"] = "branch_invariant_violated"
+            state["session_completion_flags"] = [
+                "branch_invariant_violated",
+                "uncommitted_feature_work",
+            ]
+            state["session_completion_evidence"] = {
+                "actual_branch_before_recovery": project.milestone_branch,
+                "expected_branch": expected_branch,
+                "dirty_file_hashes_preserved": True,
+                "milestone_ref_preserved": True,
+                "previous_completion_corroborated": False,
+            }
+            state["branch_recovery"] = evidence
+            state["next_safe_action"] = f"scripts/conveyor resume --project {project.project_id}"
+            self._advance_cycle(
+                cycle_path,
+                state,
+                str(state["current_phase"]),
+                inspector,
+                "feature_branch_recovered",
+            )
+            final_path = self._report_path(
+                report_root, run_id, "feature-branch-recovery.json"
+            )
+            atomic_write_json(final_path, evidence)
+            return {
+                "project_id": project.project_id,
+                "outcome": "feature_branch_recovered",
+                "actual_branch": inspector.current_branch,
+                "expected_branch": expected_branch,
+                "branch_recovery_required": False,
+                "writer_lock_required_before_resume": True,
+                "writer_lock_currently_held": False,
+                "resume_allowed_after_lock": True,
+                "session_launched": False,
+                "report_path": str(final_path),
+                "postconditions": postconditions,
+            }
+        finally:
+            reservation.release(run_id)
 
     def reconcile_controller_state(self, project: Project, *, dry_run: bool) -> dict[str, Any]:
         """Reconcile only Conveyor-owned state from read-only queue and Git evidence."""

@@ -144,3 +144,24 @@ This log records model configuration and deterministic deployment evidence. It n
 - Validation: `python3 -m compileall -q src scripts`, all 117 unittest cases, all 117 pytest cases in an isolated temporary environment, `scripts/conveyor validate-config`, both doctor commands, current status, and the final resume dry-run passed.
 - Final dry-run: state is consistent at `feature_ready`; P0-001 is selected; the next real feature cycle would start a new repository-scoped session, never resume the failed session, and the dry-run performed no application write, lock acquisition, or Git operation.
 - Adversarial re-review: no Critical, High, or Medium findings remain after correcting action-specific recovery, retry-contract classification, retry exhaustion, immutable cycle archival, and authentication-diagnostic redaction.
+
+### Model execution — 2026-07-18T05:43:04+00:00
+
+- Agent role: `controller-repair-writer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `global_default`
+- Event: `start`
+- Reason code: `feature_branch_invariant_recovery`
+- Safety and autonomy contracts unchanged: `true`
+
+### Feature-branch invariant and dirty-cycle recovery — 2026-07-17
+
+- Root cause: run `99c2f421-6b5a-4f8a-ae43-a5aefc12657e` persisted the expected P0-001 branch name but launched the repository session while the registered worktree was still on `codex/p0-foundation`. A zero process exit then advanced the checkpoint without an accepted commit, while the writer lease was no longer present.
+- Launch repair: the controller now derives or validates the expected branch, creates or selects it at the verified feature starting commit, verifies the actual branch/worktree and unchanged milestone ref, persists both, and acquires a Feature-Factory-compatible writer lease before `feature_running` or session launch. The lease remains through accepted-commit verification.
+- Completion repair: a zero exit is classified from Git, worktree, lease, and queue evidence. Integration is authorized only after `accepted_feature` proves exactly one accepted commit; branch, dirty-work, missing-commit, missing-queue, incomplete-result, and unsupported completion claims remain recoverable without integration.
+- Continuation repair: a recovered normal session may resume only after branch/worktree verification and writer-lease reacquisition. Its prompt states that prior completion was uncorroborated, requires implementation, validation, adversarial review, queue/documentation updates, and exactly one accepted commit, and forbids milestone integration until controller verification.
+- Synthetic validation: `python3 -m compileall src scripts`, `git diff --check`, all 135 unittest cases, and all 135 pytest cases passed. Pytest ran from a disposable temporary virtual environment because the host has no installed `pytest` command or module.
+- Configuration and live dry-run validation: `scripts/conveyor validate-config`, `scripts/conveyor status --project case-manager`, and `scripts/conveyor resume --project case-manager --dry-run` passed. Before recovery the dry-run classified `branch_invariant_violated` with `uncommitted_feature_work`, required branch recovery and a future writer lock, and denied resume.
+- Controlled Case Manager recovery: `recover-feature-branch` recorded the three dirty-file hashes, used only non-forced `git switch -c`, created `codex/p0-001-decide-and-record-the-per-case-persistence-authority` at `826de2ab2c517e4bba53ed54f0cf2ddee50f38ef`, preserved all three hashes and dirty entries byte-for-byte, and left `codex/p0-foundation` at the same commit. Report: `reports/99c2f421-6b5a-4f8a-ae43-a5aefc12657e/feature-branch-recovery.json`.
+- Final live state: P0-001 remains `ready`; `accepted_feature_commit` remains null; the three original files remain modified; no Git operation or writer lease exists; no repository session launched; `branch_recovery_required` is false; `writer_lock_required_before_resume` is true; and `resume_allowed_after_lock` is true.

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -82,6 +81,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     reconcile.add_argument("--project", required=True)
     reconcile.add_argument("--dry-run", action="store_true")
+    recover_branch = subparsers.add_parser(
+        "recover-feature-branch",
+        help="move an exact dirty milestone worktree onto its persisted feature branch without launching a session",
+    )
+    recover_branch.add_argument("--project", required=True)
+    recover_branch.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -191,6 +196,9 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
 
     if args.command == "reconcile":
         return engine.reconcile_controller_state(registry.get(args.project), dry_run=args.dry_run)
+
+    if args.command == "recover-feature-branch":
+        return engine.recover_feature_branch(registry.get(args.project), dry_run=args.dry_run)
 
     if args.command == "run":
         mode = args.mode or configuration.conveyor["default_mode"]

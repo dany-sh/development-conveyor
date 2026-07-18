@@ -159,7 +159,7 @@ class SyntheticLauncher:
             structured_validation = "valid"
             classification = "reconciled_ready_work"
         elif request.action == "feature_cycle":
-            self._integrate_feature(request.project)
+            self._accept_feature(request.project)
         elif request.action == "milestone_integration":
             self._integrate_feature(request.project)
         elif request.action == "milestone_gate":
@@ -185,19 +185,15 @@ class SyntheticLauncher:
             result_classification=classification,
         )
 
-    def _integrate_feature(self, project: Project) -> None:
+    def _accept_feature(self, project: Project) -> None:
         repository = project.repository
         queue_path = repository / project.queue_location
         queue = json.loads(queue_path.read_text(encoding="utf-8"))
         feature = queue["features"][0]
-        if feature.get("status") == "integrated":
+        if feature.get("status") in {"accepted", "integration_pending", "integrated"}:
             return
         base = git(repository, "rev-parse", project.milestone_branch)
         branch = "codex/f001-synthetic-feature"
-        if not git(repository, "branch", "--list", branch):
-            git(repository, "switch", "-c", branch, project.milestone_branch)
-        else:
-            git(repository, "switch", branch)
         feature.update({
             "status": "integration_pending",
             "branch": branch,
@@ -210,7 +206,15 @@ class SyntheticLauncher:
         (repository / "app.txt").write_text("baseline\nF001 integrated behavior\n", encoding="utf-8")
         git(repository, "add", "app.txt", project.queue_location)
         git(repository, "commit", "-m", "F001: implement synthetic feature")
-        accepted = git(repository, "rev-parse", "HEAD")
+
+    def _integrate_feature(self, project: Project) -> None:
+        repository = project.repository
+        queue_path = repository / project.queue_location
+        queue = json.loads(queue_path.read_text(encoding="utf-8"))
+        feature = queue["features"][0]
+        if feature.get("status") == "integrated":
+            return
+        accepted = git(repository, "rev-parse", str(feature["branch"]))
         git(repository, "switch", project.milestone_branch)
         git(repository, "cherry-pick", accepted)
         integrated = git(repository, "rev-parse", "HEAD")

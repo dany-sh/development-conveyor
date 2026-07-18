@@ -146,6 +146,35 @@ def build_project_plan(
     writer_run = writer_record.get("agent_run") or writer_record.get("run_id")
     writer_owned_by_active_cycle = bool(active_cycle and writer_run == active_cycle.get("run_id"))
     stale_cycle_evidence: dict[str, Any] | None = None
+    expected_branch = cycle_document.get("feature_branch") if cycle_document else None
+    actual_branch = repository.get("branch")
+    expected_branch_exists = bool(
+        isinstance(expected_branch, str) and inspector.ref_exists(expected_branch)
+    )
+    expected_branch_worktree = (
+        inspector.branch_worktree(expected_branch)
+        if expected_branch_exists and isinstance(expected_branch, str)
+        else None
+    )
+    production_resume_phase = bool(
+        active_cycle
+        and active_cycle.get("phase")
+        in {"branch_preparing", "feature_in_progress", "feature_review", "feature_repair"}
+    )
+    branch_recovery_required = bool(
+        production_resume_phase
+        and isinstance(expected_branch, str)
+        and (
+            not expected_branch_exists
+            or actual_branch != expected_branch
+            or expected_branch_worktree != project.repository.resolve()
+        )
+    )
+    writer_lock_required_before_resume = bool(
+        production_resume_phase
+        and cycle_document
+        and cycle_document.get("accepted_feature_commit") is None
+    )
     if active_cycle and cycle_document:
         if active_cycle.get("phase") == "completed":
             stale_cycle_evidence = {
@@ -190,7 +219,6 @@ def build_project_plan(
                 == repository["identity"]["path_fingerprint"]
                 and isinstance(recorded_identity, dict)
                 and recorded_identity.get("repository_id") == repository["identity"]["repository_id"]
-                and cycle_document.get("feature_branch") is None
                 and cycle_document.get("feature_worktree") is None
                 and cycle_document.get("writer_lock_identity") is None
                 and cycle_document.get("validation_attempts") == []
@@ -221,7 +249,6 @@ def build_project_plan(
                 controller_root is not None
                 and active_cycle.get("phase") in {"failed", "human_decision_required"}
                 and active_cycle.get("checkpoint") in {"session_failed", "session_terminal_failure"}
-                and cycle_document.get("feature_branch") is None
                 and cycle_document.get("feature_worktree") is None
                 and cycle_document.get("writer_lock_identity") is None
                 and cycle_document.get("accepted_feature_commit") is None
@@ -289,6 +316,9 @@ def build_project_plan(
     elif launch_status and launch_status.exists and not launch_status.owned_by_run:
         action = "human_decision_required"
         stop = "Controller launch-lock ownership does not match the active cycle."
+    elif branch_recovery_required:
+        action = "branch_recovery_required"
+        stop = "Recover the persisted feature branch without changing dirty file bytes before any session resume."
     elif active_cycle and active_cycle.get("phase") not in {"completed", None}:
         action = "resume"
         stop = "Resume until the current cycle reaches its configured stop condition."
@@ -341,6 +371,36 @@ def build_project_plan(
     )
     if historical_failure and action == "feature_cycle":
         session_actions["feature_cycle"] = ["launch a new repository-scoped session; do not resume the failed session"]
+    completion_classification = (
+        cycle_document.get("session_completion_classification") if cycle_document else None
+    )
+    completion_flags = list(cycle_document.get("session_completion_flags") or []) if cycle_document else []
+    if branch_recovery_required:
+        completion_classification = "branch_invariant_violated"
+        completion_flags = ["branch_invariant_violated"]
+        if not repository.get("clean"):
+            completion_flags.append("uncommitted_feature_work")
+    resume_allowed_after_lock = bool(
+        production_resume_phase
+        and not branch_recovery_required
+        and expected_branch_exists
+        and actual_branch == expected_branch
+        and expected_branch_worktree == project.repository.resolve()
+        and not any(repository.get("git_operations", {}).values())
+        and repository.get("milestone_branch_head")
+        == (cycle_document or {}).get("milestone_pre_integration_commit")
+    )
+    resume_allowed = bool(
+        action == "resume"
+        and not writer_lock_required_before_resume
+        or (
+            action == "resume"
+            and writer_lock_required_before_resume
+            and lock.exists
+            and writer_owned_by_active_cycle
+            and not lock.ambiguous
+        )
+    )
     return {
         "project_id": project.project_id,
         "repository_path": str(project.repository),
@@ -378,6 +438,15 @@ def build_project_plan(
         "feature_starting_commit": repository.get("milestone_branch_head") if selection else None,
         "old_session_will_resume": False if historical_failure else action == "resume",
         "new_session_would_launch": bool(historical_failure and action == "feature_cycle"),
+        "actual_branch": actual_branch,
+        "expected_branch": expected_branch,
+        "branch_recovery_required": branch_recovery_required,
+        "writer_lock_required_before_resume": writer_lock_required_before_resume,
+        "writer_lock_currently_held": lock.exists,
+        "resume_allowed": resume_allowed,
+        "resume_allowed_after_lock": resume_allowed_after_lock,
+        "session_completion_classification": completion_classification,
+        "session_completion_flags": completion_flags,
     }
 
 
