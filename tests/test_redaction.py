@@ -27,3 +27,11 @@ class RedactionTests(unittest.TestCase):
         self.assertNotIn("private/file.txt", redacted["message"])
         self.assertEqual(redacted["context"], "kept")
 
+    def test_authentication_challenge_metadata_is_redacted(self):
+        value = (
+            'ERROR AuthRequired(AuthRequiredError { www_authenticate_header: "Bearer '
+            'resource_metadata=\\"https://mcp.example/.well-known/oauth-protected-resource\\"" })'
+        )
+        redacted = redact_text(value)
+        self.assertEqual(redacted, "[REDACTED_AUTH_CHALLENGE]")
+        self.assertNotIn("resource_metadata", redacted)

@@ -58,6 +58,9 @@ def _parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("validate-config", help="validate controller and project configuration")
 
+    doctor = subparsers.add_parser("doctor", help="validate Codex CLI, model, and reasoning compatibility")
+    doctor.add_argument("--project")
+
     status = subparsers.add_parser("status", help="show read-only portfolio or project status")
     status.add_argument("--project")
 
@@ -142,6 +145,29 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
             "goal_mode": goal_mode_status(configuration.conveyor["codex"]["executable"], controller_root),
         }
 
+    if args.command == "doctor":
+        project = registry.get(args.project) if args.project else None
+        action = "feature_cycle"
+        compatibility = launcher.compatibility(action, project_id=project.project_id if project else None)
+        result = {
+            "schema_version": 1,
+            "project_id": project.project_id if project else None,
+            "action": action,
+            "compatibility": compatibility.as_dict(),
+            "launch_allowed": compatibility.compatible,
+            "application_repository_written": False,
+        }
+        if project:
+            plan = engine.project_plan(project)
+            result.update({
+                "selected_feature": plan.get("selected_feature"),
+                "feature_starting_commit": (plan.get("repository_state") or {}).get("milestone_branch_head"),
+                "old_session_will_resume": plan.get("old_session_will_resume", False),
+            })
+        if not compatibility.compatible:
+            result["human_decision_required"] = compatibility.human_gate(project.project_id if project else None)
+        return result
+
     if args.command == "status":
         if args.project:
             return engine.project_plan(registry.get(args.project))
@@ -180,8 +206,9 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
 
 def main(arguments: list[str] | None = None) -> int:
     try:
-        print(render_json(execute(arguments)))
-        return 0
+        result = execute(arguments)
+        print(render_json(result))
+        return 2 if result.get("launch_allowed") is False else 0
     except (ConveyorError, OSError, ValueError) as exc:
         print(f"development-conveyor: {redact_text(str(exc))}", file=sys.stderr)
         return 2

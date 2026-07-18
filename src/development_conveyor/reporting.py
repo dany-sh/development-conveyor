@@ -12,6 +12,47 @@ from .locks import DurableLock, inspect_repository_writer_lock
 from .queue import FeatureQueue, resolve_feature_commit, resolve_queue_path
 from .registry import Project
 from .repository import RepositoryInspector
+from .sessions import classify_codex_failure
+
+
+DETERMINISTIC_CONFIGURATION_FAILURES = {
+    "cli_upgrade_required",
+    "configuration_incompatible",
+    "unsupported_model",
+    "unsupported_reasoning_effort",
+    "model_policy_invalid",
+}
+
+
+def _failed_cycle_reports(controller_root: Path, configuration: dict[str, Any], run_id: str) -> list[dict[str, Any]]:
+    directory = Path(configuration["report_directory"])
+    if not directory.is_absolute():
+        directory = controller_root / directory
+    run_directory = directory.resolve() / run_id
+    reports: list[dict[str, Any]] = []
+    if not run_directory.is_dir():
+        return reports
+    for path in sorted(run_directory.glob("*.json")):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        failure = value.get("failure_classification")
+        parsed = classify_codex_failure(
+            str(value.get("redacted_stdout") or ""), str(value.get("redacted_stderr") or "")
+        )
+        reports.append({
+            "path": str(path),
+            "created_at": value.get("created_at"),
+            "classification": failure or parsed.get("classification"),
+            "primary_terminal_error": value.get("primary_terminal_error") or parsed.get("primary_terminal_error"),
+            "secondary_diagnostics": value.get("secondary_diagnostics") or list(parsed.get("secondary_diagnostics") or ()),
+            "session_id": value.get("session_id"),
+            "argv": value.get("argv"),
+        })
+    return sorted(reports, key=lambda item: (str(item.get("created_at") or ""), item["path"]))
 
 
 def build_project_plan(
@@ -176,6 +217,57 @@ def build_project_plan(
                     "cycle_fingerprint": cycle_fingerprint,
                 }
                 active_cycle = None
+            elif (
+                controller_root is not None
+                and active_cycle.get("phase") in {"failed", "human_decision_required"}
+                and active_cycle.get("checkpoint") in {"session_failed", "session_terminal_failure"}
+                and cycle_document.get("feature_branch") is None
+                and cycle_document.get("feature_worktree") is None
+                and cycle_document.get("writer_lock_identity") is None
+                and cycle_document.get("accepted_feature_commit") is None
+                and cycle_document.get("milestone_post_integration_commit") is None
+                and not lock.exists
+                and not (launch_status and launch_status.exists)
+                and repository["clean"]
+                and not git_operation_active
+                and repository["branch"] == project.milestone_branch
+                and repository["head"] == cycle_document.get("milestone_pre_integration_commit")
+                and exact_single_worktree
+                and not feature_branch_exists
+                and cycle_document.get("project_id") == project.project_id
+                and cycle_document.get("active_milestone") == project.active_milestone
+                and cycle_document.get("milestone_branch") == project.milestone_branch
+                and cycle_document.get("repository_path_fingerprint")
+                == repository["identity"]["path_fingerprint"]
+                and isinstance(recorded_identity, dict)
+                and recorded_identity.get("repository_id") == repository["identity"]["repository_id"]
+                and selection is not None
+                and active_cycle.get("feature") == selection.feature_id
+            ):
+                reports = _failed_cycle_reports(
+                    controller_root, configuration, str(active_cycle.get("run_id") or "")
+                )
+                terminal = reports[-1] if reports else None
+                if terminal is not None and terminal.get("classification") in DETERMINISTIC_CONFIGURATION_FAILURES:
+                    stale_cycle_evidence = {
+                        **active_cycle,
+                        "classification": "deterministic_failed_cycle",
+                        "failure_classification": terminal["classification"],
+                        "reason": "The repository session failed deterministically before any repository work and must not be resumed.",
+                        "cycle_fingerprint": cycle_fingerprint,
+                        "attempts_consumed": len(cycle_document.get("validation_attempts") or []),
+                        "environment_remediation_verified": False,
+                        "feature_starting_commit": repository["head"],
+                        "recorded_feature_starting_commit": cycle_document.get("feature_starting_commit"),
+                        "milestone_pre_integration_commit": cycle_document.get("milestone_pre_integration_commit"),
+                        "session_id": terminal.get("session_id") or cycle_document.get("session_id"),
+                        "old_session_will_resume": False,
+                        "new_session_required": True,
+                        "historical_reports": [item["path"] for item in reports],
+                        "primary_terminal_error": terminal.get("primary_terminal_error"),
+                        "secondary_diagnostics": terminal.get("secondary_diagnostics"),
+                    }
+                    active_cycle = None
     if not project.enabled:
         action = "disabled"
         stop = "Project is disabled."
@@ -243,6 +335,12 @@ def build_project_plan(
         "resume": ["resume persisted Conveyor cycle"],
     }
     identity = repository["identity"]
+    historical_failure = bool(
+        stale_cycle_evidence
+        and stale_cycle_evidence.get("classification") == "deterministic_failed_cycle"
+    )
+    if historical_failure and action == "feature_cycle":
+        session_actions["feature_cycle"] = ["launch a new repository-scoped session; do not resume the failed session"]
     return {
         "project_id": project.project_id,
         "repository_path": str(project.repository),
@@ -277,6 +375,9 @@ def build_project_plan(
         "prohibited_actions": list(configuration["prohibited_operations"]),
         "expected_stop_condition": stop,
         "dry_run_writes_application_repository": False,
+        "feature_starting_commit": repository.get("milestone_branch_head") if selection else None,
+        "old_session_will_resume": False if historical_failure else action == "resume",
+        "new_session_would_launch": bool(historical_failure and action == "feature_cycle"),
     }
 
 

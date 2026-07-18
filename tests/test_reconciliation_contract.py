@@ -93,6 +93,11 @@ class FailingThenNoReadyLauncher(ContractLauncher):
                 redacted_stderr="synthetic failure",
                 structured_output_validation="invalid_json",
                 result_classification="structured_output_invalid",
+                failure_classification="structured_output_invalid",
+                retryable=True,
+                retry_hypothesis="the reconciliation result was malformed",
+                remediation_action="rerun with the structured output contract emphasized",
+                retry_evidence="the result failed JSON validation",
             )
         return super().launch(request)
 

@@ -24,7 +24,14 @@ Key integration conclusions:
 - Portfolio launcher agent: `gpt-5.6-terra`, medium, aligned with `portfolio-lead` policy.
 - Role-pinned repository agents retain their installed model files.
 - Goal Mode was verified enabled using `codex features list`: `goals stable true`.
-- No launcher model override is injected into repository-scoped sessions.
+- Repository-scoped launchers now inject the action's role-pinned model and reasoning explicitly after validating the exact resolved CLI against the installed model catalog. This prevents global-config drift and unsupported catalog variants from reaching a feature cycle.
+
+## CLI compatibility repair evidence
+
+- The failed P0-001 run did not persist `codex --version`. The retained pre-upgrade executable at `/Users/dany/.codex/packages/standalone/releases/0.137.0-aarch64-apple-darwin/bin/codex` reports `codex-cli 0.137.0`, and the launcher symlink changed after the failed run to the retained `0.144.5` release.
+- The current exact resolved Conveyor executable is the standalone `0.144.5` binary. It exposes `gpt-5.6-sol` with `high` reasoning through `codex debug models`.
+- The terminal `turn.failed` event is authoritative: it classifies the old run as `cli_upgrade_required`. Optional MCP authentication warnings remain secondary diagnostics.
+- P0-001 has no feature branch, worktree, writer lease, accepted commit, Git operation, or repository mutation. Its verified start and milestone pre-integration commit are both `826de2ab2c517e4bba53ed54f0cf2ddee50f38ef`.
 
 ## Registered repository evidence
 

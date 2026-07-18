@@ -49,9 +49,22 @@ class RecoveryTests(unittest.TestCase):
 
     def test_retries_require_new_hypotheses_and_stop_at_limit(self):
         budget = RetryBudget(2)
-        self.assertEqual(budget.record(hypothesis="missing import", evidence="compiler output"), 1)
+        common = {"failure_classification": "validation_failure", "command": ("codex", "exec")}
+        self.assertEqual(budget.record(
+            hypothesis="missing import", evidence="compiler output",
+            remediation_action="add the verified import", **common,
+        ), 1)
         with self.assertRaises(ConveyorError):
-            budget.record(hypothesis=" missing  import ", evidence="same output")
-        self.assertEqual(budget.record(hypothesis="stale generated interface", evidence="fresh diff"), 2)
+            budget.record(
+                hypothesis=" missing  import ", evidence="same output",
+                remediation_action="add the verified import", **common,
+            )
+        self.assertEqual(budget.record(
+            hypothesis="stale generated interface", evidence="fresh diff",
+            remediation_action="regenerate the interface", **common,
+        ), 2)
         with self.assertRaises(RetryExhausted):
-            budget.record(hypothesis="third distinct cause", evidence="new output")
+            budget.record(
+                hypothesis="third distinct cause", evidence="new output",
+                remediation_action="apply a third distinct repair", **common,
+            )

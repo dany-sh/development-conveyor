@@ -34,7 +34,13 @@ repository cycle engine -> ignored .factory/conveyor-state.json
         +-> $milestone-gate + release-auditor
 ```
 
-The controller owns deterministic parsing, selection, state transitions, identity checks, checkpointing, retry accounting, safety validation, redaction, reports, and scheduling. Judgment and application writes remain inside the existing repository-scoped skills and role-pinned agents.
+The controller owns deterministic parsing, selection, state transitions, identity checks, Codex compatibility preflight, checkpointing, retry accounting, safety validation, redaction, reports, and scheduling. Judgment and application writes remain inside the existing repository-scoped skills and role-pinned agents.
+
+## Codex compatibility preflight
+
+Before an active feature cycle is created, `feature_running` is persisted, or a repository session is launched, the Conveyor resolves the exact Codex executable, parses its version, resolves the action's role-pinned model and reasoning from the global Factory policy, and validates that pair against `codex debug models`. Known missing, old, unsupported, or policy-invalid combinations stop at a human gate. The controller never silently lowers a model or reasoning effort.
+
+Repository launches receive explicit `--model` and `model_reasoning_effort` arguments from the authoritative role policy. `scripts/conveyor doctor --project PROJECT-ID` reports the executable, detected and policy-minimum versions, model, reasoning, compatibility classification, remediation, and exact validation command without writing an application repository.
 
 ## State models
 
@@ -77,7 +83,7 @@ For one selected feature, the execution engine:
 
 1. Verifies exact repository identity, clean state, queue validity, active milestone, baseline, milestone branch, dependencies, active cycles, and locks.
 2. Selects exactly one ready feature by numeric/P-level priority, dependency depth, queue order, then feature ID.
-3. Persists the preflight, selection, and branch-preparation checkpoints.
+3. Resolves a null queue integration base to the verified milestone HEAD, validates repository identity, clean Git state, queue fingerprint, selected feature, dependency evidence, feature starting commit, and milestone pre-integration commit, then persists the preflight, selection, and branch-preparation checkpoints.
 4. Launches a repository-scoped `$feature-factory` session with the exact project, milestone, feature, run identity, mode, and prohibitions.
 5. Requires the installed role-pinned exploration, implementation, test, and adversarial-review workflow.
 6. Resolves accepted commit evidence; completed legacy `commit: SELF` values use the corroborated registration, queue-at-commit, milestone ancestry, specification, status, and run-log policy documented in `docs/QUEUE_RECONCILIATION_CONTRACT.md`.
@@ -97,13 +103,13 @@ Accepted or integrated work is never reimplemented. The Case Manager registratio
 
 Startup reconciliation compares portfolio state, repository cycle state, writer and controller locks, identity and path fingerprint, HEAD, branch, Git operations, queue evidence, selected ready work, accepted/integrated commits, and timestamped milestone-gate evidence. Matching evidence resumes from the last verified checkpoint. A safely repairable stale conclusion is checkpointed through `queue_reconciliation` before scheduling; material disagreement produces a human-decision report with safe options and an exact resume command.
 
-A pre-launch `branch_preparing` checkpoint is treated as an orphan rather than resumable work only when there is no session ID, lock, branch change, Git operation, or repository mutation and the recorded feature and starting commit still match deterministic selection. The controller leaves that repository-local evidence untouched while repairing only its portfolio state. A previously passed `milestone_ready_for_merge` gate is reopened only when timestamped gate inputs changed and `.factory/project.yaml` explicitly permits rerunning milestone gates.
+A pre-launch `branch_preparing` checkpoint is treated as an orphan rather than resumable work only when there is no session ID, lock, branch change, Git operation, or repository mutation and the recorded feature and starting commit still match deterministic selection. A deterministic failed session is likewise treated as preserved historical evidence only when the report's terminal structured event proves the configuration failure and Git, branch, worktree, lock, queue, selection, and cycle evidence prove that no repository work occurred. After compatibility remediation is verified, the portfolio transitions through `human_decision_required` and `queue_reconciliation` to `feature_ready`; the old thread is never resumed, and the next real run creates a new linked session. Portfolio-state recovery leaves the historical repository cycle and reports untouched. Immediately before a later new session claims the repository-local active-cycle slot, the controller verifies the old cycle fingerprint and atomically archives its exact bytes plus hash under the old run's report directory. A previously passed `milestone_ready_for_merge` gate is reopened only when timestamped gate inputs changed and `.factory/project.yaml` explicitly permits rerunning milestone gates.
 
 Resume never resets, cleans, stashes, force-checks out, abandons a conflict, duplicates a branch, creates a second accepted commit, or repeats integration.
 
 ## Retry policy
 
-Repository autonomy limits take precedence. The global defaults are three implementation repair attempts, three integration repair attempts, two additional adversarial-review passes, and one queue-reconciliation repair attempt. Each focused retry must record a new hypothesis and evidence; repeating the same failed hypothesis is rejected.
+Repository autonomy limits take precedence. The global defaults are three implementation repair attempts, three integration repair attempts, two additional adversarial-review passes, and one queue-reconciliation repair attempt. A retry occurs only when the failure is classified retryable and the result supplies a new hypothesis, supporting evidence, and materially different remediation. Normalized classification, command, session, model, reasoning, and remediation signatures reject repetition; timestamp and generated-report differences do not create a new hypothesis. CLI, model, reasoning, and policy incompatibilities are deterministic and receive zero automatic retries.
 
 Product decisions, destructive migrations, data loss, semantic conflicts, major architecture replacement, security/privacy policy changes, new paid production dependencies, out-of-scope changes, user-data workspace access, and exhausted budgets stop at a human gate.
 
@@ -130,6 +136,8 @@ From `${HOME}/Developer/development-conveyor`:
 
 ```bash
 scripts/conveyor validate-config
+scripts/conveyor doctor
+scripts/conveyor doctor --project case-manager
 scripts/conveyor status
 scripts/conveyor status --project case-manager
 scripts/conveyor plan --project case-manager
@@ -187,6 +195,8 @@ Run:
 ```bash
 python3 -m unittest discover -s tests -v
 pytest
+scripts/conveyor doctor
+scripts/conveyor doctor --project case-manager
 scripts/conveyor validate-config
 scripts/conveyor status
 scripts/conveyor reconcile --project case-manager --dry-run

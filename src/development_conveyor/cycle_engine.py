@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import uuid
 from dataclasses import replace
@@ -12,17 +13,27 @@ from typing import Any
 from .config import Configuration
 from .errors import ConveyorError, LockError, QueueError, RecoveryError, SessionError
 from .locks import DurableLock, inspect_repository_writer_lock, make_lock_record
-from .logging import EventLogger, JsonStateStore, atomic_write_json, run_event, utc_now
+from .logging import EventLogger, JsonStateStore, atomic_write_bytes, atomic_write_json, run_event, utc_now
 from .queue import FeatureQueue, resolve_queue_path
 from .recovery import StartupReconciliation, assess_recovery, assess_startup_reconciliation
 from .registry import Project
 from .reporting import build_project_plan
 from .repository import RepositoryInspector
 from .retries import RetryBudget
-from .sessions import SessionLauncher, SessionRequest, SessionResult
+from .sessions import SessionLauncher, SessionPlan, SessionRequest, SessionResult
 from .state_machine import CYCLE_MACHINE, PORTFOLIO_MACHINE
 
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+DETERMINISTIC_COMPATIBILITY_FAILURES = {
+    "cli_upgrade_required",
+    "configuration_incompatible",
+    "cli_missing",
+    "cli_version_too_old",
+    "unsupported_model",
+    "unsupported_reasoning_effort",
+    "model_policy_invalid",
+    "compatibility_unknown",
+}
 
 
 class CycleEngine:
@@ -137,13 +148,41 @@ class CycleEngine:
         effective = self.effective_project(project)
         persisted = self.load_project_state(project)
         plan = build_project_plan(effective, self.configuration.conveyor, self.root)
+        proposed = plan.get("proposed_next_action")
+        compatibility_action = {
+            "queue_reconciliation": "queue_reconciliation",
+            "planning_refinement": "queue_reconciliation",
+            "milestone_gate": "milestone_gate",
+        }.get(str(proposed), "feature_cycle")
+        compatibility = self._compatibility_snapshot(project, compatibility_action)
+        stale = plan.get("stale_cycle_evidence")
+        if isinstance(stale, dict) and stale.get("classification") == "deterministic_failed_cycle":
+            stale["environment_remediation_verified"] = bool(
+                compatibility and compatibility.get("compatible") is True
+            )
+            stale["compatibility_preflight"] = compatibility
         assessment = assess_startup_reconciliation(effective, persisted, plan)
         plan.update(self._reconciliation_fields(assessment))
-        if assessment.classification in {"human_decision_required", "invalid_state_evidence"}:
+        plan["compatibility_preflight"] = compatibility
+        if assessment.classification in {
+            "human_decision_required", "invalid_state_evidence", "deterministic_failure_human_gate"
+        }:
             plan["proposed_next_action"] = "human_decision_required"
             plan["expected_stop_condition"] = assessment.reason
             plan["sessions_that_would_launch"] = []
+        elif compatibility and compatibility.get("compatible") is not True:
+            plan["proposed_next_action"] = "human_decision_required"
+            plan["expected_stop_condition"] = compatibility.get("diagnostic")
+            plan["sessions_that_would_launch"] = []
+            plan["compatibility_human_gate"] = compatibility
         return plan
+
+    def _compatibility_snapshot(self, project: Project, action: str) -> dict[str, Any] | None:
+        probe = getattr(self.launcher, "compatibility", None)
+        if probe is None:
+            return None
+        result = probe(action, project_id=project.project_id)
+        return result.as_dict()
 
     def _persist_startup_reconciliation(
         self,
@@ -238,6 +277,9 @@ class CycleEngine:
                 "reason": assessment.reason,
                 "reconciled_at": utc_now(),
             }
+            stale = assessment.evidence.get("stale_cycle_evidence")
+            if isinstance(stale, dict) and stale.get("classification") == "deterministic_failed_cycle":
+                evidence["superseded_cycle"] = stale
             for index, target in enumerate(assessment.transition_path[1:], start=1):
                 final = index == len(assessment.transition_path) - 1
                 document = self._transition_project(
@@ -248,6 +290,7 @@ class CycleEngine:
                     checkpoint=f"startup_state_reconciliation:{assessment.classification}:{target}",
                     feature=assessment.evidence.get("selected_feature") if target == "feature_ready" else None,
                     stop_reason=assessment.reason if final else None,
+                    human_gate=assessment.human_decision if final and target == "human_decision_required" else None,
                     state_evidence=evidence,
                 )
             return document
@@ -255,11 +298,28 @@ class CycleEngine:
             reservation.release(run_id)
 
     def _new_cycle_state(
-        self, project: Project, run_id: str, inspector: RepositoryInspector, feature: dict[str, Any] | None
+        self,
+        project: Project,
+        run_id: str,
+        inspector: RepositoryInspector,
+        feature: dict[str, Any] | None,
+        *,
+        compatibility: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         stamp = utc_now()
         identity = inspector.identity()
         milestone_head = inspector.rev_parse(project.milestone_branch or "", check=False) if project.milestone_branch else None
+        starting_commit = (feature.get("integration_base_commit") or milestone_head) if feature else milestone_head
+        queue_path = resolve_queue_path(project.repository, project.queue_location)
+        queue_fingerprint = hashlib.sha256(queue_path.read_bytes()).hexdigest()
+        dependencies = list(feature.get("dependencies", [])) if feature else []
+        queue = FeatureQueue.from_location(project.repository, project.queue_location)
+        dependency_statuses = {
+            dependency: ((queue.feature(dependency) or {}).get("status")) for dependency in dependencies
+        }
+        project_state = self.load_project_state(project) or {}
+        prior_evidence = project_state.get("state_evidence") if isinstance(project_state.get("state_evidence"), dict) else {}
+        superseded = prior_evidence.get("superseded_cycle") if isinstance(prior_evidence, dict) else None
         return {
             "schema_version": 1,
             "conveyor_run_id": run_id,
@@ -268,10 +328,17 @@ class CycleEngine:
             "repository_path_fingerprint": identity["path_fingerprint"],
             "active_milestone": project.active_milestone,
             "current_feature": feature.get("id") if feature else None,
-            "feature_dependencies": list(feature.get("dependencies", [])) if feature else [],
+            "selected_feature": feature.get("id") if feature else None,
+            "feature_dependencies": dependencies,
+            "dependency_evidence": {
+                "declared": dependencies,
+                "statuses": dependency_statuses,
+                "all_complete": all(value in {"done", "integrated"} for value in dependency_statuses.values()),
+            },
+            "queue_fingerprint": queue_fingerprint,
             "feature_branch": feature.get("branch") if feature else None,
             "feature_worktree": None,
-            "feature_starting_commit": feature.get("integration_base_commit") if feature else milestone_head,
+            "feature_starting_commit": starting_commit,
             "accepted_feature_commit": None,
             "milestone_branch": project.milestone_branch,
             "milestone_pre_integration_commit": milestone_head,
@@ -283,13 +350,109 @@ class CycleEngine:
             "integration_attempts": [],
             "last_successful_checkpoint": None,
             "last_verified_git_state": self._git_checkpoint(inspector),
+            "preflight_compatibility": compatibility,
+            "failure_classification": None,
+            "retry_exhausted": False,
+            "environment_remediation_verified": bool(compatibility and compatibility.get("compatible") is True),
+            "next_safe_action": None,
+            "supersedes_run_id": superseded.get("run_id") if isinstance(superseded, dict) else None,
+            "supersedes_session_id": superseded.get("session_id") if isinstance(superseded, dict) else None,
+            "superseded_cycle_archive": None,
             "stop_reason": None,
             "human_decision_required": None,
             "resume_instructions": f"scripts/conveyor resume --project {project.project_id}",
             "session_id": None,
+            "feature_session_id": None,
+            "integration_session_id": None,
+            "milestone_gate_session_id": None,
             "created_at": stamp,
             "updated_at": stamp,
         }
+
+    def _archive_superseded_cycle(
+        self,
+        project_state: dict[str, Any],
+        cycle_path: Path,
+        new_run_id: str,
+    ) -> dict[str, Any] | None:
+        evidence = project_state.get("state_evidence")
+        superseded = evidence.get("superseded_cycle") if isinstance(evidence, dict) else None
+        if not isinstance(superseded, dict):
+            return None
+        old_run_id = superseded.get("run_id")
+        expected_fingerprint = superseded.get("cycle_fingerprint")
+        if not isinstance(old_run_id, str) or not isinstance(expected_fingerprint, str):
+            raise RecoveryError("superseded cycle evidence lacks run identity or fingerprint")
+        try:
+            cycle_bytes = cycle_path.read_bytes()
+        except OSError as exc:
+            raise RecoveryError(f"cannot read superseded cycle evidence: {exc}") from exc
+        actual_fingerprint = hashlib.sha256(cycle_bytes).hexdigest()
+        if actual_fingerprint != expected_fingerprint:
+            raise RecoveryError("superseded cycle changed before immutable archival")
+        report_root = self.configuration.owned_path(self.configuration.conveyor["report_directory"])
+        archive_path = self._report_path(report_root, old_run_id, "cycle-state-snapshot.json")
+        if archive_path.exists():
+            if archive_path.read_bytes() != cycle_bytes:
+                raise RecoveryError("existing superseded cycle archive does not match exact source bytes")
+        else:
+            atomic_write_bytes(archive_path, cycle_bytes)
+        metadata_path = self._report_path(report_root, old_run_id, "cycle-state-snapshot.meta.json")
+        metadata = {
+            "schema_version": 1,
+            "project_id": project_state.get("project_id"),
+            "superseded_run_id": old_run_id,
+            "superseded_session_id": superseded.get("session_id"),
+            "superseded_by_run_id": new_run_id,
+            "sha256": actual_fingerprint,
+            "archive_path": str(archive_path),
+            "source_cycle_path": str(cycle_path),
+            "archived_at": utc_now(),
+        }
+        if metadata_path.exists():
+            existing = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if existing.get("sha256") != actual_fingerprint:
+                raise RecoveryError("existing superseded cycle archive metadata disagrees with source bytes")
+            metadata = existing
+        else:
+            atomic_write_json(metadata_path, metadata)
+        return metadata
+
+    def _validate_cycle_launch_invariants(
+        self,
+        project: Project,
+        inspector: RepositoryInspector,
+        state: dict[str, Any],
+        selected_feature: str,
+    ) -> None:
+        required = {
+            "current_feature": state.get("current_feature"),
+            "active_milestone": state.get("active_milestone"),
+            "milestone_branch": state.get("milestone_branch"),
+            "feature_starting_commit": state.get("feature_starting_commit"),
+            "milestone_pre_integration_commit": state.get("milestone_pre_integration_commit"),
+            "repository_identity": state.get("repository_identity"),
+            "queue_fingerprint": state.get("queue_fingerprint"),
+            "selected_feature": state.get("selected_feature"),
+            "dependency_evidence": state.get("dependency_evidence"),
+        }
+        missing = sorted(key for key, value in required.items() if value is None or value == "")
+        if missing:
+            raise RecoveryError("feature cycle launch invariants are incomplete: " + ", ".join(missing))
+        milestone_head = inspector.rev_parse(project.milestone_branch or "", check=False)
+        if state["feature_starting_commit"] != milestone_head:
+            raise RecoveryError("feature starting commit must equal the verified milestone branch HEAD")
+        if state["milestone_pre_integration_commit"] != milestone_head:
+            raise RecoveryError("milestone pre-integration commit must equal the verified milestone branch HEAD")
+        if state["selected_feature"] != selected_feature or state["current_feature"] != selected_feature:
+            raise RecoveryError("selected feature evidence disagrees with cycle state")
+        if state["last_verified_git_state"].get("clean") is not True:
+            raise RecoveryError("feature cycle launch requires verified clean Git state")
+        if state["dependency_evidence"].get("all_complete") is not True:
+            raise RecoveryError("feature dependencies are not verified complete")
+        compatibility = state.get("preflight_compatibility")
+        if compatibility is not None and compatibility.get("compatible") is not True:
+            raise RecoveryError("feature cycle launch requires compatible Codex preflight evidence")
 
     @staticmethod
     def _git_checkpoint(inspector: RepositoryInspector) -> dict[str, Any]:
@@ -370,21 +533,62 @@ class CycleEngine:
                 current_phase=phase,
             ))
         try:
+            result: SessionResult
             try:
                 result = self.launcher.launch(request)
             except SessionError as exc:
                 report_path = self._persist_launch_failure(request, phase, exc)
-                raise SessionError(
-                    f"project={request.project.project_id}; run_id={request.run_id}; action={request.action}; "
-                    f"cwd={request.project.repository}; classification=session_execution_failed; "
-                    f"error={exc}; report={report_path}; current_state={phase}; "
-                    f"resume=scripts/conveyor resume --project {request.project.project_id}"
-                ) from exc
+                match = re.search(r"classification=([a-z_]+)", str(exc))
+                classification = match.group(1) if match else "session_execution_failed"
+                deterministic = classification in {
+                    "cli_missing", "cli_version_too_old", "unsupported_model",
+                    "unsupported_reasoning_effort", "model_policy_invalid", "compatibility_unknown",
+                }
+                if not deterministic:
+                    raise SessionError(
+                        f"project={request.project.project_id}; run_id={request.run_id}; action={request.action}; "
+                        f"cwd={request.project.repository}; classification=session_execution_failed; "
+                        f"error={exc}; report={report_path}; current_state={phase}; "
+                        f"resume=scripts/conveyor resume --project {request.project.project_id}"
+                    ) from exc
+                compatibility = self._compatibility_snapshot(request.project, request.action) or {
+                    "classification": classification,
+                    "compatible": False,
+                    "diagnostic": str(exc),
+                }
+                plan = SessionPlan(
+                    (),
+                    request.project.repository,
+                    "",
+                    hashlib.sha256(b"").hexdigest(),
+                    "not_launched",
+                    compatibility.get("effective_model"),
+                    compatibility.get("effective_reasoning"),
+                    compatibility.get("executable"),
+                    compatibility,
+                )
+                result = SessionResult(
+                    action=request.action,
+                    returncode=2,
+                    session_id=request.session_id,
+                    redacted_output=str(exc),
+                    plan=plan,
+                    redacted_stderr=str(exc),
+                    result_classification=classification,
+                    exit_classification=classification,
+                    report_path=str(report_path),
+                    failure_classification=classification,
+                    retryable=False,
+                    primary_terminal_error=str(exc),
+                )
         finally:
             if reservation is not None:
                 reservation.release(request.run_id)
-        report_path = self._persist_session_report(request, result, phase)
-        result = replace(result, report_path=str(report_path))
+        if result.report_path:
+            report_path = Path(result.report_path)
+        else:
+            report_path = self._persist_session_report(request, result, phase)
+            result = replace(result, report_path=str(report_path))
         self.events.append(run_event(
             run_id=request.run_id,
             project_id=request.project.project_id,
@@ -407,6 +611,7 @@ class CycleEngine:
         report_root = self.configuration.owned_path(self.configuration.conveyor["report_directory"])
         suffix = f"-repair-{request.repair_attempt}" if request.repair_attempt is not None else ""
         path = self._report_path(report_root, request.run_id, f"{request.action}{suffix}-launch-failure.json")
+        compatibility = self._compatibility_snapshot(request.project, request.action)
         try:
             plan = self.launcher.plan(request)
             argv = list(plan.argv)
@@ -415,7 +620,12 @@ class CycleEngine:
             argv = []
             cwd = str(request.project.repository)
         message = str(error)
-        classification = "process_launch_failure" if "process launch failed" in message else "session_execution_failed"
+        match = re.search(r"classification=([a-z_]+)", message)
+        classification = (
+            match.group(1)
+            if match
+            else ("process_launch_failure" if "process launch failed" in message else "session_execution_failed")
+        )
         atomic_write_json(path, {
             "schema_version": 1,
             "project_id": request.project.project_id,
@@ -434,6 +644,18 @@ class CycleEngine:
             "redacted_stderr_summary": str(error)[-2000:],
             "session_id": None,
             "current_state": current_state,
+            "failure_classification": classification,
+            "retryable": False,
+            "effective_model": (
+                getattr(plan, "effective_model", None) if "plan" in locals() else (compatibility or {}).get("effective_model")
+            ),
+            "effective_reasoning": (
+                getattr(plan, "effective_reasoning", None) if "plan" in locals() else (compatibility or {}).get("effective_reasoning")
+            ),
+            "codex_executable": (
+                getattr(plan, "codex_executable", None) if "plan" in locals() else (compatibility or {}).get("executable")
+            ),
+            "compatibility": getattr(plan, "compatibility", None) if "plan" in locals() else compatibility,
             "safe_resume_command": f"scripts/conveyor resume --project {request.project.project_id}",
             "created_at": utc_now(),
         })
@@ -474,6 +696,14 @@ class CycleEngine:
             "redacted_stderr_summary": (result.redacted_stderr or "")[-2000:],
             "session_id": result.session_id,
             "current_state": current_state,
+            "failure_classification": result.failure_classification,
+            "retryable": result.retryable,
+            "primary_terminal_error": result.primary_terminal_error,
+            "secondary_diagnostics": list(result.secondary_diagnostics),
+            "effective_model": result.plan.effective_model,
+            "effective_reasoning": result.plan.effective_reasoning,
+            "codex_executable": result.plan.codex_executable,
+            "compatibility": result.plan.compatibility,
             "safe_resume_command": f"scripts/conveyor resume --project {request.project.project_id}",
             "created_at": utc_now(),
         })
@@ -495,22 +725,37 @@ class CycleEngine:
 
     @staticmethod
     def _session_requires_retry(result: SessionResult) -> bool:
+        if result.retryable:
+            return True
         if result.action != "queue_reconciliation":
-            return result.returncode != 0
+            return False
         if result.result_classification in {"session_execution_failed", "structured_output_invalid"}:
             return result.structured_result is None or bool(result.structured_result.get("retryable"))
         return False
 
     @staticmethod
-    def _session_failure_message(project: Project, run_id: str, result: SessionResult, current_state: str) -> str:
-        stderr = (result.redacted_stderr or "").strip().replace("\n", " ")[-1000:] or "none captured"
+    def _session_failure_message(
+        project: Project,
+        run_id: str,
+        result: SessionResult,
+        current_state: str,
+        feature: str | None = None,
+    ) -> str:
+        secondary = ",".join(result.secondary_diagnostics) or "none captured"
         return (
             f"project={project.project_id}; run_id={run_id}; action={result.action}; cwd={result.plan.cwd}; "
-            f"exit_status={result.returncode}; classification={result.result_classification}; "
+            f"feature={feature or 'none'}; "
+            f"model={result.plan.effective_model}; reasoning={result.plan.effective_reasoning}; "
+            f"codex_executable={result.plan.codex_executable}; "
+            f"detected_version={(result.plan.compatibility or {}).get('detected_version')}; "
+            f"exit_status={result.returncode}; classification={result.failure_classification or result.result_classification}; "
             f"exit_classification={result.exit_classification}; "
-            f"stderr={stderr}; structured_output={result.structured_output_validation}; "
+            f"primary_terminal_error={result.primary_terminal_error or 'none captured'}; "
+            f"secondary_diagnostics={secondary}; retryable={result.retryable}; "
+            f"structured_output={result.structured_output_validation}; "
             f"report={result.report_path}; current_state={current_state}; "
-            f"resume=scripts/conveyor resume --project {project.project_id}"
+            f"remediation={((result.plan.compatibility or {}).get('remediation') or 'inspect the persisted report')}; "
+            f"continue={((result.plan.compatibility or {}).get('validation_command') or f'scripts/conveyor resume --project {project.project_id}')}"
         )
 
     def _launch_with_retries(
@@ -521,7 +766,7 @@ class CycleEngine:
         retry_key: str,
         *,
         reservation_held: bool = False,
-    ) -> tuple[SessionResult, list[dict[str, Any]]]:
+    ) -> tuple[SessionResult, list[dict[str, Any]], dict[str, Any]]:
         configured = int(self.configuration.conveyor["retries"][retry_key])
         limit = request.project.maximum_retries if request.project.maximum_retries is not None else configured
         budget = RetryBudget(limit)
@@ -529,9 +774,24 @@ class CycleEngine:
         result = self._launch_session(request, inspector, phase, reservation_held=reservation_held)
         while self._session_requires_retry(result) and budget.remaining:
             evidence = hashlib.sha256(result.redacted_output[-4000:].encode()).hexdigest()
+            structured = result.structured_result or {}
+            hypothesis = result.retry_hypothesis or structured.get("summary")
+            remediation = result.remediation_action or structured.get("next_action")
+            supporting = result.retry_evidence or (
+                f"classification={result.failure_classification or result.result_classification}; "
+                f"redacted output fingerprint={evidence}"
+            )
+            if not isinstance(hypothesis, str) or not isinstance(remediation, str):
+                break
             attempt = budget.record(
-                hypothesis=f"fresh repository-derived hypothesis for evidence {evidence}",
-                evidence=f"session exit {result.returncode}; redacted output fingerprint {evidence}",
+                hypothesis=hypothesis,
+                evidence=supporting,
+                failure_classification=result.failure_classification or result.result_classification or "unknown",
+                command=result.plan.argv,
+                session_id=result.session_id,
+                model=result.plan.effective_model,
+                reasoning=result.plan.effective_reasoning,
+                remediation_action=remediation,
             )
             attempts.append({
                 "attempt": attempt,
@@ -539,6 +799,13 @@ class CycleEngine:
                 "evidence_fingerprint": evidence,
                 "previous_exit": result.returncode,
                 "previous_classification": result.result_classification,
+                "failure_classification": result.failure_classification,
+                "hypothesis": hypothesis,
+                "supporting_evidence": supporting,
+                "remediation_action": remediation,
+                "model": result.plan.effective_model,
+                "reasoning": result.plan.effective_reasoning,
+                "session_id": result.session_id,
             })
             result = self._launch_session(replace(
                 request,
@@ -546,8 +813,20 @@ class CycleEngine:
                 session_id=result.session_id,
                 repair_attempt=attempt,
                 repair_evidence=evidence,
+                repair_hypothesis=hypothesis,
+                remediation_action=remediation,
+                repair_supporting_evidence=supporting,
             ), inspector, phase, reservation_held=reservation_held)
-        return result, attempts
+        still_retryable = self._session_requires_retry(result)
+        retry_status = {
+            "limit": limit,
+            "attempts_consumed": len(attempts),
+            "attempts_remaining": budget.remaining,
+            "retryable": still_retryable,
+            "exhausted": bool(still_retryable and budget.remaining == 0),
+            "stopped_without_contract": bool(still_retryable and budget.remaining > 0),
+        }
+        return result, attempts, retry_status
 
     def _resolve_accepted(self, inspector: RepositoryInspector, feature: dict[str, Any]) -> str:
         accepted = feature.get("accepted_commit")
@@ -593,32 +872,112 @@ class CycleEngine:
         cycle_path: Path,
         state: dict[str, Any],
         result: SessionResult,
+        retry_status: dict[str, Any] | None = None,
         *,
         reservation_held: bool = False,
     ) -> dict[str, Any]:
-        state["session_id"] = result.session_id
+        retry_status = retry_status or {
+            "attempts_consumed": 0,
+            "attempts_remaining": 0,
+            "retryable": result.retryable,
+            "exhausted": False,
+        }
+        if result.action == "milestone_integration":
+            state["integration_session_id"] = result.session_id
+        else:
+            state["feature_session_id"] = result.session_id
+            state["session_id"] = result.session_id
         if result.returncode != 0:
-            state["stop_reason"] = "repository-scoped feature session returned non-zero"
-            self._advance_cycle(cycle_path, state, "failed", inspector, "session_failed")
-            raise SessionError(state["stop_reason"])
+            classification = result.failure_classification or result.result_classification or "session_execution_failed"
+            deterministic = classification in {
+                "cli_upgrade_required", "configuration_incompatible", "cli_missing",
+                "cli_version_too_old", "unsupported_model", "unsupported_reasoning_effort",
+                "model_policy_invalid", "compatibility_unknown",
+            }
+            compatibility = result.plan.compatibility or state.get("preflight_compatibility") or {}
+            continuation = (
+                f"scripts/conveyor doctor --project {project.project_id}"
+                if deterministic else f"scripts/conveyor resume --project {project.project_id}"
+            )
+            message = self._session_failure_message(
+                project,
+                str(state["conveyor_run_id"]),
+                result,
+                state["current_phase"],
+                str(state.get("current_feature") or ""),
+            )
+            gate = {
+                "reason": "repository session reached a deterministic compatibility gate" if deterministic else "repository session cannot continue safely",
+                "project": project.project_id,
+                "run_id": state["conveyor_run_id"],
+                "feature": state.get("current_feature"),
+                "classification": classification,
+                "effective_model": result.plan.effective_model,
+                "effective_reasoning": result.plan.effective_reasoning,
+                "codex_executable": result.plan.codex_executable,
+                "detected_version": compatibility.get("detected_version"),
+                "required_minimum_version": compatibility.get("required_minimum_version"),
+                "primary_terminal_error": result.primary_terminal_error,
+                "secondary_diagnostics": list(result.secondary_diagnostics),
+                "retryable": bool(result.retryable and not retry_status.get("exhausted")),
+                "originally_retryable": result.retryable,
+                "attempts_consumed": retry_status.get("attempts_consumed", 0),
+                "attempts_remaining": 0 if deterministic else retry_status.get("attempts_remaining", 0),
+                "retry_exhausted": bool(deterministic or retry_status.get("exhausted")),
+                "environment_remediation_verified": False,
+                "report_path": result.report_path,
+                "remediation": compatibility.get("remediation") or "inspect the persisted report and record a materially different repair hypothesis",
+                "safe_continuation_command": continuation,
+                "old_session_will_resume": False if deterministic else None,
+                "resolved": False,
+            }
+            state.update({
+                "failure_classification": classification,
+                "retry_exhausted": bool(deterministic or retry_status.get("exhausted")),
+                "environment_remediation_verified": False,
+                "next_safe_action": continuation,
+                "stop_reason": message,
+                "human_decision_required": gate,
+            })
+            self._advance_cycle(cycle_path, state, "human_decision_required", inspector, "session_terminal_failure")
+            project_state = self._project_document(
+                project, str(state["conveyor_run_id"]), inspector.identity()["path_fingerprint"]
+            )
+            if project_state["current_state"] != "human_decision_required":
+                self._transition_project(
+                    project,
+                    project_state,
+                    "human_decision_required",
+                    run_id=str(state["conveyor_run_id"]),
+                    checkpoint="session_terminal_failure",
+                    feature=str(state.get("current_feature")),
+                    stop_reason=message,
+                    human_gate=gate,
+                    state_evidence={"compatibility_preflight": compatibility, "failure_classification": classification},
+                )
+            raise SessionError(message)
 
         queue = FeatureQueue.from_location(project.repository, project.queue_location)
         feature = queue.feature(str(state["current_feature"]))
         if feature is None:
             raise QueueError("selected feature disappeared from the queue")
 
-        if state["current_phase"] == "branch_preparing":
+        if result.action == "feature_cycle" and state["current_phase"] == "branch_preparing":
             state["feature_branch"] = feature.get("branch")
             state["feature_starting_commit"] = feature.get("integration_base_commit") or state["feature_starting_commit"]
             self._advance_cycle(cycle_path, state, "feature_in_progress", inspector, "feature_session_completed")
-        if feature.get("status") in {"review", "accepted", "integration_pending", "integrated"}:
+        if result.action == "feature_cycle" and feature.get("status") in {"review", "accepted", "integration_pending", "integrated"}:
             self._advance_cycle(cycle_path, state, "feature_review", inspector, "review_evidence_observed")
-        if feature.get("status") in {"accepted", "integration_pending", "integrated"}:
+        if result.action == "feature_cycle" and feature.get("status") in {"accepted", "integration_pending", "integrated"}:
             self._advance_cycle(cycle_path, state, "feature_accepted", inspector, "acceptance_evidence_observed")
             self._advance_cycle(cycle_path, state, "integration_pending", inspector, "integration_pending_observed")
 
-        if feature.get("status") in {"accepted", "integration_pending"}:
-            integration_result, integration_repairs = self._launch_with_retries(SessionRequest(
+        if result.action == "feature_cycle" and feature.get("status") in {"accepted", "integration_pending"}:
+            if state["current_phase"] == "integration_pending":
+                self._advance_cycle(
+                    cycle_path, state, "integrating", inspector, "integration_session_launch"
+                )
+            integration_result, integration_repairs, integration_retry = self._launch_with_retries(SessionRequest(
                 action="milestone_integration",
                 project=project,
                 run_id=state["conveyor_run_id"],
@@ -626,12 +985,16 @@ class CycleEngine:
                 feature=str(state["current_feature"]),
             ), inspector, "integrating", "integration_repairs", reservation_held=reservation_held)
             state["integration_attempts"].extend(integration_repairs)
-            if integration_result.returncode != 0:
-                self._advance_cycle(cycle_path, state, "integrating", inspector, "integration_session_started")
-                self._advance_cycle(cycle_path, state, "failed", inspector, "integration_session_failed")
-                raise SessionError("milestone integration session returned non-zero")
-            result = integration_result
-            feature = FeatureQueue.from_location(project.repository, project.queue_location).feature(str(state["current_feature"])) or feature
+            self.cycle_store.write(cycle_path, state)
+            return self._reconcile_feature_evidence(
+                project,
+                inspector,
+                cycle_path,
+                state,
+                integration_result,
+                retry_status=integration_retry,
+                reservation_held=reservation_held,
+            )
 
         if feature.get("status") == "integrated":
             if state["current_phase"] == "integration_pending":
@@ -665,6 +1028,35 @@ class CycleEngine:
         inspector = RepositoryInspector(project.repository)
         if not inspector.is_clean:
             raise ConveyorError("feature execution requires a clean repository")
+        compatibility = self._compatibility_snapshot(project, "feature_cycle")
+        if compatibility is not None and compatibility.get("compatible") is not True:
+            gate = {
+                "reason": "Codex compatibility preflight blocked the feature session before cycle creation.",
+                "classification": compatibility.get("classification"),
+                "configured_model": compatibility.get("effective_model"),
+                "configured_reasoning": compatibility.get("effective_reasoning"),
+                "codex_executable": compatibility.get("executable"),
+                "detected_version": compatibility.get("detected_version"),
+                "required_minimum_version": compatibility.get("required_minimum_version"),
+                "remediation": compatibility.get("remediation"),
+                "compatibility_validation_command": compatibility.get("validation_command"),
+                "resolved": False,
+            }
+            self._transition_project(
+                project,
+                project_state,
+                "human_decision_required",
+                run_id=run_id,
+                checkpoint="compatibility_preflight_blocked",
+                feature=project_state.get("current_feature"),
+                stop_reason=str(compatibility.get("diagnostic")),
+                human_gate=gate,
+                state_evidence={"compatibility_preflight": compatibility},
+            )
+            raise SessionError(
+                f"classification={compatibility.get('classification')}; remediation={compatibility.get('remediation')}; "
+                f"continue={compatibility.get('validation_command')}"
+            )
         reservation = None if reservation_held else self._launch_lock(project, inspector)
         if reservation is not None:
             reservation.acquire(make_lock_record(
@@ -701,7 +1093,14 @@ class CycleEngine:
             if selection is None:
                 raise QueueError("no dependency-ready feature exists after queue reconciliation")
             cycle_path = inspector.cycle_state_path()
-            state = self._new_cycle_state(project, run_id, inspector, selection.feature)
+            superseded_archive = self._archive_superseded_cycle(
+                project_state, cycle_path, run_id
+            ) if cycle_path.exists() else None
+            state = self._new_cycle_state(
+                project, run_id, inspector, selection.feature, compatibility=compatibility
+            )
+            state["superseded_cycle_archive"] = superseded_archive
+            self._validate_cycle_launch_invariants(project, inspector, state, selection.feature_id)
             self.cycle_store.write(cycle_path, state)
             self._advance_cycle(cycle_path, state, "preflight", inspector, "preflight_verified")
             self._advance_cycle(cycle_path, state, "feature_selected", inspector, selection.reason)
@@ -719,8 +1118,16 @@ class CycleEngine:
                 run_id=run_id,
                 checkpoint="feature_session_launch",
                 feature=selection.feature_id,
+                state_evidence={
+                    "compatibility_preflight": compatibility,
+                    "feature_starting_commit": state["feature_starting_commit"],
+                    "milestone_pre_integration_commit": state["milestone_pre_integration_commit"],
+                    "queue_fingerprint": state["queue_fingerprint"],
+                    "dependency_evidence": state["dependency_evidence"],
+                    "superseded_cycle_archive": superseded_archive,
+                },
             )
-            result, repairs = self._launch_with_retries(SessionRequest(
+            result, repairs, retry_status = self._launch_with_retries(SessionRequest(
                 action="feature_cycle", project=project, run_id=run_id, mode=mode, feature=selection.feature_id
             ), inspector, "feature_in_progress", "implementation_repairs", reservation_held=True)
             state["validation_attempts"].extend(repairs)
@@ -731,6 +1138,7 @@ class CycleEngine:
                 cycle_path,
                 state,
                 result,
+                retry_status=retry_status,
                 reservation_held=True,
             )
             self._transition_project(
@@ -775,10 +1183,48 @@ class CycleEngine:
     ) -> dict[str, Any]:
         if not inspector.is_clean:
             raise ConveyorError("queue reconciliation cannot mutate a dirty repository")
-        result, repairs = self._launch_with_retries(SessionRequest(
+        result, repairs, retry_status = self._launch_with_retries(SessionRequest(
             action="queue_reconciliation", project=project, run_id=run_id, mode=mode
         ), inspector, "queue_reconciliation", "queue_reconciliation_repairs", reservation_held=True)
         classification = result.result_classification
+        if result.failure_classification in {
+            "cli_upgrade_required", "configuration_incompatible", "cli_missing",
+            "cli_version_too_old", "unsupported_model", "unsupported_reasoning_effort",
+            "model_policy_invalid", "compatibility_unknown",
+        }:
+            compatibility = result.plan.compatibility or {}
+            gate = {
+                "reason": "Codex compatibility blocked queue reconciliation.",
+                "classification": result.failure_classification,
+                "effective_model": result.plan.effective_model,
+                "effective_reasoning": result.plan.effective_reasoning,
+                "codex_executable": result.plan.codex_executable,
+                "detected_version": compatibility.get("detected_version"),
+                "primary_terminal_error": result.primary_terminal_error,
+                "secondary_diagnostics": list(result.secondary_diagnostics),
+                "retryable": False,
+                "attempts_consumed": retry_status["attempts_consumed"],
+                "attempts_remaining": 0,
+                "remediation": compatibility.get("remediation"),
+                "safe_continuation_command": f"scripts/conveyor doctor --project {project.project_id}",
+                "resolved": False,
+            }
+            self._transition_project(
+                project,
+                project_state,
+                "human_decision_required",
+                run_id=run_id,
+                checkpoint="queue_reconciliation_compatibility_gate",
+                stop_reason=str(result.primary_terminal_error or result.failure_classification),
+                human_gate=gate,
+                state_evidence={"compatibility_preflight": compatibility},
+            )
+            return {
+                "outcome": "human_decision_required",
+                "next_state": "human_decision_required",
+                "human_decision": gate,
+                "report": result.report_path,
+            }
         if classification in {"session_execution_failed", "structured_output_invalid", None}:
             message = self._session_failure_message(project, run_id, result, project_state["current_state"])
             self._transition_project(
@@ -864,6 +1310,31 @@ class CycleEngine:
         reservation_held: bool = False,
     ) -> dict[str, Any]:
         inspector = RepositoryInspector(project.repository)
+        compatibility = self._compatibility_snapshot(project, "milestone_gate")
+        if compatibility is not None and compatibility.get("compatible") is not True:
+            gate = {
+                "reason": "Codex compatibility preflight blocked the milestone gate session.",
+                "classification": compatibility.get("classification"),
+                "effective_model": compatibility.get("effective_model"),
+                "effective_reasoning": compatibility.get("effective_reasoning"),
+                "codex_executable": compatibility.get("executable"),
+                "detected_version": compatibility.get("detected_version"),
+                "required_minimum_version": compatibility.get("required_minimum_version"),
+                "remediation": compatibility.get("remediation"),
+                "safe_continuation_command": compatibility.get("validation_command"),
+                "resolved": False,
+            }
+            self._transition_project(
+                project,
+                project_state,
+                "human_decision_required",
+                run_id=run_id,
+                checkpoint="milestone_gate_compatibility_blocked",
+                stop_reason=str(compatibility.get("diagnostic")),
+                human_gate=gate,
+                state_evidence={"compatibility_preflight": compatibility},
+            )
+            return {"outcome": "human_decision_required", "human_gate": gate}
         reservation = None if reservation_held else self._launch_lock(project, inspector)
         if reservation is not None:
             reservation.acquire(make_lock_record(
@@ -924,10 +1395,52 @@ class CycleEngine:
         result: SessionResult,
     ) -> dict[str, Any]:
         cycle_path = inspector.cycle_state_path()
+        state["milestone_gate_session_id"] = result.session_id
         state["session_id"] = result.session_id
         if result.returncode != 0:
-            self._advance_cycle(cycle_path, state, "failed", inspector, "milestone_gate_session_failed")
-            raise SessionError("milestone gate session returned non-zero")
+            classification = result.failure_classification or result.result_classification or "session_execution_failed"
+            compatibility = result.plan.compatibility or {}
+            message = self._session_failure_message(project, run_id, result, state["current_phase"])
+            gate = {
+                "reason": "milestone gate session cannot continue safely",
+                "classification": classification,
+                "effective_model": result.plan.effective_model,
+                "effective_reasoning": result.plan.effective_reasoning,
+                "primary_terminal_error": result.primary_terminal_error,
+                "secondary_diagnostics": list(result.secondary_diagnostics),
+                "retryable": result.retryable,
+                "report_path": result.report_path,
+                "remediation": compatibility.get("remediation"),
+                "safe_continuation_command": (
+                    f"scripts/conveyor doctor --project {project.project_id}"
+                    if classification in {
+                        "cli_upgrade_required", "configuration_incompatible", "cli_missing",
+                        "cli_version_too_old", "unsupported_model", "unsupported_reasoning_effort",
+                        "model_policy_invalid", "compatibility_unknown",
+                    }
+                    else f"scripts/conveyor resume --project {project.project_id}"
+                ),
+                "resolved": False,
+            }
+            state.update({
+                "failure_classification": classification,
+                "retry_exhausted": not result.retryable,
+                "next_safe_action": gate["safe_continuation_command"],
+                "stop_reason": message,
+                "human_decision_required": gate,
+            })
+            self._advance_cycle(cycle_path, state, "human_decision_required", inspector, "milestone_gate_session_terminal_failure")
+            self._transition_project(
+                project,
+                project_state,
+                "human_decision_required",
+                run_id=run_id,
+                checkpoint="milestone_gate_session_terminal_failure",
+                stop_reason=message,
+                human_gate=gate,
+                state_evidence={"compatibility_preflight": compatibility, "failure_classification": classification},
+            )
+            raise SessionError(message)
         queue = FeatureQueue.from_location(project.repository, project.queue_location)
         milestone = queue.milestone(project.active_milestone or "")
         if (
@@ -1004,6 +1517,172 @@ class CycleEngine:
             }
         return self.run_project(project, project.automation_mode)
 
+    def _compatibility_remediation_plan(
+        self,
+        project: Project,
+        state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Authorize only a fresh action-specific session after a deterministic gate clears."""
+
+        classification = state.get("failure_classification")
+        if (
+            state.get("current_phase") != "human_decision_required"
+            or classification not in DETERMINISTIC_COMPATIBILITY_FAILURES
+        ):
+            return None
+        checkpoint = str(state.get("last_successful_checkpoint") or "")
+        if state.get("milestone_gate_session_id") or "milestone_gate" in checkpoint:
+            action = "milestone_gate"
+            target_phase = "milestone_gate"
+            target_project_state = "milestone_gate"
+            prior_session_id = state.get("milestone_gate_session_id") or state.get("session_id")
+        elif state.get("integration_session_id") or "integration" in checkpoint:
+            action = "milestone_integration"
+            target_phase = "integrating"
+            target_project_state = "feature_running"
+            prior_session_id = state.get("integration_session_id")
+        else:
+            # Pre-feature deterministic failures are recovered by startup reconciliation and a
+            # replacement cycle, which also archives the exact superseded cycle bytes.
+            return None
+        compatibility = self._compatibility_snapshot(project, action)
+        return {
+            "action": action,
+            "target_phase": target_phase,
+            "target_project_state": target_project_state,
+            "prior_session_id": prior_session_id,
+            "compatibility": compatibility,
+            "verified": bool(compatibility and compatibility.get("compatible") is True),
+        }
+
+    def _resume_remediated_action(
+        self,
+        project: Project,
+        run_id: str,
+        inspector: RepositoryInspector,
+        state: dict[str, Any],
+        remediation: dict[str, Any],
+    ) -> dict[str, Any]:
+        repository = inspector.inspect(
+            baseline=project.validated_baseline_commit,
+            milestone_branch=project.milestone_branch,
+        )
+        if (
+            repository.get("clean") is not True
+            or any(repository.get("git_operations", {}).values())
+            or repository.get("branch") != project.milestone_branch
+            or repository.get("head") != repository.get("milestone_branch_head")
+        ):
+            raise RecoveryError(
+                "compatibility remediation requires the clean configured milestone branch with no Git operation"
+            )
+        queue = FeatureQueue.from_location(project.repository, project.queue_location)
+        action = str(remediation["action"])
+        if action == "milestone_integration":
+            feature = queue.feature(str(state.get("current_feature") or ""))
+            if feature is None or feature.get("status") not in {"accepted", "integration_pending"}:
+                raise RecoveryError(
+                    "fresh integration remediation requires corroborating accepted or integration-pending queue evidence"
+                )
+            expected_head = state.get("milestone_pre_integration_commit")
+            if not isinstance(expected_head, str) or repository.get("head") != expected_head:
+                raise RecoveryError(
+                    "fresh integration remediation requires the unchanged milestone pre-integration commit"
+                )
+        elif not queue.milestone_complete(project.active_milestone or ""):
+            raise RecoveryError("fresh milestone-gate remediation requires a complete milestone")
+
+        compatibility = dict(remediation["compatibility"])
+        state.update({
+            "preflight_compatibility": compatibility,
+            "failure_classification": None,
+            "retry_exhausted": False,
+            "environment_remediation_verified": True,
+            "next_safe_action": None,
+            "stop_reason": None,
+            "human_decision_required": None,
+        })
+        attempt_record = {
+            "timestamp": utc_now(),
+            "outcome": "compatibility_remediation_verified",
+            "classification": compatibility.get("classification"),
+            "prior_session_id": remediation.get("prior_session_id"),
+            "old_session_will_resume": False,
+            "new_session_required": True,
+        }
+        if action == "milestone_integration":
+            state["integration_attempts"].append(attempt_record)
+        else:
+            state["validation_attempts"].append(attempt_record)
+        self._advance_cycle(
+            inspector.cycle_state_path(),
+            state,
+            str(remediation["target_phase"]),
+            inspector,
+            "compatibility_remediation_verified_fresh_session",
+        )
+        project_state = self._project_document(
+            project, run_id, inspector.identity()["path_fingerprint"]
+        )
+        self._transition_project(
+            project,
+            project_state,
+            str(remediation["target_project_state"]),
+            run_id=run_id,
+            checkpoint="compatibility_remediation_verified_fresh_session",
+            feature=str(state.get("current_feature") or "") or None,
+            state_evidence={
+                "compatibility_preflight": compatibility,
+                "old_session_will_resume": False,
+                "new_session_required": True,
+                "prior_session_id": remediation.get("prior_session_id"),
+            },
+        )
+        request = SessionRequest(
+            action=action,
+            project=project,
+            run_id=run_id,
+            mode="resume_after_compatibility_remediation",
+            feature=state.get("current_feature"),
+            session_id=None,
+        )
+        if action == "milestone_integration":
+            result, repairs, retry_status = self._launch_with_retries(
+                request,
+                inspector,
+                "integrating",
+                "integration_repairs",
+                reservation_held=True,
+            )
+            state["integration_attempts"].extend(repairs)
+            self.cycle_store.write(inspector.cycle_state_path(), state)
+            evidence = self._reconcile_feature_evidence(
+                project,
+                inspector,
+                inspector.cycle_state_path(),
+                state,
+                result,
+                retry_status=retry_status,
+                reservation_held=True,
+            )
+            return self._finish_resumed_feature(
+                project,
+                run_id,
+                inspector,
+                state,
+                evidence,
+                reservation_held=True,
+            )
+        result = self._launch_session(
+            request, inspector, "milestone_gate", reservation_held=True
+        )
+        return {
+            "project_id": project.project_id,
+            **self._finalize_milestone_gate_result(
+                project, run_id, project_state, inspector, state, result
+            ),
+        }
+
     def resume_project(self, project: Project, run_id: str | None = None) -> dict[str, Any]:
         inspector = RepositoryInspector(project.repository)
         cycle_path = inspector.cycle_state_path()
@@ -1022,8 +1701,18 @@ class CycleEngine:
                 return {"project_id": project.project_id, "outcome": "writer_locked", "reason": "launch reservation owner may still be active"}
             reservation.recover_stale(expected_repository_identity=inspector.identity()["repository_id"])
         phase = str(assessment.resume_phase)
+        compatibility_remediation = None
         if phase == "human_decision_required":
-            return {"project_id": project.project_id, "outcome": "human_decision_required", "human_decision": state.get("human_decision_required")}
+            compatibility_remediation = self._compatibility_remediation_plan(project, state)
+            if not compatibility_remediation or not compatibility_remediation["verified"]:
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "human_decision_required",
+                    "human_decision": state.get("human_decision_required"),
+                    "compatibility_preflight": (
+                        compatibility_remediation or {}
+                    ).get("compatibility"),
+                }
         reservation.acquire(make_lock_record(
             project_id=project.project_id,
             repository_identity=inspector.identity()["repository_id"],
@@ -1050,7 +1739,11 @@ class CycleEngine:
                 or writer.exists
             ):
                 raise RecoveryError("cycle, Git, or writer-lock evidence changed during resume acquisition")
-            if phase in {"feature_integrated", "next_feature_selection"}:
+            if compatibility_remediation:
+                outcome = self._resume_remediated_action(
+                    project, run_id, inspector, state, compatibility_remediation
+                )
+            elif phase in {"feature_integrated", "next_feature_selection"}:
                 feature, accepted, integrated = self._verify_integrated_feature(project, inspector, state)
                 evidence = {"feature": feature["id"], "accepted_commit": accepted, "integrated_commit": integrated}
                 outcome = self._finish_resumed_feature(
@@ -1079,13 +1772,19 @@ class CycleEngine:
                     action = "milestone_gate"
                 else:
                     action = "feature_cycle"
+                if action == "milestone_integration":
+                    resume_session_id = state.get("integration_session_id")
+                elif action == "milestone_gate":
+                    resume_session_id = state.get("milestone_gate_session_id") or state.get("session_id")
+                else:
+                    resume_session_id = state.get("feature_session_id") or state.get("session_id")
                 result = self._launch_session(SessionRequest(
                     action=action,
                     project=project,
                     run_id=run_id,
                     mode="resume",
                     feature=state.get("current_feature"),
-                    session_id=state.get("session_id"),
+                    session_id=resume_session_id,
                 ), inspector, phase, reservation_held=True)
                 if action in {"feature_cycle", "milestone_integration"}:
                     evidence = self._reconcile_feature_evidence(
@@ -1219,6 +1918,23 @@ class CycleEngine:
             effective = self.effective_project(project)
             persisted = self.load_project_state(project)
             assessment = assess_startup_reconciliation(effective, persisted, plan)
+            if assessment.classification == "deterministic_failure_human_gate":
+                document = persisted
+                if assessment.would_persist:
+                    if document is None:
+                        document = self._project_document(
+                            effective, None, plan["repository_path_fingerprint"]
+                        )
+                    document = self._persist_startup_reconciliation(
+                        effective, document, assessment, run_id=f"recovery-{uuid.uuid4()}"
+                    )
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "human_decision_required",
+                    "current_state": (document or {}).get("current_state", assessment.derived_state),
+                    "human_decision": assessment.human_decision,
+                    "plan": plan,
+                }
             if assessment.classification in {"human_decision_required", "invalid_state_evidence"}:
                 return {"project_id": project.project_id, "outcome": "human_decision_required", "plan": plan}
             if assessment.would_persist:

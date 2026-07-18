@@ -117,6 +117,13 @@ def assess_startup_reconciliation(
         "locks": locks,
         "stale_cycle_evidence": plan.get("stale_cycle_evidence"),
     }
+    deterministic_failure = plan.get("stale_cycle_evidence")
+    deterministic_failure = (
+        deterministic_failure
+        if isinstance(deterministic_failure, dict)
+        and deterministic_failure.get("classification") == "deterministic_failed_cycle"
+        else None
+    )
 
     if active_cycle:
         if active_cycle.get("phase") == "invalid":
@@ -128,6 +135,29 @@ def assess_startup_reconciliation(
         return StartupReconciliation(
             "active_cycle_resume", persisted_state, persisted_state, (), False,
             "a corroborated repository-local cycle must resume before new work", evidence,
+        )
+
+    if deterministic_failure and not deterministic_failure.get("environment_remediation_verified"):
+        path = (persisted_state,) if persisted_state == "human_decision_required" else (
+            persisted_state, "human_decision_required"
+        )
+        return StartupReconciliation(
+            "deterministic_failure_human_gate",
+            persisted_state,
+            "human_decision_required",
+            path,
+            persisted_state != "human_decision_required",
+            "the failed session is non-retryable until Codex compatibility remediation is verified",
+            evidence,
+            {
+                "reason": "local Codex compatibility remediation is required",
+                "classification": deterministic_failure.get("failure_classification"),
+                "attempts_consumed": deterministic_failure.get("attempts_consumed"),
+                "environment_remediation_verified": False,
+                "safe_action": f"scripts/conveyor doctor --project {project.project_id}",
+                "safe_continuation_command": f"scripts/conveyor resume --project {project.project_id}",
+                "old_session_will_resume": False,
+            },
         )
 
     writer = locks.get("repository_writer") or {}
@@ -244,7 +274,11 @@ def assess_startup_reconciliation(
                 },
             )
 
-    if persisted_state == "human_decision_required" and not _decision_resolved(persisted):
+    if (
+        persisted_state == "human_decision_required"
+        and not _decision_resolved(persisted)
+        and not (deterministic_failure and deterministic_failure.get("environment_remediation_verified"))
+    ):
         return StartupReconciliation(
             "human_decision_required", persisted_state, "human_decision_required", (), False,
             "the recorded human decision has not been explicitly resolved", evidence,
@@ -268,6 +302,8 @@ def assess_startup_reconciliation(
     completed = set(queue.get("completed_features") or [])
     if persisted_state == "feature_running" and current_feature and current_feature in completed:
         path.append("feature_accepted")
+    if deterministic_failure and path[-1] != "human_decision_required":
+        path.append("human_decision_required")
     if path[-1] != "queue_reconciliation":
         path.append("queue_reconciliation")
     if derived_state != "queue_reconciliation":

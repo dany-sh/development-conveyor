@@ -37,6 +37,26 @@ def atomic_write_json(path: Path, value: dict[str, Any], mode: int = 0o600) -> N
         raise
 
 
+def atomic_write_bytes(path: Path, value: bytes, mode: int = 0o600) -> None:
+    """Atomically preserve exact immutable evidence bytes."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
 class JsonStateStore:
     def __init__(self, schema_path: Path):
         self.schema = load_json(schema_path)
@@ -120,4 +140,3 @@ def run_event(
         "stop_reason": stop_reason,
         "human_gate": human_gate,
     }
-

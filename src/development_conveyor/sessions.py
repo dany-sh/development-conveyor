@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .compatibility import CompatibilityResult, check_compatibility, resolve_model_selection
 from .errors import SessionError
 from .redaction import redact_text
 from .registry import Project
@@ -34,6 +35,19 @@ RECONCILIATION_CLASSIFICATIONS = {
     "structured_output_invalid",
 }
 RESULT_MARKER = "CONVEYOR_RESULT="
+RETRY_MARKER = "CONVEYOR_RETRY="
+RETRYABLE_FAILURE_CLASSIFICATIONS = {
+    "build_failure",
+    "implementation_validation_failure",
+    "integration_validation_failure",
+    "lint_failure",
+    "packaging_failure",
+    "review_findings",
+    "session_execution_failed",
+    "structured_output_invalid",
+    "test_failure",
+    "validation_failure",
+}
 
 
 @dataclass(frozen=True)
@@ -46,6 +60,9 @@ class SessionRequest:
     session_id: str | None = None
     repair_attempt: int | None = None
     repair_evidence: str | None = None
+    repair_hypothesis: str | None = None
+    remediation_action: str | None = None
+    repair_supporting_evidence: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +72,10 @@ class SessionPlan:
     prompt: str
     prompt_sha256: str
     sandbox: str
+    effective_model: str | None = None
+    effective_reasoning: str | None = None
+    codex_executable: str | None = None
+    compatibility: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +92,13 @@ class SessionResult:
     result_classification: str | None = None
     exit_classification: str | None = None
     report_path: str | None = None
+    failure_classification: str | None = None
+    retryable: bool = False
+    primary_terminal_error: str | None = None
+    secondary_diagnostics: tuple[str, ...] = ()
+    retry_hypothesis: str | None = None
+    remediation_action: str | None = None
+    retry_evidence: str | None = None
 
 
 def _content_text(content: Any) -> str:
@@ -184,6 +212,48 @@ def parse_reconciliation_result(output: str) -> tuple[dict[str, Any] | None, str
         return None, str(exc)
 
 
+def parse_retry_contract(output: str) -> tuple[dict[str, Any] | None, str]:
+    """Parse a terminal, validated retry authorization from a production session."""
+
+    assistant_messages: list[str] = []
+    for line in output.splitlines():
+        try:
+            decoded = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = _assistant_message(decoded)
+        if message is not None:
+            assistant_messages.append(message)
+    if not assistant_messages:
+        return None, "missing_terminal_assistant_message"
+    terminal = assistant_messages[-1].rstrip()
+    final_line = terminal.splitlines()[-1] if terminal else ""
+    if not final_line.startswith(RETRY_MARKER):
+        return None, "missing_retry_marker"
+    if sum(message.count(RETRY_MARKER) for message in assistant_messages) != 1:
+        return None, "duplicate_retry_marker"
+    try:
+        value = json.loads(final_line.removeprefix(RETRY_MARKER).strip())
+    except json.JSONDecodeError as exc:
+        return None, f"invalid_retry_json: line {exc.lineno}, column {exc.colno}: {exc.msg}"
+    if not isinstance(value, dict):
+        return None, "retry contract must be an object"
+    required = {
+        "schema_version", "retryable", "failure_classification", "hypothesis",
+        "remediation_action", "supporting_evidence",
+    }
+    if value.get("schema_version") != 1 or required - set(value):
+        return None, "retry contract is missing required versioned fields"
+    if value.get("retryable") is not True:
+        return None, "retry contract must explicitly authorize retryable=true"
+    for key in ("failure_classification", "hypothesis", "remediation_action", "supporting_evidence"):
+        if not isinstance(value.get(key), str) or not value[key].strip():
+            return None, f"retry contract {key} must be a non-empty string"
+    if value["failure_classification"] not in RETRYABLE_FAILURE_CLASSIFICATIONS:
+        return None, "retry contract failure_classification is not an allowed repository-scoped retry cause"
+    return value, "retry_contract_valid"
+
+
 def classify_session_result(returncode: int, structured: dict[str, Any] | None, validation: str) -> str:
     if structured is not None and validation == "valid":
         return str(structured["classification"])
@@ -214,10 +284,88 @@ def classify_exit_contract(
     return "structured_output_invalid"
 
 
+def _nested_error_message(value: Any) -> str | None:
+    if isinstance(value, dict):
+        for key in ("message", "error"):
+            message = _nested_error_message(value.get(key))
+            if message:
+                return message
+        return None
+    if not isinstance(value, str):
+        return None
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return value.strip() or None
+    return _nested_error_message(decoded) or value.strip() or None
+
+
+def classify_codex_failure(stdout: str, stderr: str) -> dict[str, Any]:
+    """Prefer terminal structured Codex failure evidence over secondary warnings."""
+
+    primary = None
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "turn.failed":
+            primary = _nested_error_message(event.get("error"))
+    categories: list[str] = []
+    for line in stderr.splitlines():
+        lowered_line = line.lower()
+        if "authrequired" in lowered_line or "www_authenticate" in lowered_line or "www-authenticate" in lowered_line:
+            category = "optional_integration_authentication_required"
+        elif "models cache" in lowered_line or "unknown variant `max`" in lowered_line:
+            category = "model_catalog_parse_warning"
+        else:
+            category = "codex_stderr_warning"
+        if category not in categories:
+            categories.append(category)
+    secondary = tuple(categories)
+    lowered = (primary or "").lower()
+    if "invalid_request_error" in lowered and "requires a newer version of codex" in lowered:
+        return {
+            "classification": "cli_upgrade_required",
+            "retryable": False,
+            "primary_terminal_error": primary,
+            "secondary_diagnostics": secondary,
+        }
+    if "requires a newer version of codex" in lowered:
+        return {
+            "classification": "cli_upgrade_required",
+            "retryable": False,
+            "primary_terminal_error": primary,
+            "secondary_diagnostics": secondary,
+        }
+    stderr_lower = stderr.lower()
+    if primary is None and ("unknown variant `max`" in stderr_lower or "unknown variant 'max'" in stderr_lower):
+        return {
+            "classification": "cli_upgrade_required",
+            "retryable": False,
+            "primary_terminal_error": "installed Codex cannot parse the current model catalog reasoning variants",
+            "secondary_diagnostics": secondary,
+        }
+    return {
+        "classification": "session_execution_failed" if primary or stderr else None,
+        "retryable": False,
+        "primary_terminal_error": primary,
+        "secondary_diagnostics": secondary,
+    }
+
+
 class SessionLauncher:
     def __init__(self, controller_root: Path, configuration: dict[str, Any]):
         self.controller_root = controller_root.resolve()
         self.configuration = configuration
+
+    def compatibility(self, action: str, *, project_id: str | None = None) -> CompatibilityResult:
+        selection = resolve_model_selection(action)
+        return check_compatibility(
+            str(self.configuration["codex"]["executable"]),
+            selection,
+            project_id=project_id,
+        )
 
     def _render_prompt(self, request: SessionRequest) -> str:
         try:
@@ -238,24 +386,57 @@ class SessionLauncher:
             prompt += (
                 "\n## Focused repair continuation\n\n"
                 f"This is focused repair attempt {request.repair_attempt}. The previous redacted failure evidence "
-                f"fingerprint is `{request.repair_evidence}`. Reinspect current repository evidence, state a changed "
-                "hypothesis in the repository run log, and do not repeat the failed approach. Stop if a changed "
-                "hypothesis is not justified or a human-decision condition is reached.\n"
+                f"fingerprint is `{request.repair_evidence}`. The authorized changed hypothesis is "
+                f"`{request.repair_hypothesis}` and the materially different remediation is "
+                f"`{request.remediation_action}`. Supporting evidence: `{request.repair_supporting_evidence}`. "
+                "Reinspect current repository evidence, record the changed hypothesis in the repository run log, "
+                "and do not repeat the failed approach. Stop if the authorized remediation is no longer justified "
+                "or a human-decision condition is reached.\n"
+            )
+        if request.action in {"feature_cycle", "milestone_integration"}:
+            prompt += (
+                "\n## Controller retry contract\n\n"
+                "Do not request a retry for deterministic environment or configuration failures. If and only if "
+                "the session fails with a retryable repository-scoped cause and a materially different repair is "
+                "justified by evidence, end the terminal assistant message with exactly one line: "
+                "`CONVEYOR_RETRY={\"schema_version\":1,\"retryable\":true,"
+                "\"failure_classification\":\"...\",\"hypothesis\":\"...\","
+                "\"remediation_action\":\"...\",\"supporting_evidence\":\"...\"}`. "
+                "The classification must be one of the controller's documented repository-scoped validation, "
+                "build, test, lint, packaging, review, structured-output, or session-execution causes. "
+                "Otherwise emit no retry marker and stop at the precise failure or human gate.\n"
             )
         return prompt
 
     def plan(self, request: SessionRequest) -> SessionPlan:
         prompt = self._render_prompt(request)
-        executable = str(self.configuration["codex"]["executable"])
+        compatibility = self.compatibility(request.action, project_id=request.project.project_id)
+        if not compatibility.compatible:
+            raise SessionError(
+                f"classification={compatibility.classification}; model={compatibility.effective_model}; "
+                f"reasoning={compatibility.effective_reasoning}; executable={compatibility.executable}; "
+                f"detected_version={compatibility.detected_version}; "
+                f"required_minimum_version={compatibility.required_minimum_version}; "
+                f"diagnostic={compatibility.diagnostic}; remediation={compatibility.remediation}; "
+                f"validate={compatibility.validation_command}"
+            )
+        executable = str(compatibility.executable)
         sandbox = (
             "read-only"
             if request.action == "human_decision_report" or request.mode in {"audit", "dry-run", "dry-run-validation"}
             else "workspace-write"
         )
+        policy_args = (
+            "--model", str(compatibility.effective_model),
+            "-c", f'model_reasoning_effort="{compatibility.effective_reasoning}"',
+        )
         if request.session_id:
-            argv = (executable, "exec", "resume", "--json", request.session_id, "-")
+            argv = (executable, "exec", *policy_args, "resume", "--json", request.session_id, "-")
         else:
-            argv = (executable, "exec", "--cd", str(request.project.repository), "--json", "--sandbox", sandbox, "-")
+            argv = (
+                executable, "exec", *policy_args, "--cd", str(request.project.repository),
+                "--json", "--sandbox", sandbox, "-",
+            )
         SafetyPolicy.validate_controller_command(
             list(argv), cwd=request.project.repository, registered_repository=request.project.repository, allow_codex=True
         )
@@ -265,6 +446,10 @@ class SessionLauncher:
             prompt=prompt,
             prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
             sandbox=sandbox,
+            effective_model=compatibility.effective_model,
+            effective_reasoning=compatibility.effective_reasoning,
+            codex_executable=compatibility.executable,
+            compatibility=compatibility.as_dict(),
         )
 
     def launch(self, request: SessionRequest) -> SessionResult:
@@ -295,17 +480,45 @@ class SessionLauncher:
         redacted_stdout = redact_text(result.stdout)
         redacted_stderr = redact_text(result.stderr)
         combined = redacted_stdout + (("\n" + redacted_stderr) if redacted_stderr else "")
+        failure = classify_codex_failure(result.stdout, result.stderr) if result.returncode != 0 else {
+            "classification": None,
+            "retryable": False,
+            "primary_terminal_error": None,
+            "secondary_diagnostics": (),
+        }
         structured = None
         validation = "not_required"
         classification = None
         if request.action == "queue_reconciliation":
             structured, validation = parse_reconciliation_result(result.stdout)
             classification = classify_session_result(result.returncode, structured, validation)
-        exit_classification = (
-            classify_exit_contract(result.returncode, structured, validation, classification)
-            if classification is not None else
-            ("structured_result_successfully_returned" if result.returncode == 0 else "agent_or_skill_execution_failure")
-        )
+        elif result.returncode != 0 and failure["classification"] not in {
+            "cli_upgrade_required", "configuration_incompatible", "cli_missing",
+            "cli_version_too_old", "unsupported_model", "unsupported_reasoning_effort",
+            "model_policy_invalid", "compatibility_unknown",
+        }:
+            retry_contract, retry_validation = parse_retry_contract(result.stdout)
+            if retry_contract is not None:
+                structured = retry_contract
+                validation = retry_validation
+                classification = str(retry_contract["failure_classification"])
+                failure = {
+                    **failure,
+                    "classification": classification,
+                    "retryable": True,
+                }
+        if failure["classification"] == "cli_upgrade_required":
+            classification = "cli_upgrade_required"
+        if failure["retryable"]:
+            exit_classification = "retryable_failure"
+        elif failure["classification"]:
+            exit_classification = failure["classification"]
+        else:
+            exit_classification = (
+                classify_exit_contract(result.returncode, structured, validation, classification)
+                if classification is not None else
+                ("structured_result_successfully_returned" if result.returncode == 0 else "agent_or_skill_execution_failure")
+            )
         return SessionResult(
             action=request.action,
             returncode=result.returncode,
@@ -318,6 +531,13 @@ class SessionLauncher:
             structured_output_validation=validation,
             result_classification=classification,
             exit_classification=exit_classification,
+            failure_classification=failure["classification"],
+            retryable=bool(failure["retryable"]),
+            primary_terminal_error=failure["primary_terminal_error"],
+            secondary_diagnostics=tuple(failure["secondary_diagnostics"]),
+            retry_hypothesis=(structured or {}).get("hypothesis") if failure["retryable"] else None,
+            remediation_action=(structured or {}).get("remediation_action") if failure["retryable"] else None,
+            retry_evidence=(structured or {}).get("supporting_evidence") if failure["retryable"] else None,
         )
 
     @staticmethod

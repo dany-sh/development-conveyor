@@ -109,3 +109,38 @@ This log records model configuration and deterministic deployment evidence. It n
 - Live controller recovery: Case Manager moved from `milestone_gate` to `feature_ready` through `queue_reconciliation`; P0-001 remains selected, P0-002 remains completed, P0 remains incomplete, and no feature session was launched.
 - Application isolation: exact before/after comparison of Case Manager tracked-file hashes, refs, branch/HEAD, cycle bytes, and writer-lock absence matched; no Case Manager file, branch, commit, cycle record, or lock changed.
 - Adversarial re-review: no Critical, High, or Medium findings remain.
+
+### Model execution — 2026-07-18T01:18:41+00:00
+
+- Agent role: `controller-repair-writer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `global_default`
+- Event: `start`
+- Reason code: `cli_compatibility_recovery_repair`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-18T01:18:41+00:00
+
+- Agent role: `adversarial-reviewer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `xhigh`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `cli_compatibility_recovery_adversarial_review`
+- Safety and autonomy contracts unchanged: `true`
+
+### CLI compatibility and failed-cycle recovery — 2026-07-17
+
+- Root cause: the failed P0-001 repository session reached a terminal `turn.failed` event because `gpt-5.6-sol` required a newer Codex CLI. Optional MCP authentication and model-cache warnings were secondary diagnostics, not the primary cause.
+- Version evidence: the failed run did not persist `codex --version`; the retained pre-upgrade executable `/Users/dany/.codex/packages/standalone/releases/0.137.0-aarch64-apple-darwin/bin/codex` reconstructs the old version as `0.137.0`. The exact current Conveyor executable is `/Users/dany/.codex/packages/standalone/releases/0.144.5-aarch64-apple-darwin/bin/codex`, version `0.144.5`.
+- Model policy: feature orchestration remains explicitly pinned to `gpt-5.6-sol` with `high` reasoning from the `feature-factory-orchestrator` agent policy. No model or reasoning fallback was introduced.
+- Preflight: `scripts/conveyor doctor` and `scripts/conveyor doctor --project case-manager` both classified the current exact executable, model, and reasoning combination as `compatible` before recovery.
+- Failure and retry disposition: run `555d458b-b52d-43ee-8aa2-dde097df4c77`, session `019f7264-c6e8-7591-b79f-253cb162cc65`, and its three focused retries are preserved as an exhausted, non-retryable `cli_upgrade_required` cycle. The old session will not resume.
+- Repair: session plans now record and pass the exact executable, model, reasoning, and compatibility result; deterministic compatibility failures receive no automatic retry; repository-scoped retries require a validated allowlisted failure contract, a changed hypothesis, supporting evidence, and materially different remediation; exhaustion is explicit.
+- Cycle safety: a null feature integration base resolves to verified milestone HEAD, launch invariants are validated before `feature_running`, action-specific session IDs prevent cross-role resume, and a replaced historical cycle is archived byte-for-byte with a SHA-256 record before the active-cycle slot changes.
+- Live controller recovery: Case Manager moved from stale `feature_running` through the verified recovery path to `feature_ready`. P0-001 remains selected and its required start is `826de2ab2c517e4bba53ed54f0cf2ddee50f38ef`. No repository session launched.
+- Application isolation: before/after Case Manager tracked manifest `4a62a08d58b47e9daffc32d98d294dce4c12aeff249ddcfe48177c2a945b26c9`, refs `6ecf48727b3f481c045f7bdcc33131edc9f4fc7679eff5d6c230b6fb1c0a18c1`, cycle bytes `1b0fdf9177a2d36edcaa5b6b3d0e2f91d89b4ee69bdba369afb56784ba07d679`, branch `codex/p0-foundation`, HEAD, single worktree, clean status, and writer-lock absence matched exactly. Historical report hashes also matched.
+- Validation: `python3 -m compileall -q src scripts`, all 117 unittest cases, all 117 pytest cases in an isolated temporary environment, `scripts/conveyor validate-config`, both doctor commands, current status, and the final resume dry-run passed.
+- Final dry-run: state is consistent at `feature_ready`; P0-001 is selected; the next real feature cycle would start a new repository-scoped session, never resume the failed session, and the dry-run performed no application write, lock acquisition, or Git operation.
+- Adversarial re-review: no Critical, High, or Medium findings remain after correcting action-specific recovery, retry-contract classification, retry exhaustion, immutable cycle archival, and authentication-diagnostic redaction.

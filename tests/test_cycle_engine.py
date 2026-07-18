@@ -13,13 +13,27 @@ class OneFailureLauncher(SyntheticLauncher):
     def __init__(self):
         super().__init__()
         self.failed = False
+        self.repair_request = None
 
     def launch(self, request):
         if not self.failed and request.action == "feature_cycle":
             self.failed = True
             self.actions.append(request.action)
             plan = SessionPlan(("codex", "exec"), request.project.repository, "synthetic", "0" * 64, "workspace-write")
-            return SessionResult(request.action, 1, "retryable-session", "compiler failure: missing generated interface", plan)
+            return SessionResult(
+                request.action,
+                1,
+                "retryable-session",
+                "compiler failure: missing generated interface",
+                plan,
+                retryable=True,
+                failure_classification="validation_failure",
+                retry_hypothesis="the generated interface is stale",
+                remediation_action="regenerate the interface before rebuilding",
+                retry_evidence="compiler reported a missing generated interface",
+            )
+        if request.action == "feature_cycle":
+            self.repair_request = request
         return super().launch(request)
 
 
@@ -28,7 +42,18 @@ class ExhaustingLauncher(SyntheticLauncher):
         self.actions.append(request.action)
         attempt = len(self.actions)
         plan = SessionPlan(("codex", "exec"), request.project.repository, "synthetic", "0" * 64, "workspace-write")
-        return SessionResult(request.action, 1, "failing-session", f"distinct failure evidence {attempt}", plan)
+        return SessionResult(
+            request.action,
+            1,
+            "failing-session",
+            f"distinct failure evidence {attempt}",
+            plan,
+            retryable=True,
+            failure_classification="validation_failure",
+            retry_hypothesis=f"distinct synthetic hypothesis {attempt}",
+            remediation_action=f"distinct synthetic remediation {attempt}",
+            retry_evidence=f"distinct synthetic evidence {attempt}",
+        )
 
 
 class CycleEngineTests(unittest.TestCase):
@@ -82,6 +107,11 @@ class CycleEngineTests(unittest.TestCase):
             result = engine.run_project(project, "one_feature")
             self.assertEqual(result["outcome"], "one_feature_integrated")
             self.assertEqual(launcher.actions, ["feature_cycle", "feature_cycle"])
+            self.assertEqual(launcher.repair_request.repair_hypothesis, "the generated interface is stale")
+            self.assertEqual(
+                launcher.repair_request.remediation_action,
+                "regenerate the interface before rebuilding",
+            )
             state = engine.cycle_store.read(RepositoryInspector(repository).cycle_state_path())
             self.assertEqual(state["validation_attempts"][0]["attempt"], 1)
 
@@ -91,8 +121,11 @@ class CycleEngineTests(unittest.TestCase):
             repository, project = synthetic_repository(root)
             launcher = ExhaustingLauncher()
             engine = CycleEngine(controller_configuration(root, project), launcher)
-            with self.assertRaisesRegex(SessionError, "session returned non-zero"):
+            with self.assertRaisesRegex(SessionError, "project=synthetic"):
                 engine.run_project(project, "one_feature")
             self.assertEqual(len(launcher.actions), 4)
             state = engine.cycle_store.read(RepositoryInspector(repository).cycle_state_path())
-            self.assertEqual(state["current_phase"], "failed")
+            self.assertEqual(state["current_phase"], "human_decision_required")
+            self.assertTrue(state["retry_exhausted"])
+            self.assertEqual(state["human_decision_required"]["attempts_remaining"], 0)
+            self.assertFalse(state["human_decision_required"]["retryable"])
