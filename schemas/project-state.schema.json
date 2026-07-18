@@ -15,6 +15,40 @@
     "last_checkpoint": {"type": ["string", "null"]},
     "stop_reason": {"type": ["string", "null"]},
     "human_decision_required": {"type": ["object", "null"]},
+    "human_decision_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["gate", "gate_fingerprint", "resolution"],
+        "properties": {
+          "gate": {"type": "object"},
+          "gate_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "resolution": {
+            "type": "object",
+            "required": ["schema_version", "outcome", "project_id", "resolution_id", "resolution_fingerprint", "timestamp", "user_provided_reason", "actor_classification", "original_gate", "original_gate_fingerprint", "previous_state", "approved_next_state", "state_transition_path", "applied", "audit_log_location", "report_location"],
+            "properties": {
+              "schema_version": {"type": "integer", "enum": [1]},
+              "outcome": {"type": "string", "enum": ["resolution_accepted"]},
+              "project_id": {"type": "string"},
+              "resolution_id": {"type": "string"},
+              "resolution_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "timestamp": {"type": "string"},
+              "user_provided_reason": {"type": "string", "minLength": 1},
+              "actor_classification": {"type": "string", "enum": ["explicit_user_approval"]},
+              "original_gate": {"type": "object"},
+              "original_gate_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "previous_state": {"type": "string", "enum": ["human_decision_required"]},
+              "approved_next_state": {"type": "string", "enum": ["queue_reconciliation"]},
+              "state_transition_path": {"type": "array", "items": {"type": "string"}},
+              "applied": {"type": "boolean", "enum": [true]},
+              "audit_log_location": {"type": "string"},
+              "report_location": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
     "state_evidence": {"type": ["object", "null"]},
     "created_at": {"type": "string"},
     "updated_at": {"type": "string"}

@@ -80,6 +80,15 @@ def _parser() -> argparse.ArgumentParser:
         "reconcile", help="validate queue reconciliation and optionally recover Conveyor-owned project state"
     )
     reconcile.add_argument("--project", required=True)
+    reconcile.add_argument(
+        "--resolve-human-decision",
+        action="store_true",
+        help="resolve the project's pinned human gate after deterministic evidence validation",
+    )
+    reconcile.add_argument(
+        "--reason",
+        help="explicit user-approval reason; required with --resolve-human-decision",
+    )
     reconcile.add_argument("--dry-run", action="store_true")
     recover_branch = subparsers.add_parser(
         "recover-feature-branch",
@@ -195,6 +204,12 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
         return engine.run_project(registry.get(args.project), "resume", dry_run=args.dry_run)
 
     if args.command == "reconcile":
+        if args.reason is not None and not args.resolve_human_decision:
+            raise ConveyorError("--reason requires --resolve-human-decision")
+        if args.resolve_human_decision:
+            return engine.resolve_human_decision(
+                registry.get(args.project), reason=args.reason or "", dry_run=args.dry_run
+            )
         return engine.reconcile_controller_state(registry.get(args.project), dry_run=args.dry_run)
 
     if args.command == "recover-feature-branch":
@@ -216,7 +231,10 @@ def main(arguments: list[str] | None = None) -> int:
     try:
         result = execute(arguments)
         print(render_json(result))
-        return 2 if result.get("launch_allowed") is False else 0
+        return 2 if (
+            result.get("launch_allowed") is False
+            or result.get("outcome") == "resolution_rejected"
+        ) else 0
     except (ConveyorError, OSError, ValueError) as exc:
         print(f"development-conveyor: {redact_text(str(exc))}", file=sys.stderr)
         return 2

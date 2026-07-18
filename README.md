@@ -68,6 +68,27 @@ Every allowed edge is explicit in `state_machine.py`; unknown and invalid edges 
 
 Portfolio project state is stored under `state/projects/<project-id>.json`. Active repository cycle state is stored under `<application-repository>/.factory/conveyor-state.json`. State writes are atomic and schema-validated. Repository-local runtime paths are ignored through local Git metadata, not tracked application files.
 
+### Explicit human-decision resolution
+
+A registered human gate is never cleared from repository cleanliness or an approval reason alone. A resolvable gate has a structured controller registration containing its stable gate ID, classification, original reason, expected repository identity and path fingerprint, milestone, branch, exact HEAD, approved next state, and gate-specific pinned evidence.
+
+Use the existing `reconcile` surface:
+
+```bash
+scripts/conveyor reconcile \
+  --project PROJECT-ID \
+  --resolve-human-decision \
+  --reason "Specific explicit approval and investigation basis"
+```
+
+Add `--dry-run` to execute every validator without writing controller state, an applied-resolution report, an audit event, an application file, a lock, a branch, or a commit. A supplied reason that is empty or matches sensitive-output redaction is rejected and is not persisted.
+
+For a retained milestone-integration writer lease, validation requires the pinned repository identity, exact milestone branch and HEAD, clean worktree, no Git operation or repository cycle, no writer lease or foreign controller reservation, local-host proof that the retained PID is dead, a hash-pinned and structurally valid forced-release investigation record, a hash-pinned successful integration record, present accepted and integrated commits, and matching committed queue evidence. The derived recovery classification is `writer_lease_forced_release_recorded`; it is not trusted as a free-form string from command output.
+
+An accepted resolution transitions only through `human_decision_required -> queue_reconciliation`. It clears the active gate, appends the exact original gate and resolution to immutable controller history, writes one deterministic report, and records one audit event. Repeating the exact gate-and-reason fingerprint reports `already_resolved` without duplicating the transition or history. A different reason or a later unrelated active gate is rejected and cannot be cleared by replay.
+
+`already_resolved` is returned only after the deterministic report exactly matches persisted history and the single audit event matches the complete project, repository, gate, resolution, branch, commit, validation, and state-transition provenance. Missing or mismatched deterministic artifacts are repaired atomically under a controller reservation; normal event appends and healing share a controller-wide event-log lock so another project's concurrent append cannot be lost. After acquiring the repair reservation, the controller reloads state and rechecks the active gate and exact resolution identity before healing. Unsafe repair, a newer interleaved gate, a reservation race, or evidence change after reservation acquisition returns `resolution_rejected` with the failed validator and safe diagnostic action, never a raw exception or partial state transition.
+
 ## Repository writer ownership
 
 Two related mechanisms prevent duplicate work without competing with the installed Factory:
@@ -142,6 +163,7 @@ scripts/conveyor status
 scripts/conveyor status --project case-manager
 scripts/conveyor plan --project case-manager
 scripts/conveyor reconcile --project case-manager --dry-run
+scripts/conveyor reconcile --project PROJECT-ID --resolve-human-decision --reason "Specific approval" --dry-run
 scripts/conveyor run --project case-manager --mode one_feature
 scripts/conveyor run --project case-manager --mode milestone
 scripts/conveyor resume --project case-manager
@@ -149,6 +171,8 @@ scripts/conveyor run --mode portfolio
 ```
 
 Add `--dry-run` to `run` or `resume` to prevent application writes and session launches. `status` and `plan` are always read-only. Dry-run output reports `persisted_state`, `derived_state`, `state_consistency`, `repair_transition_path`, `execution_state_path`, and `would_persist_state_repair`. `reconcile --dry-run` validates the exact read-only reconciliation session plan; `reconcile` without that flag updates only Conveyor-owned project state from deterministic evidence.
+
+Human-resolution output includes `resolution_accepted`, `resolution_rejected`, or `already_resolved`; the deterministic resolution ID and fingerprint; original gate; expected identity, milestone, branch, and HEAD; every validator and result; previous and approved next state; transition path; application/write flags; report and audit locations; and the next safe action. Rejections exit nonzero. Resolution does not launch Product Architect, Feature Inventory, or Feature Factory; the next normal run performs queue reconciliation.
 
 The exact pilot dry run is:
 

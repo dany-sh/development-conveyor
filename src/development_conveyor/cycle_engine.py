@@ -19,8 +19,10 @@ from .locks import (
     make_lock_record,
 )
 from .logging import EventLogger, JsonStateStore, atomic_write_bytes, atomic_write_json, run_event, utc_now
+from .human_resolution import evaluate_human_resolution, gate_fingerprint, resolution_fingerprint
 from .queue import FeatureQueue, resolve_queue_path
 from .recovery import StartupReconciliation, assess_recovery, assess_startup_reconciliation
+from .redaction import redact_text
 from .registry import Project
 from .reporting import build_project_plan
 from .repository import RepositoryInspector
@@ -82,7 +84,16 @@ class CycleEngine:
             "current_feature": None,
             "last_checkpoint": None,
             "stop_reason": None,
-            "human_decision_required": None,
+            "human_decision_required": (
+                {
+                    **project.human_decision_gate,
+                    "gate_fingerprint": gate_fingerprint(project.human_decision_gate),
+                }
+                if project.current_state == "human_decision_required"
+                and isinstance(project.human_decision_gate, dict)
+                else None
+            ),
+            "human_decision_history": [],
             "state_evidence": None,
             "created_at": stamp,
             "updated_at": stamp,
@@ -100,6 +111,11 @@ class CycleEngine:
         stop_reason: str | None = None,
         human_gate: dict[str, Any] | None = None,
         state_evidence: dict[str, Any] | None = None,
+        event_human_gate: dict[str, Any] | None = None,
+        event_branch: str | None = None,
+        event_commit: str | None = None,
+        event_command_category: str | None = None,
+        event_validation_outcome: str | None = None,
     ) -> dict[str, Any]:
         transition = PORTFOLIO_MACHINE.transition(document["current_state"], target)
         document.update({
@@ -120,11 +136,15 @@ class CycleEngine:
             source="deterministic_script",
             milestone=project.active_milestone,
             feature=feature,
+            branch=event_branch,
+            commit=event_commit,
+            command_category=event_command_category,
+            validation_outcome=event_validation_outcome,
             previous_state=transition.previous,
             next_state=transition.current,
             result=checkpoint,
             stop_reason=stop_reason,
-            human_gate=human_gate,
+            human_gate=event_human_gate if event_human_gate is not None else human_gate,
         ))
         return document
 
@@ -2460,6 +2480,619 @@ class CycleEngine:
         else:
             result.update({"run_id": None, "current_state": target, "state_recovered": False})
         return result
+
+    def resolve_human_decision(
+        self, project: Project, *, reason: str, dry_run: bool
+    ) -> dict[str, Any]:
+        """Resolve one pinned human gate after deterministic evidence revalidation."""
+
+        supplied_reason = reason.strip()
+        reason_rejected_sensitive = redact_text(supplied_reason) != supplied_reason
+        reason = "" if reason_rejected_sensitive else supplied_reason
+        gate = project.human_decision_gate if isinstance(project.human_decision_gate, dict) else {}
+        fingerprint_reason = reason if not reason_rejected_sensitive else "[REJECTED_SENSITIVE_REASON]"
+        fingerprint = resolution_fingerprint(project.project_id, gate, fingerprint_reason)
+        resolution_id = f"human-resolution-{fingerprint[:24]}"
+        report_root = self.configuration.owned_path(self.configuration.conveyor["report_directory"])
+        accepted_report_path = self._report_path(
+            report_root, resolution_id, "human-decision-resolution.json"
+        )
+        audit_log_location = str(self.events.path)
+
+        def prior_resolution(document: dict[str, Any] | None) -> dict[str, Any] | None:
+            history = document.get("human_decision_history") if isinstance(document, dict) else None
+            if not isinstance(history, list):
+                return None
+            matches = [
+                item for item in history
+                if isinstance(item, dict)
+                and isinstance(item.get("resolution"), dict)
+                and item["resolution"].get("resolution_fingerprint") == fingerprint
+            ]
+            if len(matches) > 1:
+                raise RecoveryError("duplicate applied human-resolution records are contradictory")
+            return matches[0]["resolution"] if matches else None
+
+        def active_gate_is_newer(document: dict[str, Any] | None) -> bool:
+            if not isinstance(document, dict) or document.get("current_state") != "human_decision_required":
+                return False
+            active = document.get("human_decision_required")
+            if not isinstance(active, dict):
+                return True
+            active_fingerprint = active.get("gate_fingerprint")
+            if not isinstance(active_fingerprint, str):
+                active_fingerprint = gate_fingerprint(active)
+            return bool(
+                active.get("gate_id") != gate.get("gate_id")
+                or active_fingerprint != gate_fingerprint(gate)
+            )
+
+        def expected_resolution_event(prior: dict[str, Any]) -> dict[str, Any]:
+            event = run_event(
+                run_id=resolution_id,
+                project_id=project.project_id,
+                repository_fingerprint=(prior.get("expected_repository_identity") or {}).get("path_fingerprint"),
+                source="deterministic_script",
+                milestone=prior.get("expected_milestone"),
+                branch=prior.get("expected_branch"),
+                commit=prior.get("expected_milestone_head"),
+                command_category="human_decision_resolution",
+                result="explicit_human_decision_resolved",
+                validation_outcome="passed",
+                previous_state=prior.get("previous_state"),
+                next_state=prior.get("approved_next_state"),
+                stop_reason="Explicit human decision resolved; queue reconciliation is next.",
+                human_gate={
+                    "gate_id": (prior.get("original_gate") or {}).get("gate_id"),
+                    "gate_fingerprint": prior.get("original_gate_fingerprint"),
+                    "resolution_id": resolution_id,
+                    "resolution_fingerprint": fingerprint,
+                    "actor_classification": "explicit_user_approval",
+                    "report_location": str(accepted_report_path),
+                },
+            )
+            event["timestamp"] = str(prior.get("timestamp"))
+            return event
+
+        def audit_matches(value: dict[str, Any], expected: dict[str, Any]) -> bool:
+            if not isinstance(value.get("timestamp"), str) or not value["timestamp"]:
+                return False
+            actual_provenance = {key: item for key, item in value.items() if key != "timestamp"}
+            expected_provenance = {key: item for key, item in expected.items() if key != "timestamp"}
+            return actual_provenance == expected_provenance
+
+        def validate_and_repair_applied_artifacts(
+            prior: dict[str, Any], *, repair: bool
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            checks: list[dict[str, Any]] = []
+            repair_failure: str | None = None
+            report_valid = False
+            try:
+                stored_report = json.loads(accepted_report_path.read_text(encoding="utf-8"))
+                report_valid = isinstance(stored_report, dict) and stored_report == prior
+            except (OSError, json.JSONDecodeError):
+                stored_report = None
+            report_repair_started = not report_valid and repair
+            if not report_valid and repair:
+                try:
+                    atomic_write_json(accepted_report_path, prior)
+                    stored_report = json.loads(accepted_report_path.read_text(encoding="utf-8"))
+                    report_valid = isinstance(stored_report, dict) and stored_report == prior
+                except (OSError, json.JSONDecodeError, ConveyorError) as exc:
+                    repair_failure = f"applied resolution report repair failed: {type(exc).__name__}"
+            checks.append({
+                "validator": "applied_resolution_report_matches_history",
+                "passed": report_valid,
+                "evidence": {
+                    "path": str(accepted_report_path),
+                    "exists": accepted_report_path.exists(),
+                    "resolution_fingerprint_matches": isinstance(stored_report, dict)
+                    and stored_report.get("resolution_fingerprint") == fingerprint,
+                    "history_exact_match": report_valid,
+                    "repair_attempted": report_repair_started,
+                },
+            })
+
+            expected = expected_resolution_event(prior)
+            parsed_lines: list[dict[str, Any]] = []
+            malformed_log = False
+            audit_repair_started = False
+            matches: list[dict[str, Any]] = []
+            audit_valid = False
+            with self.events.synchronized():
+                try:
+                    raw_lines = self.events.path.read_text(encoding="utf-8").splitlines()
+                except FileNotFoundError:
+                    raw_lines = []
+                except OSError:
+                    raw_lines = []
+                    malformed_log = True
+                for line in raw_lines:
+                    try:
+                        value = json.loads(line)
+                    except json.JSONDecodeError:
+                        malformed_log = True
+                        break
+                    if not isinstance(value, dict):
+                        malformed_log = True
+                        break
+                    parsed_lines.append(value)
+                matches = [item for item in parsed_lines if item.get("run_id") == resolution_id]
+                audit_valid = (
+                    not malformed_log
+                    and len(matches) == 1
+                    and audit_matches(matches[0], expected)
+                )
+                if not audit_valid and repair and not malformed_log:
+                    audit_repair_started = True
+                    try:
+                        retained = [
+                            item for item in parsed_lines if item.get("run_id") != resolution_id
+                        ]
+                        retained.append(expected)
+                        encoded = b"".join(
+                            (json.dumps(item, sort_keys=True) + "\n").encode("utf-8")
+                            for item in retained
+                        )
+                        atomic_write_bytes(self.events.path, encoded)
+                        repaired = [
+                            json.loads(line)
+                            for line in self.events.path.read_text(encoding="utf-8").splitlines()
+                        ]
+                        matches = [
+                            item for item in repaired if item.get("run_id") == resolution_id
+                        ]
+                        audit_valid = len(matches) == 1 and audit_matches(matches[0], expected)
+                    except (OSError, json.JSONDecodeError, ConveyorError) as exc:
+                        repair_failure = repair_failure or (
+                            f"applied resolution audit repair failed: {type(exc).__name__}"
+                        )
+                elif malformed_log and repair:
+                    audit_repair_started = True
+                    repair_failure = repair_failure or "applied resolution audit log is malformed"
+            checks.append({
+                "validator": "applied_resolution_audit_matches_history",
+                "passed": audit_valid,
+                "evidence": {
+                    "path": str(self.events.path),
+                    "matching_event_count": len(matches),
+                    "full_provenance_matches": audit_valid,
+                    "malformed_log": malformed_log,
+                    "repair_attempted": audit_repair_started,
+                },
+            })
+            return checks, repair_failure
+
+        persisted = self.load_project_state(project)
+        newer_active_gate = active_gate_is_newer(persisted)
+        prior = None if newer_active_gate else prior_resolution(persisted)
+
+        inspector = RepositoryInspector(project.repository)
+        writer = inspect_repository_writer_lock(
+            inspector.writer_lock_path(
+                self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+            ),
+            project.repository,
+        )
+        reservation = self._launch_lock(project, inspector)
+        reservation_status = reservation.status(None)
+        if prior is not None and persisted.get("current_state") != "human_decision_required":
+            artifact_checks: list[dict[str, Any]] = []
+            repair_failure: str | None = None
+            acquired_for_repair = False
+            if dry_run:
+                artifact_checks, repair_failure = validate_and_repair_applied_artifacts(
+                    prior, repair=False
+                )
+            elif reservation_status.exists:
+                repair_failure = "controller reservation appeared before applied-artifact repair"
+                artifact_checks = [{
+                    "validator": "applied_artifact_repair_reservation_acquired",
+                    "passed": False,
+                    "evidence": {"controller_reservation_exists": True},
+                }]
+            else:
+                try:
+                    reservation.acquire(make_lock_record(
+                        project_id=project.project_id,
+                        repository_identity=inspector.identity()["repository_id"],
+                        run_id=resolution_id,
+                        current_feature=None,
+                        current_phase="human_decision_artifact_repair",
+                    ))
+                    acquired_for_repair = True
+                    reloaded = self.load_project_state(project)
+                    reloaded_newer_gate = active_gate_is_newer(reloaded)
+                    try:
+                        reloaded_prior = (
+                            None if reloaded_newer_gate else prior_resolution(reloaded)
+                        )
+                    except RecoveryError:
+                        reloaded_prior = None
+                    state_identity_valid = bool(
+                        isinstance(reloaded, dict)
+                        and reloaded.get("current_state") != "human_decision_required"
+                        and reloaded_prior == prior
+                    )
+                    if not state_identity_valid:
+                        active_gate = (
+                            reloaded.get("human_decision_required")
+                            if isinstance(reloaded, dict)
+                            else None
+                        )
+                        repair_failure = (
+                            "project human-decision state changed before applied-artifact repair"
+                        )
+                        artifact_checks = [{
+                            "validator": "applied_resolution_state_unchanged_under_reservation",
+                            "passed": False,
+                            "evidence": {
+                                "state_exists": isinstance(reloaded, dict),
+                                "current_state": (
+                                    reloaded.get("current_state")
+                                    if isinstance(reloaded, dict)
+                                    else None
+                                ),
+                                "active_gate_id": (
+                                    active_gate.get("gate_id")
+                                    if isinstance(active_gate, dict)
+                                    else None
+                                ),
+                                "newer_active_gate": reloaded_newer_gate,
+                                "resolution_identity_matches": reloaded_prior == prior,
+                            },
+                        }]
+                    else:
+                        prior = reloaded_prior
+                        artifact_checks, repair_failure = validate_and_repair_applied_artifacts(
+                            prior, repair=True
+                        )
+                except LockError:
+                    repair_failure = "controller reservation race prevented applied-artifact repair"
+                    artifact_checks = [{
+                        "validator": "applied_artifact_repair_reservation_acquired",
+                        "passed": False,
+                        "evidence": {"controller_reservation_race": True},
+                    }]
+                finally:
+                    if acquired_for_repair:
+                        reservation.release(resolution_id)
+            artifacts_valid = bool(artifact_checks) and all(
+                item.get("passed") is True for item in artifact_checks
+            )
+            report = dict(prior)
+            report.update({
+                "outcome": "already_resolved" if artifacts_valid else "resolution_rejected",
+                "applied": False,
+                "already_applied": True,
+                "state_would_be_written": False,
+                "state_written": False,
+                "application_repository_written": False,
+                "evidence_results": artifact_checks,
+                "evidence_validators_executed": [item["validator"] for item in artifact_checks],
+                "rejection_reasons": [
+                    item["validator"] for item in artifact_checks if not item.get("passed")
+                ],
+                "artifact_repair_failure": repair_failure,
+                "artifact_repair_required": not artifacts_valid,
+                "dry_run": dry_run,
+                "next_normal_action": (
+                    "queue_reconciliation" if artifacts_valid else "human_resolution_artifact_repair"
+                ),
+                "safe_next_action": f"scripts/conveyor status --project {project.project_id}",
+            })
+            return report
+        evaluation = evaluate_human_resolution(
+            project=project,
+            persisted=persisted,
+            reason=reason,
+            inspector=inspector,
+            writer_lock_exists=writer.exists,
+            controller_reservation_exists=reservation_status.exists,
+            reason_rejected_sensitive=reason_rejected_sensitive,
+        )
+        if prior is not None and isinstance(persisted, dict) and persisted.get("current_state") == "human_decision_required":
+            evaluation["checks"].append({
+                "validator": "applied_resolution_not_reactivated",
+                "passed": False,
+                "evidence": {"resolution_already_recorded": True, "current_state": "human_decision_required"},
+            })
+            evaluation["accepted"] = False
+        gate_value = evaluation.get("gate") or gate or None
+        rejection_reasons = [
+            item["validator"] for item in evaluation["checks"] if not item["passed"]
+        ]
+        timestamp = utc_now()
+        report: dict[str, Any] = {
+            "schema_version": 1,
+            "outcome": "resolution_accepted" if evaluation["accepted"] else "resolution_rejected",
+            "project_id": project.project_id,
+            "resolution_id": resolution_id,
+            "resolution_fingerprint": fingerprint,
+            "timestamp": timestamp,
+            "user_provided_reason": reason,
+            "reason_present": bool(reason),
+            "actor_classification": "explicit_user_approval",
+            "original_gate": gate_value,
+            "original_gate_fingerprint": evaluation.get("gate_fingerprint"),
+            "expected_repository_identity": (
+                {
+                    "repository_id": gate.get("expected_repository_id"),
+                    "path_fingerprint": gate.get("expected_path_fingerprint"),
+                }
+                if gate
+                else None
+            ),
+            "expected_milestone": gate.get("expected_milestone"),
+            "expected_branch": gate.get("expected_branch"),
+            "expected_milestone_head": gate.get("expected_head"),
+            "evidence_validators_executed": [item["validator"] for item in evaluation["checks"]],
+            "evidence_results": evaluation["checks"],
+            "previous_state": (
+                persisted.get("current_state") if persisted else project.current_state
+            ),
+            "approved_next_state": gate.get("approved_next_state"),
+            "state_transition_path": [
+                "human_decision_required",
+                gate.get("approved_next_state", "queue_reconciliation"),
+            ],
+            "resolution_would_be_accepted": evaluation["accepted"],
+            "rejection_reasons": rejection_reasons,
+            "applied": False,
+            "state_would_be_written": bool(evaluation["accepted"] and not dry_run),
+            "state_written": False,
+            "dry_run": dry_run,
+            "application_repository_written": False,
+            "audit_log_location": audit_log_location,
+            "report_location": str(accepted_report_path),
+            "next_normal_action": (
+                "queue_reconciliation" if evaluation["accepted"] else "human_decision_required"
+            ),
+            "next_sessions": (
+                ["product-architect (planning-only)", "$feature-inventory"]
+                if evaluation["accepted"]
+                else []
+            ),
+            "safe_next_action": (
+                f"scripts/conveyor reconcile --project {project.project_id} "
+                "--resolve-human-decision --reason <approved-reason>"
+                if dry_run and evaluation["accepted"]
+                else f"scripts/conveyor status --project {project.project_id}"
+            ),
+        }
+
+        def persist_structured_rejection(
+            value: dict[str, Any], *, exact_reason: str | None = None
+        ) -> dict[str, Any]:
+            failed = [
+                item["validator"]
+                for item in value.get("evidence_results", [])
+                if item.get("passed") is not True
+            ]
+            value.update({
+                "outcome": "resolution_rejected",
+                "resolution_would_be_accepted": False,
+                "rejection_reasons": failed,
+                "applied": False,
+                "state_would_be_written": False,
+                "state_written": False,
+                "application_repository_written": False,
+                "next_normal_action": "human_decision_required",
+                "next_sessions": [],
+                "safe_next_action": f"scripts/conveyor status --project {project.project_id}",
+            })
+            if exact_reason:
+                value["rejection_detail"] = exact_reason
+            rejected_run_id = f"{resolution_id}-rejected-{uuid.uuid4().hex[:8]}"
+            rejected_path = self._report_path(
+                report_root, rejected_run_id, "human-decision-resolution.json"
+            )
+            value["report_location"] = str(rejected_path)
+            atomic_write_json(rejected_path, value)
+            self.events.append(run_event(
+                run_id=rejected_run_id,
+                project_id=project.project_id,
+                repository_fingerprint=inspector.identity()["path_fingerprint"],
+                source="deterministic_script",
+                milestone=project.active_milestone,
+                branch=inspector.current_branch,
+                commit=inspector.head,
+                command_category="human_decision_resolution",
+                result="resolution_rejected",
+                validation_outcome="failed",
+                previous_state=value["previous_state"],
+                next_state=value["previous_state"],
+                stop_reason=exact_reason or ", ".join(failed),
+                human_gate={
+                    "gate_id": gate.get("gate_id"),
+                    "resolution_id": resolution_id,
+                    "resolution_fingerprint": fingerprint,
+                    "report_location": str(rejected_path),
+                },
+            ))
+            return value
+
+        if dry_run:
+            return report
+
+        if not evaluation["accepted"]:
+            return persist_structured_rejection(report)
+
+        try:
+            reservation.acquire(make_lock_record(
+                project_id=project.project_id,
+                repository_identity=inspector.identity()["repository_id"],
+                run_id=resolution_id,
+                current_feature=None,
+                current_phase="human_decision_resolution",
+            ))
+        except LockError:
+            race_check = {
+                "validator": "controller_resolution_reservation_acquired",
+                "passed": False,
+                "evidence": {"reservation_race": True},
+            }
+            report["evidence_results"].append(race_check)
+            report["evidence_validators_executed"].append(race_check["validator"])
+            return persist_structured_rejection(
+                report,
+                exact_reason="controller reservation appeared before human-resolution apply",
+            )
+        try:
+            persisted = self.load_project_state(project)
+            newer_active_gate = active_gate_is_newer(persisted)
+            prior = None if newer_active_gate else prior_resolution(persisted)
+            if prior is not None and persisted.get("current_state") != "human_decision_required":
+                artifact_checks, repair_failure = validate_and_repair_applied_artifacts(
+                    prior, repair=True
+                )
+                artifacts_valid = all(item.get("passed") is True for item in artifact_checks)
+                result = dict(prior)
+                result.update({
+                    "outcome": "already_resolved" if artifacts_valid else "resolution_rejected",
+                    "applied": False,
+                    "already_applied": True,
+                    "state_would_be_written": False,
+                    "state_written": False,
+                    "application_repository_written": False,
+                    "evidence_results": artifact_checks,
+                    "evidence_validators_executed": [
+                        item["validator"] for item in artifact_checks
+                    ],
+                    "rejection_reasons": [
+                        item["validator"] for item in artifact_checks if not item.get("passed")
+                    ],
+                    "artifact_repair_failure": repair_failure,
+                    "artifact_repair_required": not artifacts_valid,
+                })
+                return result
+            writer = inspect_repository_writer_lock(
+                inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                ),
+                project.repository,
+            )
+            owned_status = reservation.status(resolution_id)
+            if not owned_status.exists or not owned_status.owned_by_run or owned_status.ambiguous:
+                ownership_check = {
+                    "validator": "controller_resolution_reservation_owned",
+                    "passed": False,
+                    "evidence": {
+                        "exists": owned_status.exists,
+                        "owned_by_run": owned_status.owned_by_run,
+                        "ambiguous": owned_status.ambiguous,
+                    },
+                }
+                report["evidence_results"].append(ownership_check)
+                report["evidence_validators_executed"].append(ownership_check["validator"])
+                return persist_structured_rejection(
+                    report,
+                    exact_reason="human-resolution controller reservation ownership became ambiguous",
+                )
+            revalidated = evaluate_human_resolution(
+                project=project,
+                persisted=persisted,
+                reason=reason,
+                inspector=inspector,
+                writer_lock_exists=writer.exists,
+                controller_reservation_exists=False,
+                reason_rejected_sensitive=reason_rejected_sensitive,
+            )
+            if prior is not None and isinstance(persisted, dict) and persisted.get("current_state") == "human_decision_required":
+                revalidated["checks"].append({
+                    "validator": "applied_resolution_not_reactivated",
+                    "passed": False,
+                    "evidence": {"resolution_already_recorded": True, "current_state": "human_decision_required"},
+                })
+                revalidated["accepted"] = False
+            if not revalidated["accepted"]:
+                failed = [
+                    item["validator"] for item in revalidated["checks"] if not item["passed"]
+                ]
+                report.update({
+                    "evidence_results": revalidated["checks"],
+                    "evidence_validators_executed": [
+                        item["validator"] for item in revalidated["checks"]
+                    ],
+                })
+                return persist_structured_rejection(
+                    report,
+                    exact_reason=(
+                        "human-resolution evidence changed under controller reservation: "
+                        + ", ".join(failed)
+                    ),
+                )
+            document = persisted or self._project_document(
+                project, None, inspector.identity()["path_fingerprint"]
+            )
+            if document.get("repository_fingerprint") != inspector.identity()["path_fingerprint"]:
+                state_check = {
+                    "validator": "controller_state_repository_fingerprint_matches",
+                    "passed": False,
+                    "evidence": {"matches": False},
+                }
+                report["evidence_results"].append(state_check)
+                report["evidence_validators_executed"].append(state_check["validator"])
+                return persist_structured_rejection(
+                    report,
+                    exact_reason="human-resolution state belongs to another repository fingerprint",
+                )
+            report.update({
+                "outcome": "resolution_accepted",
+                "resolution_would_be_accepted": True,
+                "applied": True,
+                "state_would_be_written": True,
+                "state_written": True,
+                "dry_run": False,
+                "rejection_reasons": [],
+                "evidence_validators_executed": [item["validator"] for item in revalidated["checks"]],
+                "evidence_results": revalidated["checks"],
+                "timestamp": utc_now(),
+                "persisted_state": str(gate["approved_next_state"]),
+            })
+            history = document.setdefault("human_decision_history", [])
+            if not isinstance(history, list):
+                raise RecoveryError("persisted human-decision history is malformed")
+            history.append({
+                "gate": dict(gate),
+                "gate_fingerprint": revalidated.get("gate_fingerprint"),
+                "resolution": report,
+            })
+            document = self._transition_project(
+                project,
+                document,
+                str(gate["approved_next_state"]),
+                run_id=resolution_id,
+                checkpoint="explicit_human_decision_resolved",
+                feature=None,
+                stop_reason="Explicit human decision resolved; queue reconciliation is next.",
+                human_gate=None,
+                state_evidence={
+                    "classification": "explicit_human_decision_resolution",
+                    "gate_id": gate.get("gate_id"),
+                    "gate_fingerprint": revalidated.get("gate_fingerprint"),
+                    "resolution_id": resolution_id,
+                    "resolution_fingerprint": fingerprint,
+                    "report_location": str(accepted_report_path),
+                    "audit_log_location": audit_log_location,
+                },
+                event_human_gate={
+                    "gate_id": gate.get("gate_id"),
+                    "gate_fingerprint": revalidated.get("gate_fingerprint"),
+                    "resolution_id": resolution_id,
+                    "resolution_fingerprint": fingerprint,
+                    "actor_classification": "explicit_user_approval",
+                    "report_location": str(accepted_report_path),
+                },
+                event_branch=inspector.current_branch,
+                event_commit=inspector.head,
+                event_command_category="human_decision_resolution",
+                event_validation_outcome="passed",
+            )
+            atomic_write_json(accepted_report_path, report)
+            return report
+        finally:
+            reservation.release(resolution_id)
 
     def run_project(self, project: Project, mode: str, *, dry_run: bool = False) -> dict[str, Any]:
         if mode == "resume":

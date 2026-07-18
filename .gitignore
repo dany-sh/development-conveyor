@@ -13,6 +13,7 @@ reports/*.md
 reports/**/*.json
 reports/**/*.md
 logs/*.jsonl
+logs/*.lock
 !state/.gitkeep
 !reports/.gitkeep
 !logs/.gitkeep
