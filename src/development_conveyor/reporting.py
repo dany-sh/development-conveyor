@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from .errors import ConveyorError, QueueError
 from .locks import DurableLock, inspect_repository_writer_lock
 from .queue import FeatureQueue, resolve_feature_commit, resolve_queue_path
+from .recovery import assess_durable_integration_success
 from .registry import Project
 from .repository import RepositoryInspector
 from .sessions import classify_codex_failure, parse_integration_terminal_result
@@ -24,6 +26,7 @@ DETERMINISTIC_CONFIGURATION_FAILURES = {
 }
 
 INTEGRATION_RUNTIME_LOCATION = ".factory/runtime/milestone-integration"
+SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 LEGACY_PLANNING_GATE_PIN = {
     "project_id": "case-manager",
     "run_id": "99c2f421-6b5a-4f8a-ae43-a5aefc12657e",
@@ -37,6 +40,56 @@ def _milestone_label(value: str | None) -> str:
     if isinstance(value, str) and value.upper().startswith("P") and value[1:].isdigit():
         return f"Phase {int(value[1:])}"
     return str(value or "milestone")
+
+
+def _confined_report_path(
+    controller_root: Path,
+    configuration: dict[str, Any],
+    run_id: str,
+    filename: str,
+) -> Path | None:
+    """Return one regular, non-symlinked report path confined to the report root."""
+
+    if not SAFE_RUN_ID.fullmatch(run_id) or Path(filename).name != filename:
+        return None
+    report_root = Path(configuration["report_directory"])
+    if not report_root.is_absolute():
+        report_root = controller_root / report_root
+    report_root = report_root.resolve()
+    run_directory = report_root / run_id
+    if run_directory.is_symlink() or not run_directory.is_dir():
+        return None
+    candidate = run_directory / filename
+    if candidate.is_symlink() or not candidate.is_file():
+        return None
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(report_root)
+    except ValueError:
+        return None
+    return resolved
+
+
+def _confined_report_directory(
+    controller_root: Path,
+    configuration: dict[str, Any],
+    run_id: str,
+) -> Path | None:
+    if not SAFE_RUN_ID.fullmatch(run_id):
+        return None
+    report_root = Path(configuration["report_directory"])
+    if not report_root.is_absolute():
+        report_root = controller_root / report_root
+    report_root = report_root.resolve()
+    candidate = report_root / run_id
+    if candidate.is_symlink() or not candidate.is_dir():
+        return None
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(report_root)
+    except ValueError:
+        return None
+    return resolved
 
 
 def _historical_integration_gate(
@@ -67,10 +120,11 @@ def _historical_integration_gate(
         or cycle.get("milestone_pre_integration_commit") != pin["candidate_commit"]
     ):
         return None
-    report_root = Path(configuration["report_directory"])
-    if not report_root.is_absolute():
-        report_root = controller_root / report_root
-    report_path = report_root.resolve() / run_id / "milestone_integration.json"
+    report_path = _confined_report_path(
+        controller_root, configuration, run_id, "milestone_integration.json"
+    )
+    if report_path is None:
+        return None
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -156,14 +210,17 @@ def _historical_integration_gate(
 
 
 def _failed_cycle_reports(controller_root: Path, configuration: dict[str, Any], run_id: str) -> list[dict[str, Any]]:
-    directory = Path(configuration["report_directory"])
-    if not directory.is_absolute():
-        directory = controller_root / directory
-    run_directory = directory.resolve() / run_id
+    run_directory = _confined_report_directory(controller_root, configuration, run_id)
     reports: list[dict[str, Any]] = []
-    if not run_directory.is_dir():
+    if run_directory is None:
         return reports
     for path in sorted(run_directory.glob("*.json")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            path.resolve().relative_to(run_directory)
+        except ValueError:
+            continue
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -317,12 +374,46 @@ def build_project_plan(
         if controller_root is not None
         else None
     )
+    durable_integration: dict[str, Any] | None = None
+    if controller_root is not None and cycle_document and queue is not None:
+        integration_report_path = _confined_report_path(
+            controller_root,
+            configuration,
+            str(cycle_document.get("conveyor_run_id") or ""),
+            "milestone_integration.json",
+        )
+        try:
+            integration_report = (
+                json.loads(integration_report_path.read_text(encoding="utf-8"))
+                if integration_report_path is not None else None
+            )
+        except (OSError, json.JSONDecodeError):
+            integration_report = None
+        durable_integration = assess_durable_integration_success(
+            project,
+            cycle_document,
+            queue,
+            inspector,
+            integration_report,
+            writer_exists=lock.exists,
+        )
     if active_cycle and cycle_document:
         if active_cycle.get("phase") == "completed":
             stale_cycle_evidence = {
                 **active_cycle,
-                "classification": "completed_cycle_evidence",
-                "reason": "The repository-local cycle is complete and is not active work.",
+                "classification": (
+                    "durable_integration_success"
+                    if durable_integration and durable_integration.get("success")
+                    else "completed_cycle_evidence"
+                ),
+                "reason": (
+                    "Independent terminal, runtime, queue, commit, validation, and Git evidence "
+                    "corroborates a completed integration."
+                    if durable_integration and durable_integration.get("success")
+                    else "The repository-local cycle is complete and is not active work."
+                ),
+                "durable_integration": durable_integration,
+                "cycle_fingerprint": cycle_fingerprint,
             }
             active_cycle = None
         if active_cycle is not None:
@@ -440,6 +531,13 @@ def build_project_plan(
     if not project.enabled:
         action = "disabled"
         stop = "Project is disabled."
+    elif (
+        durable_integration
+        and durable_integration.get("checks", {}).get("terminal_integrated") is True
+        and durable_integration.get("success") is not True
+    ):
+        action = "validation_failed"
+        stop = "Required durable integration evidence is incomplete or failed; success cannot be finalized."
     elif project.current_state == "human_decision_required" and isinstance(
         (cycle_document or {}).get("human_decision_required"), dict
     ):
@@ -620,6 +718,10 @@ def build_project_plan(
         "feature_status": feature_status,
         "integration_status": integration_status,
         "accepted_feature_commit": (cycle_document or {}).get("accepted_feature_commit"),
+        "integrated_feature_commit": (durable_integration or {}).get("integrated_commit"),
+        "integration_terminal_classification": (
+            "INTEGRATED" if durable_integration and durable_integration.get("success") else None
+        ),
         "milestone_pre_integration_commit": (cycle_document or {}).get("milestone_pre_integration_commit"),
         "milestone_post_integration_commit": (cycle_document or {}).get("milestone_post_integration_commit"),
         "validated_planning_baseline": (cycle_document or {}).get("validated_planning_baseline"),
@@ -648,6 +750,15 @@ def build_project_plan(
         "resume_allowed_after_lock": resume_allowed_after_lock,
         "session_completion_classification": completion_classification,
         "session_completion_flags": completion_flags,
+        "durable_integration_success": durable_integration,
+        "terminal_commit": (durable_integration or {}).get("terminal_commit"),
+        "terminal_status": (
+            "INTEGRATED" if durable_integration and durable_integration.get("success") else None
+        ),
+        "cycle_phase": (cycle_document or {}).get("current_phase"),
+        "cycle_stop_reason": (cycle_document or {}).get("stop_reason"),
+        "human_decision_required": bool(integration_gate),
+        "optional_warnings": list((durable_integration or {}).get("optional_warnings") or []),
     }
 
 

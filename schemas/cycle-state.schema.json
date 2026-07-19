@@ -51,6 +51,8 @@
     "prior_integration_session_ids": {"type": "array", "items": {"type": "string"}},
     "integration_status": {"type": ["string", "null"], "enum": [null, "pending", "ready", "running", "validation", "blocked", "passed", "failed"]},
     "integration_gate": {"type": ["object", "null"]},
+    "integration_finalization_history": {"type": "array", "items": {"type": "object"}},
+    "optional_warnings": {"type": "array", "items": {"type": "string"}},
     "validated_planning_baseline": {
       "oneOf": [
         {"type": "null"},

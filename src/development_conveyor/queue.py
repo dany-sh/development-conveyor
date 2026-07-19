@@ -383,7 +383,10 @@ class FeatureQueue:
             return "milestone_complete"
         if any(
             item.get("status") == "human_decision_required"
-            or item.get("requires_human_decision") is True
+            or (
+                item.get("requires_human_decision") is True
+                and self.dependencies_complete(item)
+            )
             for item in features
         ):
             return "human_decision_required"

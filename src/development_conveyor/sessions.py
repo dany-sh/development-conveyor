@@ -46,6 +46,13 @@ INTEGRATION_TERMINAL_CLASSIFICATIONS = {
     "TERMINAL_INTEGRATION_FAILURE",
 }
 INTEGRATION_GATE_MARKER = "CONVEYOR_INTEGRATION_GATE="
+POST_INTEGRATION_COMMAND_CATEGORIES = {
+    "required_validation",
+    "required_evidence_finalization",
+    "optional_diagnostic",
+    "status_observation",
+    "unsupported_command",
+}
 RETRYABLE_FAILURE_CLASSIFICATIONS = {
     "build_failure",
     "implementation_validation_failure",
@@ -110,6 +117,8 @@ class SessionResult:
     retry_hypothesis: str | None = None
     remediation_action: str | None = None
     retry_evidence: str | None = None
+    post_integration_commands: tuple[dict[str, Any], ...] = ()
+    optional_warnings: tuple[str, ...] = ()
 
 
 def _content_text(content: Any) -> str:
@@ -333,6 +342,111 @@ def parse_integration_terminal_result(
             return None, "human_decision_descriptor_invalid"
         result["human_decision"] = descriptor
     return result, "valid"
+
+
+def _configured_required_commands(project: Project) -> tuple[tuple[str, ...], ...]:
+    """Load only the adapter's verified command arrays; absent adapters configure none."""
+
+    path = project.repository / project.validation_source
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return ()
+    commands = document.get("commands") if isinstance(document, dict) else None
+    if not isinstance(commands, dict):
+        return ()
+    configured: list[tuple[str, ...]] = []
+    for group in ("build", "test", "lint", "package", "validate"):
+        values = commands.get(group, [])
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if isinstance(value, list) and value and all(isinstance(part, str) and part for part in value):
+                configured.append(tuple(value))
+    return tuple(configured)
+
+
+def classify_post_integration_commands(
+    output: str,
+    *,
+    required_commands: tuple[tuple[str, ...], ...] = (),
+) -> tuple[tuple[dict[str, Any], ...], tuple[str, ...]]:
+    """Classify terminal-session command events without promoting diagnostics to gates."""
+
+    observations: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    required_fragments = tuple(" ".join(command) for command in required_commands)
+    for line in output.splitlines():
+        try:
+            decoded = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(decoded, dict) or decoded.get("type") != "item.completed":
+            continue
+        item = decoded.get("item")
+        if not isinstance(item, dict) or item.get("type") != "command_execution":
+            continue
+        command = str(item.get("command") or "")
+        combined_output = str(item.get("aggregated_output") or "")
+        exit_code = item.get("exit_code")
+        configured_required = any(fragment and fragment in command for fragment in required_fragments)
+        missing_repository_validator = bool(
+            "scripts/validate_feature_inventory.py" in command
+            and (
+                "can't open file" in combined_output
+                or "No such file or directory" in combined_output
+            )
+            and not any("scripts/validate_feature_inventory.py" in fragment for fragment in required_fragments)
+        )
+        if configured_required or "/feature-inventory/scripts/validate_inventory.py" in command:
+            category = "required_validation"
+            effect = "authoritative"
+            diagnostic = None
+        elif any(
+            marker in command
+            for marker in (
+                "integrationctl.py finalize",
+                "integrationctl.py continue",
+                "model_runlog.py",
+            )
+        ):
+            category = "required_evidence_finalization"
+            effect = "authoritative"
+            diagnostic = None
+        elif missing_repository_validator:
+            category = "optional_diagnostic"
+            effect = "warning_only"
+            diagnostic = "unconfigured_repository_validator_missing"
+        elif any(
+            marker in command
+            for marker in (
+                "git status", "git rev-parse", "git log", "git diff --check",
+                "git merge-base", "git worktree list", "check-ignore", "recover-integration.sh --status",
+            )
+        ):
+            category = "status_observation"
+            effect = "observation_only"
+            diagnostic = None
+        else:
+            category = "unsupported_command"
+            effect = "warning_only" if exit_code not in {0, None} else "observation_only"
+            diagnostic = "unclassified_post_integration_command"
+        observation = {
+            "category": category,
+            "command": command,
+            "exit_code": exit_code,
+            "status": item.get("status"),
+            "effect": effect,
+            "configured_required": configured_required,
+            "diagnostic": diagnostic,
+        }
+        observations.append(observation)
+        if exit_code != 0 and effect != "authoritative":
+            rendered_exit = "missing" if exit_code is None else str(exit_code)
+            warning = f"{category}:{diagnostic or 'non_authoritative_failure'}:exit={rendered_exit}"
+            if warning not in warnings:
+                warnings.append(warning)
+    return tuple(observations), tuple(warnings)
 
 
 def classify_session_result(returncode: int, structured: dict[str, Any] | None, validation: str) -> str:
@@ -669,6 +783,13 @@ class SessionLauncher:
                 if classification is not None else
                 ("structured_result_successfully_returned" if result.returncode == 0 else "agent_or_skill_execution_failure")
             )
+        post_integration_commands: tuple[dict[str, Any], ...] = ()
+        optional_warnings: tuple[str, ...] = ()
+        if request.action == "milestone_integration":
+            post_integration_commands, optional_warnings = classify_post_integration_commands(
+                redacted_stdout,
+                required_commands=_configured_required_commands(request.project),
+            )
         return SessionResult(
             action=request.action,
             returncode=result.returncode,
@@ -688,6 +809,8 @@ class SessionLauncher:
             retry_hypothesis=(structured or {}).get("hypothesis") if failure["retryable"] else None,
             remediation_action=(structured or {}).get("remediation_action") if failure["retryable"] else None,
             retry_evidence=(structured or {}).get("supporting_evidence") if failure["retryable"] else None,
+            post_integration_commands=post_integration_commands,
+            optional_warnings=optional_warnings,
         )
 
     @staticmethod

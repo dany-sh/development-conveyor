@@ -21,7 +21,12 @@ from .locks import (
 from .logging import EventLogger, JsonStateStore, atomic_write_bytes, atomic_write_json, run_event, utc_now
 from .human_resolution import evaluate_human_resolution, gate_fingerprint, resolution_fingerprint
 from .queue import FeatureQueue, resolve_queue_path
-from .recovery import StartupReconciliation, assess_recovery, assess_startup_reconciliation
+from .recovery import (
+    StartupReconciliation,
+    assess_durable_integration_success,
+    assess_recovery,
+    assess_startup_reconciliation,
+)
 from .redaction import redact_text
 from .registry import Project
 from .reporting import build_project_plan
@@ -306,6 +311,67 @@ class CycleEngine:
             stale = assessment.evidence.get("stale_cycle_evidence")
             if isinstance(stale, dict) and stale.get("classification") == "deterministic_failed_cycle":
                 evidence["superseded_cycle"] = stale
+            durable = assessment.evidence.get("durable_integration_success")
+            if isinstance(durable, dict) and durable.get("success") is True:
+                cycle_path = inspector.cycle_state_path()
+                cycle = self.cycle_store.read(cycle_path)
+                if cycle is None:
+                    raise RecoveryError("durable integration finalization requires the preserved repository cycle")
+                report_path = self._report_path(
+                    self.configuration.owned_path(self.configuration.conveyor["report_directory"]),
+                    str(cycle.get("conveyor_run_id") or ""),
+                    "milestone_integration.json",
+                )
+                try:
+                    integration_report = json.loads(report_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise RecoveryError("durable integration report changed or disappeared during finalization") from exc
+                revalidated = assess_durable_integration_success(
+                    project,
+                    cycle,
+                    queue,
+                    inspector,
+                    integration_report,
+                    writer_exists=writer.exists,
+                )
+                if revalidated.get("success") is not True:
+                    raise RecoveryError("durable integration evidence changed during finalization")
+                history = list(cycle.get("integration_finalization_history") or [])
+                fingerprint_source = {
+                    "accepted_commit": revalidated.get("accepted_commit"),
+                    "integrated_commit": revalidated.get("integrated_commit"),
+                    "terminal_commit": revalidated.get("terminal_commit"),
+                    "integration_session_id": cycle.get("integration_session_id"),
+                }
+                finalization_fingerprint = hashlib.sha256(
+                    json.dumps(fingerprint_source, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                if not any(item.get("fingerprint") == finalization_fingerprint for item in history):
+                    history.append({
+                        "fingerprint": finalization_fingerprint,
+                        "finalized_at": utc_now(),
+                        "prior_stop_reason": cycle.get("stop_reason"),
+                        "prior_failure_classification": cycle.get("failure_classification"),
+                        "prior_integration_status": cycle.get("integration_status"),
+                        "prior_checkpoint": cycle.get("last_successful_checkpoint"),
+                        "terminal_commit": revalidated.get("terminal_commit"),
+                        "integrated_commit": revalidated.get("integrated_commit"),
+                    })
+                cycle.update({
+                    "milestone_post_integration_commit": revalidated.get("milestone_post_integration_head"),
+                    "integration_status": "passed",
+                    "failure_classification": None,
+                    "retry_exhausted": False,
+                    "next_safe_action": "queue_reconciliation",
+                    "stop_reason": None,
+                    "human_decision_required": None,
+                    "integration_gate": None,
+                    "integration_finalization_history": history,
+                    "optional_warnings": list(revalidated.get("optional_warnings") or []),
+                    "last_verified_git_state": self._git_checkpoint(inspector),
+                    "updated_at": utc_now(),
+                })
+                self.cycle_store.write(cycle_path, cycle)
             for index, target in enumerate(assessment.transition_path[1:], start=1):
                 final = index == len(assessment.transition_path) - 1
                 document = self._transition_project(
@@ -315,7 +381,11 @@ class CycleEngine:
                     run_id=run_id,
                     checkpoint=f"startup_state_reconciliation:{assessment.classification}:{target}",
                     feature=assessment.evidence.get("selected_feature") if target == "feature_ready" else None,
-                    stop_reason=assessment.reason if final else None,
+                    stop_reason=(
+                        None
+                        if final and isinstance(durable, dict) and durable.get("success") is True
+                        else (assessment.reason if final else None)
+                    ),
                     human_gate=assessment.human_decision if final and target == "human_decision_required" else None,
                     state_evidence=evidence,
                 )
@@ -838,6 +908,8 @@ class CycleEngine:
             "retryable": result.retryable,
             "primary_terminal_error": result.primary_terminal_error,
             "secondary_diagnostics": list(result.secondary_diagnostics),
+            "post_integration_commands": list(result.post_integration_commands),
+            "optional_warnings": list(result.optional_warnings),
             "effective_model": result.plan.effective_model,
             "effective_reasoning": result.plan.effective_reasoning,
             "codex_executable": result.plan.codex_executable,
@@ -854,7 +926,15 @@ class CycleEngine:
             raise SessionError(f"unsafe Conveyor run ID for report persistence: {run_id!r}")
         if Path(filename).name != filename:
             raise SessionError(f"unsafe report filename: {filename!r}")
-        path = (report_root / run_id / filename).resolve(strict=False)
+        run_directory = report_root / run_id
+        if run_directory.is_symlink():
+            raise SessionError("report run directory must not be a symbolic link")
+        candidate = run_directory / filename
+        if candidate.is_symlink():
+            raise SessionError("report path must not be a symbolic link")
+        if candidate.exists() and not candidate.is_file():
+            raise SessionError("report path must be a regular file")
+        path = candidate.resolve(strict=False)
         try:
             path.relative_to(report_root)
         except ValueError as exc:
@@ -3555,6 +3635,28 @@ class CycleEngine:
                 }
             if assessment.classification in {"human_decision_required", "invalid_state_evidence"}:
                 return {"project_id": project.project_id, "outcome": "human_decision_required", "plan": plan}
+            if assessment.classification == "required_integration_validation_failed":
+                document = persisted
+                if assessment.would_persist:
+                    if document is None:
+                        document = self._project_document(
+                            effective, None, plan["repository_path_fingerprint"]
+                        )
+                    document = self._persist_startup_reconciliation(
+                        effective,
+                        document,
+                        assessment,
+                        run_id=f"recovery-{uuid.uuid4()}",
+                    )
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "validation_failed",
+                    "current_state": (document or {}).get("current_state", "validation_failed"),
+                    "required_command_failures": (
+                        assessment.evidence.get("durable_integration_success") or {}
+                    ).get("required_command_failures", []),
+                    "plan": plan,
+                }
             if assessment.would_persist:
                 if persisted is None:
                     persisted = self._project_document(
