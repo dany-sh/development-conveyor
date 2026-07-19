@@ -260,6 +260,23 @@ def assess_durable_integration_success(
         and later_planning_only
         and milestone_head == inspector.head
     )
+    integration_terminal_clean = bool(
+        isinstance(runtime_validation, dict)
+        and runtime_validation.get("clean_worktree") is True
+    )
+    integration_terminal_lease_released = bool((runtime or {}).get("lease_released") is True)
+    # Once terminal integration evidence is durably finalized, later repository
+    # state belongs to later phases. Live planning dirtiness, a planning lease,
+    # or a planning Git operation cannot rewrite the integration observation.
+    phase_scoped_clean = integration_terminal_clean if historical_finalized else inspector.is_clean
+    phase_scoped_no_git_operation = (
+        integration_terminal_clean if historical_finalized else not any(git_operations.values())
+    )
+    phase_scoped_no_writer_lease = (
+        integration_terminal_lease_released
+        if historical_finalized
+        else not writer_exists and integration_terminal_lease_released
+    )
     checks = {
         "report_identity_matches": isinstance(session_report, dict)
         and type(session_report.get("schema_version")) is int
@@ -319,9 +336,12 @@ def assess_durable_integration_success(
             and runtime_validation_commit in {validated_tree, final_head}
         ),
         "milestone_head_matches_final_validation": current_head_is_allowed,
-        "clean_repository": inspector.is_clean,
-        "no_git_operation": not any(git_operations.values()),
-        "no_writer_lease": not writer_exists and (runtime or {}).get("lease_released") is True,
+        "clean_repository": phase_scoped_clean,
+        "integration_terminal_repository_clean": integration_terminal_clean,
+        "no_git_operation": phase_scoped_no_git_operation,
+        "integration_terminal_no_unfinished_git_operation": phase_scoped_no_git_operation,
+        "no_writer_lease": phase_scoped_no_writer_lease,
+        "integration_terminal_lease_released": integration_terminal_lease_released,
         "runtime_has_no_blockers": not ((runtime_validation or {}).get("blockers") or []),
     }
     warning_list = list(optional_warnings)
@@ -347,6 +367,9 @@ def assess_durable_integration_success(
         "application_metadata_mutated": False,
         "runtime_record_path": str(runtime_path),
         "historical_finalization": historical_finalized,
+        "current_repository_clean": inspector.is_clean,
+        "current_repository_git_operations": git_operations,
+        "current_repository_writer_lease": writer_exists,
         "later_planning_commits": later_commits,
         "validated_tree_commit": validated_tree,
         "integration_fix_commits": integration_fix_commits,
@@ -454,6 +477,29 @@ def assess_startup_reconciliation(
                 "safe_continuation_command": f"scripts/conveyor resume --project {project.project_id}",
                 "old_session_will_resume": False,
             },
+        )
+
+    planning = plan.get("current_planning_transaction")
+    if (
+        isinstance(planning, dict)
+        and planning.get("status") in {
+            "planning_changes_pending_validation",
+            "planning_changes_validated",
+            "planning_changes_committing",
+        }
+        and repository.get("branch") == project.milestone_branch
+        and repository.get("head") == repository.get("milestone_branch_head")
+        and not any((repository.get("git_operations") or {}).values())
+    ):
+        evidence["current_planning_transaction"] = planning
+        return StartupReconciliation(
+            "planning_transaction_pending",
+            persisted_state,
+            persisted_state,
+            (persisted_state,),
+            False,
+            "authorized planning changes are pending phase-scoped finalization",
+            evidence,
         )
 
     writer = locks.get("repository_writer") or {}

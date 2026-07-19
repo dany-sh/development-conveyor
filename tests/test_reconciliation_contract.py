@@ -68,7 +68,9 @@ class ContractLauncher:
             "synthetic-session",
             "synthetic",
             plan,
-            redacted_stdout="synthetic",
+            redacted_stdout=assistant_event(
+                "CONVEYOR_RESULT=" + json.dumps(value, separators=(",", ":"))
+            ),
             structured_result=value,
             structured_output_validation="valid",
             result_classification=self.classification,
@@ -265,6 +267,7 @@ class ReconciliationContractTests(unittest.TestCase):
             with self.assertRaises(SessionError):
                 engine.run_project(project, "one_feature")
             self.assertEqual(list((engine.root / "state/launch-locks").glob("*.json")), [])
+            self.assertFalse((repository / ".factory/locks/writer.json").exists())
             self.assertFalse((repository / ".factory/conveyor-state.json").exists())
             reports = list((engine.root / "reports").glob("*/*.json"))
             self.assertTrue(reports)

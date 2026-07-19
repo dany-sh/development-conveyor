@@ -781,6 +781,18 @@ class PostIntegrationFinalizationTests(unittest.TestCase):
                 self.assertFalse(result["checks"]["report_identity_matches"])
                 self.assertFalse(result["success"])
 
+    def test_36_authorized_later_planning_dirtiness_does_not_rewrite_terminal_integration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self.fixture(temporary)
+            fixture.engine.run_project(fixture.project, "resume")
+            status = fixture.repository / "docs/CURRENT_STATUS.md"
+            status.write_text(status.read_text(encoding="utf-8") + "\nF002 planning pending.\n", encoding="utf-8")
+            result = fixture.assessment()
+            self.assertTrue(result["success"])
+            self.assertTrue(result["checks"]["clean_repository"])
+            self.assertTrue(result["historical_finalization"])
+            self.assertFalse(result["current_repository_clean"])
+
 
 if __name__ == "__main__":
     unittest.main()

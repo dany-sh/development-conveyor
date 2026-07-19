@@ -96,6 +96,23 @@ def _parser() -> argparse.ArgumentParser:
     )
     recover_branch.add_argument("--project", required=True)
     recover_branch.add_argument("--dry-run", action="store_true")
+    recover_planning = subparsers.add_parser(
+        "recover-planning",
+        help="validate and optionally finalize one exact recorded planning-only transaction",
+    )
+    recover_planning.add_argument("--project", required=True)
+    recover_planning.add_argument("--run-id", required=True)
+    recover_planning.add_argument("--session-id", required=True)
+    recover_planning.add_argument("--starting-head", required=True)
+    recover_planning.add_argument("--diff-fingerprint", required=True)
+    recover_planning.add_argument(
+        "--expected-path",
+        action="append",
+        required=True,
+        help="exact changed path; repeat once per authorized planning file",
+    )
+    recover_planning.add_argument("--apply", action="store_true")
+    recover_planning.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -214,6 +231,19 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
 
     if args.command == "recover-feature-branch":
         return engine.recover_feature_branch(registry.get(args.project), dry_run=args.dry_run)
+
+    if args.command == "recover-planning":
+        if args.apply and args.dry_run:
+            raise ConveyorError("--apply and --dry-run are mutually exclusive")
+        return engine.recover_planning_transaction(
+            registry.get(args.project),
+            run_id=args.run_id,
+            expected_starting_head=args.starting_head,
+            expected_diff_fingerprint=args.diff_fingerprint,
+            expected_changed_paths=args.expected_path,
+            expected_session_id=args.session_id,
+            dry_run=not args.apply,
+        )
 
     if args.command == "run":
         mode = args.mode or configuration.conveyor["default_mode"]

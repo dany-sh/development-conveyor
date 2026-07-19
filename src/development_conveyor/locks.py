@@ -194,6 +194,109 @@ class RepositoryWriterLease:
         self.path.unlink()
 
 
+class PlanningWriterLease:
+    """Planning-only repository writer ownership bound to one exact transaction."""
+
+    def __init__(self, path: Path, repository: Path):
+        self.path = path
+        self.repository = repository.expanduser().resolve()
+
+    def acquire(
+        self,
+        *,
+        repository_identity: str,
+        project_id: str,
+        milestone: str,
+        run_id: str,
+        session_id: str | None,
+        branch: str,
+        head: str,
+        worktree_fingerprint: str,
+        allowed_paths: list[str],
+    ) -> dict[str, Any]:
+        if read_lock(self.path) is not None:
+            raise LockError("repository writer lease already exists")
+        stamp = utc_now()
+        record = {
+            "repository": str(self.repository),
+            "repository_identity": repository_identity,
+            "project_id": project_id,
+            "milestone": milestone,
+            "queue_reconciliation_run_id": run_id,
+            "session_id": session_id,
+            "branch": branch,
+            "starting_head": head,
+            "starting_worktree_fingerprint": worktree_fingerprint,
+            "approved_planning_paths": allowed_paths,
+            "phase": "queue_reconciliation",
+            "purpose": "development-conveyor-planning",
+            "agent_run": run_id,
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "start_time": stamp,
+            "last_heartbeat": stamp,
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = (json.dumps(record, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        try:
+            descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as exc:
+            raise LockError("repository writer lease appeared concurrently") from exc
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return record
+
+    def bind_session(self, *, run_id: str, session_id: str) -> dict[str, Any]:
+        record = self.revalidate(run_id=run_id)
+        recorded = record.get("session_id")
+        if recorded not in {None, session_id}:
+            raise LockError("planning lease session identity mismatch")
+        record["session_id"] = session_id
+        record["last_heartbeat"] = utc_now()
+        atomic_write_json(self.path, record)
+        return record
+
+    def revalidate(
+        self,
+        *,
+        run_id: str,
+        session_id: str | None = None,
+        repository_identity: str | None = None,
+        branch: str | None = None,
+        head: str | None = None,
+    ) -> dict[str, Any]:
+        record = read_lock(self.path)
+        if record is None:
+            raise LockError("planning writer lease is absent")
+        checks = {
+            "purpose": record.get("purpose") == "development-conveyor-planning",
+            "phase": record.get("phase") == "queue_reconciliation",
+            "run": record.get("queue_reconciliation_run_id") == run_id,
+            "repository": Path(str(record.get("repository"))).expanduser().resolve() == self.repository,
+            "session": session_id is None or record.get("session_id") == session_id,
+            "identity": repository_identity is None or record.get("repository_identity") == repository_identity,
+            "branch": branch is None or record.get("branch") == branch,
+            "head": head is None or record.get("starting_head") == head,
+        }
+        if not all(checks.values()):
+            failed = ", ".join(key for key, passed in checks.items() if not passed)
+            raise LockError(f"planning writer lease identity mismatch: {failed}")
+        return record
+
+    def release(self, *, run_id: str) -> None:
+        record = read_lock(self.path)
+        if record is None:
+            return
+        if (
+            record.get("purpose") != "development-conveyor-planning"
+            or record.get("queue_reconciliation_run_id") != run_id
+        ):
+            raise LockError("refusing to release another writer lease")
+        self.path.unlink()
+
+
 def make_lock_record(
     *, project_id: str, repository_identity: str, run_id: str, current_feature: str | None, current_phase: str
 ) -> dict[str, Any]:

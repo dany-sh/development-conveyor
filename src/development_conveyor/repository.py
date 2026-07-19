@@ -112,6 +112,94 @@ class RepositoryInspector:
             hashes[relative] = hashlib.sha256(candidate.read_bytes()).hexdigest()
         return dict(sorted(hashes.items()))
 
+    def planning_diff(self) -> bytes:
+        """Return the exact tracked worktree delta from HEAD for planning evidence."""
+
+        argv = ["git", "diff", "--binary", "--no-ext-diff", "HEAD", "--"]
+        SafetyPolicy.validate_controller_command(
+            argv, cwd=self.root, registered_repository=self.root
+        )
+        result = subprocess.run(
+            argv,
+            cwd=self.root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RepositoryError(
+                result.stderr.decode("utf-8", errors="replace").strip()
+                or "cannot capture planning diff"
+            )
+        return result.stdout
+
+    def planning_diff_fingerprint(self) -> str:
+        return hashlib.sha256(self.planning_diff()).hexdigest()
+
+    def tracked_changed_paths(self) -> list[str]:
+        output = self.git(["diff", "--name-only", "HEAD", "--"]).stdout
+        return sorted(line for line in output.splitlines() if line)
+
+    def staged_changed_paths(self) -> list[str]:
+        output = self.git(["diff", "--cached", "--name-only", "--"]).stdout
+        return sorted(line for line in output.splitlines() if line)
+
+    def untracked_file_hashes(self) -> dict[str, str]:
+        output = self.git(
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+        ).stdout
+        hashes: dict[str, str] = {}
+        entries = [item for item in output.split("\0") if item]
+        for entry in entries:
+            if not entry.startswith("?? "):
+                continue
+            relative = entry[3:]
+            if relative in {
+                ".factory/locks/writer.json",
+                ".factory/conveyor-state.json",
+            } or relative.startswith(".factory/runtime/"):
+                continue
+            candidate = (self.root / relative).resolve()
+            try:
+                candidate.relative_to(self.root)
+            except ValueError as exc:
+                raise RepositoryError("untracked path escapes the registered repository") from exc
+            if not candidate.is_file():
+                raise RepositoryError(f"untracked planning path is not a regular file: {relative}")
+            hashes[relative] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        return dict(sorted(hashes.items()))
+
+    def stage_planning_paths(self, paths: list[str], *, commit_subject: str) -> None:
+        argv = ["git", "add", "--", *paths]
+        SafetyPolicy.validate_planning_git_mutation(
+            argv,
+            cwd=self.root,
+            registered_repository=self.root,
+            changed_paths=paths,
+            commit_subject=commit_subject,
+        )
+        result = subprocess.run(
+            argv, cwd=self.root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+        )
+        if result.returncode != 0:
+            raise RepositoryError(result.stderr.strip() or "planning-path staging failed")
+
+    def commit_planning_paths(self, paths: list[str], *, commit_subject: str) -> str:
+        argv = ["git", "commit", "-m", commit_subject, "--", *paths]
+        SafetyPolicy.validate_planning_git_mutation(
+            argv,
+            cwd=self.root,
+            registered_repository=self.root,
+            changed_paths=paths,
+            commit_subject=commit_subject,
+        )
+        result = subprocess.run(
+            argv, cwd=self.root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+        )
+        if result.returncode != 0:
+            raise RepositoryError(result.stderr.strip() or result.stdout.strip() or "planning commit failed")
+        return self.head
+
     @property
     def is_clean(self) -> bool:
         return not self.dirty_entries

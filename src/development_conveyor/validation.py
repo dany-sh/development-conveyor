@@ -172,3 +172,34 @@ class SafetyPolicy:
         )
         if argv != expected:
             raise SafetyViolation("only the exact non-forced feature-branch switch is allowed")
+
+    @classmethod
+    def validate_planning_git_mutation(
+        cls,
+        argv: list[str],
+        *,
+        cwd: Path,
+        registered_repository: Path,
+        changed_paths: list[str],
+        commit_subject: str,
+    ) -> None:
+        """Allow only exact-path staging and one non-amending planning commit."""
+
+        if cwd.expanduser().resolve() != registered_repository.expanduser().resolve():
+            raise SafetyViolation("planning Git mutation is outside the registered repository")
+        if not changed_paths or changed_paths != sorted(set(changed_paths)):
+            raise SafetyViolation("planning paths must be a non-empty sorted unique list")
+        for relative in changed_paths:
+            path = Path(relative)
+            if path.is_absolute() or ".." in path.parts or path.as_posix() != relative:
+                raise SafetyViolation(f"unsafe planning path: {relative}")
+        allowed = ["git", "add", "--", *changed_paths]
+        commit = ["git", "commit", "-m", commit_subject, "--", *changed_paths]
+        if tuple(argv) not in {tuple(allowed), tuple(commit)}:
+            raise SafetyViolation("only exact planning-path staging and commit are allowed")
+        if argv[:2] == ["git", "commit"] and (
+            not commit_subject.startswith("factory: reconcile ")
+            or "--amend" in argv
+            or "--no-verify" in argv
+        ):
+            raise SafetyViolation("planning commit subject or options are not authorized")

@@ -145,8 +145,6 @@ class SyntheticLauncher:
             queue = json.loads(queue_path.read_text(encoding="utf-8"))
             queue["features"][0]["status"] = "ready"
             write_json(queue_path, queue)
-            git(request.project.repository, "add", request.project.queue_location)
-            git(request.project.repository, "commit", "-m", "factory: reconcile M0 queue")
             structured = {
                 "schema_version": 1,
                 "classification": "reconciled_ready_work",
@@ -173,13 +171,20 @@ class SyntheticLauncher:
             argv=("codex", "exec"), cwd=request.project.repository, prompt="synthetic", prompt_sha256="0" * 64,
             sandbox="workspace-write",
         )
+        redacted_stdout = "synthetic"
+        if structured is not None:
+            marker = "CONVEYOR_RESULT=" + json.dumps(structured, separators=(",", ":"))
+            redacted_stdout = json.dumps({
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": marker},
+            })
         return SessionResult(
             request.action,
             0,
             f"session-{len(self.actions)}",
             "synthetic",
             plan,
-            redacted_stdout="synthetic",
+            redacted_stdout=redacted_stdout,
             structured_result=structured,
             structured_output_validation=structured_validation,
             result_classification=classification,

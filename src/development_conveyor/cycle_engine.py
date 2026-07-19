@@ -14,9 +14,21 @@ from .config import Configuration
 from .errors import ConveyorError, LockError, QueueError, RecoveryError, SessionError
 from .locks import (
     DurableLock,
+    PlanningWriterLease,
     RepositoryWriterLease,
     inspect_repository_writer_lock,
     make_lock_record,
+)
+from .planning import (
+    capture_planning_start,
+    finalize_planning_commit,
+    load_planning_transaction,
+    persist_planning_transaction,
+    planning_commit_subject,
+    planning_report_path,
+    stable_fingerprint,
+    validate_planning_changes,
+    validate_planning_noop,
 )
 from .logging import EventLogger, JsonStateStore, atomic_write_bytes, atomic_write_json, run_event, utc_now
 from .human_resolution import evaluate_human_resolution, gate_fingerprint, resolution_fingerprint
@@ -178,6 +190,113 @@ class CycleEngine:
         effective = self.effective_project(project)
         persisted = self.load_project_state(project)
         plan = build_project_plan(effective, self.configuration.conveyor, self.root)
+        planning_transaction = None
+        persisted_evidence = (
+            persisted.get("state_evidence") if isinstance(persisted, dict) else None
+        )
+        if isinstance(persisted_evidence, dict) and isinstance(
+            persisted_evidence.get("planning_transaction"), dict
+        ):
+            planning_transaction = persisted_evidence["planning_transaction"]
+        persisted_run_id = str((persisted or {}).get("run_id") or "")
+        if planning_transaction is None and SAFE_RUN_ID.fullmatch(persisted_run_id):
+            report_root = self.configuration.owned_path(
+                self.configuration.conveyor["report_directory"]
+            )
+            transaction = load_planning_transaction(
+                planning_report_path(report_root, persisted_run_id)
+            )
+            if transaction is not None:
+                planning_transaction = transaction
+            else:
+                reconciliation_report = self._report_path(
+                    report_root, persisted_run_id, "queue_reconciliation.json"
+                )
+                inspector = RepositoryInspector(project.repository)
+                if reconciliation_report.is_file() and not inspector.is_clean:
+                    try:
+                        report = json.loads(reconciliation_report.read_text(encoding="utf-8"))
+                        planning_transaction = validate_planning_changes(
+                            effective,
+                            inspector,
+                            report,
+                            run_id=persisted_run_id,
+                            starting_head=inspector.head,
+                        )
+                        planning_transaction["status"] = "planning_changes_pending_validation"
+                        planning_transaction["planning_commit_status"] = "pending_finalization"
+                        planning_transaction["recovery_exact_expectation_recorded"] = False
+                    except (OSError, json.JSONDecodeError, ConveyorError) as exc:
+                        planning_transaction = {
+                            "status": "planning_recovery_gate",
+                            "run_id": persisted_run_id,
+                            "planning_validation_status": "failed",
+                            "error": str(exc),
+                            "changed_paths": inspector.tracked_changed_paths(),
+                            "diff_fingerprint": inspector.planning_diff_fingerprint(),
+                        }
+        durable = plan.get("durable_integration_success") or {}
+        plan.update({
+            "historical_integration": {
+                "integration_terminal_classification": (
+                    "INTEGRATED" if durable.get("success") else None
+                ),
+                "historical_integration_success": durable.get("success") is True,
+                "historical_integration_terminal_head": durable.get("terminal_commit"),
+            },
+            "current_planning_transaction": planning_transaction,
+            "current_repository_state": {
+                "branch": (plan.get("repository_state") or {}).get("branch"),
+                "head": (plan.get("repository_state") or {}).get("head"),
+                "clean": (plan.get("repository_state") or {}).get("clean"),
+                "git_operations": (plan.get("repository_state") or {}).get("git_operations"),
+                "writer_lease": (plan.get("lock_status") or {}).get("repository_writer"),
+            },
+            "next_feature_selection": {
+                "selected_feature": plan.get("selected_feature"),
+                "selected_feature_starting_commit": (
+                    (planning_transaction or {}).get("selected_feature_starting_commit")
+                    or (
+                        (plan.get("repository_state") or {}).get("milestone_branch_head")
+                        if plan.get("selected_feature")
+                        else None
+                    )
+                ),
+            },
+            "planning_transaction_status": (planning_transaction or {}).get("status"),
+            "planning_transaction_run_id": (planning_transaction or {}).get("run_id"),
+            "planning_transaction_session_id": (planning_transaction or {}).get("session_id"),
+            "planning_start_commit": (planning_transaction or {}).get("planning_start_commit"),
+            "planning_result_commit": (planning_transaction or {}).get("planning_result_commit"),
+            "planning_changed_paths": (planning_transaction or {}).get("changed_paths", []),
+            "planning_diff_fingerprint": (planning_transaction or {}).get("diff_fingerprint"),
+            "planning_validation_status": (
+                "passed"
+                if (planning_transaction or {}).get("status")
+                in {"planning_changes_pending_validation", "planning_changes_validated", "planning_changes_committed"}
+                else (planning_transaction or {}).get("planning_validation_status")
+            ),
+            "planning_commit_status": (planning_transaction or {}).get("planning_commit_status"),
+            "repository_clean": (plan.get("repository_state") or {}).get("clean"),
+        })
+        if (
+            plan.get("selected_feature")
+            and isinstance(planning_transaction, dict)
+            and planning_transaction.get("planning_result_commit")
+        ):
+            plan["feature_starting_commit"] = planning_transaction["planning_result_commit"]
+        if (
+            isinstance(planning_transaction, dict)
+            and planning_transaction.get("status") == "planning_changes_pending_validation"
+        ):
+            plan["proposed_next_action"] = "planning_finalization"
+            plan["next_action"] = "planning_finalization"
+            plan["expected_stop_condition"] = (
+                "Finalize the exact validated planning transaction before production scheduling."
+            )
+            plan["sessions_that_would_launch"] = []
+            plan["feature_factory_would_launch"] = False
+            plan["milestone_integrator_would_launch"] = False
         proposed = plan.get("proposed_next_action")
         compatibility_action = {
             "queue_reconciliation": "queue_reconciliation",
@@ -728,7 +847,19 @@ class CycleEngine:
                 and Path(str(record.get("worktree"))).expanduser().resolve()
                 == request.project.repository.resolve()
             )
-            if not matching_feature_lease:
+            matching_planning_lease = (
+                request.action == "queue_reconciliation"
+                and recorded_run == request.run_id
+                and record.get("purpose") == "development-conveyor-planning"
+                and record.get("phase") == "queue_reconciliation"
+                and record.get("project_id") == request.project.project_id
+                and record.get("repository_identity") == inspector.identity()["repository_id"]
+                and record.get("branch") == inspector.current_branch
+                and record.get("starting_head") == inspector.head
+                and Path(str(record.get("repository"))).expanduser().resolve()
+                == request.project.repository.resolve()
+            )
+            if not matching_feature_lease and not matching_planning_lease:
                 raise LockError("repository writer lease exists; refusing duplicate production session")
         identity = inspector.identity()
         reservation = None if reservation_held else self._launch_lock(request.project, inspector)
@@ -1763,6 +1894,11 @@ class CycleEngine:
         self, project: Project, mode: str, run_id: str, project_state: dict[str, Any]
     ) -> dict[str, Any]:
         inspector = RepositoryInspector(project.repository)
+        inspector.ensure_runtime_ignored()
+        planning_start = capture_planning_start(project, inspector, run_id)
+        report_root = self.configuration.owned_path(self.configuration.conveyor["report_directory"])
+        transaction_path = planning_report_path(report_root, run_id)
+        persist_planning_transaction(transaction_path, planning_start)
         reservation = self._launch_lock(project, inspector)
         reservation.acquire(make_lock_record(
             project_id=project.project_id,
@@ -1771,10 +1907,37 @@ class CycleEngine:
             current_feature=None,
             current_phase="queue_reconciliation",
         ))
+        lease = PlanningWriterLease(
+            inspector.writer_lock_path(
+                self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+            ),
+            project.repository,
+        )
         try:
-            return self._execute_queue_reconciliation_locked(
-                project, mode, run_id, project_state, inspector
+            lease.acquire(
+                repository_identity=planning_start["repository_identity"],
+                project_id=project.project_id,
+                milestone=project.active_milestone or "",
+                run_id=run_id,
+                session_id=None,
+                branch=str(planning_start["branch"] or ""),
+                head=planning_start["planning_start_commit"],
+                worktree_fingerprint=planning_start["starting_worktree_fingerprint"],
+                allowed_paths=list(planning_start["allowed_paths"]),
             )
+            try:
+                return self._execute_queue_reconciliation_locked(
+                    project,
+                    mode,
+                    run_id,
+                    project_state,
+                    inspector,
+                    planning_start=planning_start,
+                    transaction_path=transaction_path,
+                    lease=lease,
+                )
+            finally:
+                lease.release(run_id=run_id)
         finally:
             reservation.release(run_id)
 
@@ -1785,12 +1948,28 @@ class CycleEngine:
         run_id: str,
         project_state: dict[str, Any],
         inspector: RepositoryInspector,
+        *,
+        planning_start: dict[str, Any],
+        transaction_path: Path,
+        lease: PlanningWriterLease,
     ) -> dict[str, Any]:
-        if not inspector.is_clean:
-            raise ConveyorError("queue reconciliation cannot mutate a dirty repository")
         result, repairs, retry_status = self._launch_with_retries(SessionRequest(
             action="queue_reconciliation", project=project, run_id=run_id, mode=mode
         ), inspector, "queue_reconciliation", "queue_reconciliation_repairs", reservation_held=True)
+        if result.session_id:
+            lease.bind_session(run_id=run_id, session_id=result.session_id)
+        transaction = {
+            **planning_start,
+            "status": "planning_changes_pending_validation",
+            "session_ids": [result.session_id] if result.session_id else [],
+            "session_id": result.session_id,
+            "reconciliation_report": result.report_path,
+            "result_classification": result.result_classification,
+            "changed_paths": inspector.tracked_changed_paths(),
+            "diff_fingerprint": inspector.planning_diff_fingerprint(),
+            "updated_at": utc_now(),
+        }
+        persist_planning_transaction(transaction_path, transaction)
         classification = result.result_classification
         if result.failure_classification in {
             "cli_upgrade_required", "configuration_incompatible", "cli_missing",
@@ -1824,6 +2003,12 @@ class CycleEngine:
                 human_gate=gate,
                 state_evidence={"compatibility_preflight": compatibility},
             )
+            persist_planning_transaction(transaction_path, {
+                **transaction,
+                "status": "terminal_planning_failure",
+                "failure_classification": result.failure_classification,
+                "updated_at": utc_now(),
+            })
             return {
                 "outcome": "human_decision_required",
                 "next_state": "human_decision_required",
@@ -1836,6 +2021,13 @@ class CycleEngine:
                 project, project_state, "validation_failed", run_id=run_id,
                 checkpoint="queue_reconciliation_failed", stop_reason=message,
             )
+            persist_planning_transaction(transaction_path, {
+                **transaction,
+                "status": "terminal_planning_failure",
+                "failure_classification": classification,
+                "error": message,
+                "updated_at": utc_now(),
+            })
             raise SessionError(message)
 
         if classification == "invalid_queue":
@@ -1844,6 +2036,13 @@ class CycleEngine:
                 project, project_state, "validation_failed", run_id=run_id,
                 checkpoint="invalid_queue", stop_reason=message,
             )
+            persist_planning_transaction(transaction_path, {
+                **transaction,
+                "status": "planning_validation_failed",
+                "failure_classification": "invalid_queue",
+                "error": message,
+                "updated_at": utc_now(),
+            })
             return {"outcome": "invalid_queue", "next_state": "validation_failed", "report": result.report_path}
 
         if classification == "human_decision_required":
@@ -1853,7 +2052,73 @@ class CycleEngine:
                 checkpoint="queue_reconciliation_human_gate", stop_reason="queue reconciliation requires a human decision",
                 human_gate=human,
             )
+            persist_planning_transaction(transaction_path, {
+                **transaction,
+                "status": "human_decision_required",
+                "human_decision": human,
+                "updated_at": utc_now(),
+            })
             return {"outcome": classification, "next_state": "human_decision_required", "human_decision": human}
+
+        try:
+            report = json.loads(Path(str(result.report_path)).read_text(encoding="utf-8"))
+            if inspector.tracked_changed_paths():
+                validation = validate_planning_changes(
+                    project,
+                    inspector,
+                    report,
+                    run_id=run_id,
+                    starting_head=planning_start["planning_start_commit"],
+                    expected_session_id=result.session_id,
+                )
+            else:
+                validation = validate_planning_noop(
+                    project,
+                    inspector,
+                    report,
+                    run_id=run_id,
+                    starting_head=planning_start["planning_start_commit"],
+                    expected_session_id=result.session_id,
+                )
+            lease.revalidate(
+                run_id=run_id,
+                session_id=result.session_id,
+                repository_identity=planning_start["repository_identity"],
+                branch=str(planning_start["branch"] or ""),
+                head=planning_start["planning_start_commit"],
+            )
+            committed = (
+                finalize_planning_commit(project, inspector, validation)
+                if validation.get("changed_paths")
+                else validation
+            )
+            persist_planning_transaction(transaction_path, committed)
+        except (OSError, json.JSONDecodeError, ConveyorError) as exc:
+            failure = {
+                **transaction,
+                "status": "planning_validation_failed",
+                "failure_classification": "PLANNING_VALIDATION_FAILED",
+                "error": str(exc),
+                "changed_paths": inspector.tracked_changed_paths(),
+                "updated_at": utc_now(),
+            }
+            persist_planning_transaction(transaction_path, failure)
+            self._transition_project(
+                project,
+                project_state,
+                "validation_failed",
+                run_id=run_id,
+                checkpoint="planning_validation_failed",
+                stop_reason=str(exc),
+                state_evidence={"planning_transaction": failure},
+            )
+            return {
+                "outcome": "planning_validation_failed",
+                "next_state": "validation_failed",
+                "failed_validator": str(exc),
+                "changed_paths": failure["changed_paths"],
+                "report": result.report_path,
+            }
 
         queue = FeatureQueue.from_location(project.repository, project.queue_location)
         summary = queue.summary(project.active_milestone or "")
@@ -1896,6 +2161,11 @@ class CycleEngine:
         self._transition_project(
             project, project_state, target, run_id=run_id, checkpoint=classification,
             stop_reason=stop_reasons.get(classification),
+            feature=committed.get("selected_feature"),
+            state_evidence={"planning_transaction": committed},
+            event_commit=committed.get("planning_result_commit"),
+            event_command_category="planning_commit",
+            event_validation_outcome="passed",
         )
         return {
             "outcome": classification,
@@ -1903,6 +2173,8 @@ class CycleEngine:
             "queue_status": summary,
             "report": result.report_path,
             "repair_attempts": repairs,
+            "planning_transaction": committed,
+            "planning_result_commit": committed.get("planning_result_commit"),
         }
 
     def _execute_milestone_gate(
@@ -2463,6 +2735,288 @@ class CycleEngine:
         if continue_mode:
             return self.run_project(project, str(continue_mode))
         return outcome
+
+    def recover_planning_transaction(
+        self,
+        project: Project,
+        *,
+        run_id: str,
+        expected_starting_head: str,
+        expected_diff_fingerprint: str,
+        expected_changed_paths: list[str],
+        expected_session_id: str,
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        """Validate and optionally commit one exact previously recorded planning transaction."""
+
+        effective = self.effective_project(project)
+        inspector = RepositoryInspector(project.repository)
+        report_root = self.configuration.owned_path(self.configuration.conveyor["report_directory"])
+        transaction_path = planning_report_path(report_root, run_id)
+        existing = load_planning_transaction(transaction_path)
+        expected_paths = sorted(set(expected_changed_paths))
+        if len(expected_paths) != len(expected_changed_paths):
+            raise RecoveryError("expected planning paths must be unique")
+        if existing and existing.get("planning_commit_status") == "committed":
+            commit = existing.get("planning_result_commit")
+            checks = {
+                "run_id": existing.get("run_id") == run_id,
+                "session_id": existing.get("session_id") == expected_session_id,
+                "planning_start_commit": existing.get("planning_start_commit") == expected_starting_head,
+                "diff_fingerprint": existing.get("diff_fingerprint") == expected_diff_fingerprint,
+                "changed_paths": existing.get("changed_paths") == expected_paths,
+                "commit_exists": isinstance(commit, str) and inspector.ref_exists(commit),
+                "commit_is_head": commit == inspector.head,
+                "commit_parent": isinstance(commit, str)
+                and inspector.rev_parse(f"{commit}^", check=False) == expected_starting_head,
+                "commit_paths": isinstance(commit, str)
+                and inspector.changed_paths(commit) == expected_paths,
+                "repository_clean": inspector.is_clean,
+            }
+            if not all(checks.values()):
+                failed = ", ".join(key for key, passed in checks.items() if not passed)
+                raise RecoveryError(f"finalized planning transaction evidence disagrees: {failed}")
+            return {
+                "project_id": project.project_id,
+                "outcome": "planning_transaction_already_finalized",
+                "applied": not dry_run,
+                "idempotent": True,
+                "planning_transaction": existing,
+                "checks": checks,
+                "feature_factory_would_launch": False,
+                "milestone_integrator_would_launch": False,
+                "application_source_written": False,
+            }
+        if (
+            existing
+            and existing.get("status") == "planning_changes_committing"
+            and inspector.is_clean
+        ):
+            commit = inspector.head
+            selected = existing.get("selected_feature")
+            expected_subject = planning_commit_subject(effective, selected)
+            checks = {
+                "head_advanced_once": inspector.rev_parse(f"{commit}^", check=False)
+                == expected_starting_head,
+                "commit_subject": inspector.commit_subject(commit) == expected_subject,
+                "commit_paths": inspector.changed_paths(commit) == expected_paths,
+                "recorded_diff": existing.get("diff_fingerprint") == expected_diff_fingerprint,
+                "recorded_session": existing.get("session_id") == expected_session_id,
+            }
+            if all(checks.values()):
+                committed = {
+                    **existing,
+                    "status": "planning_changes_committed",
+                    "planning_result_commit": commit,
+                    "effective_milestone_head": commit,
+                    "planning_commit_status": "committed",
+                    "planning_commit_subject": expected_subject,
+                    "repository_clean": True,
+                    "selected_feature_starting_commit": commit if selected else None,
+                    "recovered_after_commit_interruption": True,
+                    "committed_at": utc_now(),
+                }
+                if not dry_run:
+                    persist_planning_transaction(transaction_path, committed)
+                    document = self._project_document(
+                        effective, run_id, inspector.identity()["path_fingerprint"]
+                    )
+                    self._transition_project(
+                        effective,
+                        document,
+                        "feature_ready" if selected else "paused",
+                        run_id=run_id,
+                        checkpoint="planning_commit_interruption_recovered",
+                        feature=selected,
+                        state_evidence={"planning_transaction": committed},
+                        event_commit=commit,
+                        event_command_category="planning_commit_recovery",
+                        event_validation_outcome="passed",
+                    )
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "planning_transaction_already_finalized",
+                    "applied": not dry_run,
+                    "idempotent": True,
+                    "planning_transaction": committed,
+                    "checks": checks,
+                    "feature_factory_would_launch": False,
+                    "milestone_integrator_would_launch": False,
+                    "application_source_written": False,
+                }
+
+        report_path = self._report_path(report_root, run_id, "queue_reconciliation.json")
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RecoveryError(f"cannot read recorded queue reconciliation report: {exc}") from exc
+        try:
+            validation = validate_planning_changes(
+                effective,
+                inspector,
+                report,
+                run_id=run_id,
+                starting_head=expected_starting_head,
+                expected_diff_fingerprint=expected_diff_fingerprint,
+                expected_changed_paths=expected_paths,
+                expected_session_id=expected_session_id,
+            )
+        except ConveyorError as exc:
+            if dry_run:
+                raise
+            gate = {
+                "schema_version": 1,
+                "phase": "queue_reconciliation",
+                "status": "planning_recovery_gate",
+                "project_id": project.project_id,
+                "milestone": project.active_milestone,
+                "run_id": run_id,
+                "session_id": expected_session_id,
+                "planning_start_commit": expected_starting_head,
+                "planning_result_commit": None,
+                "changed_paths": inspector.tracked_changed_paths(),
+                "diff_fingerprint": inspector.planning_diff_fingerprint(),
+                "planning_validation_status": "failed",
+                "planning_commit_status": "not_created",
+                "failed_validator": str(exc),
+                "historical_integration_invalidated": False,
+                "feature_factory_would_launch": False,
+                "milestone_integrator_would_launch": False,
+                "application_source_written": False,
+                "created_at": utc_now(),
+            }
+            persist_planning_transaction(transaction_path, gate)
+            document = self._project_document(
+                effective, run_id, inspector.identity()["path_fingerprint"]
+            )
+            self._transition_project(
+                effective,
+                document,
+                "validation_failed",
+                run_id=run_id,
+                checkpoint="planning_recovery_gate",
+                stop_reason=str(exc),
+                state_evidence={"planning_transaction": gate},
+            )
+            return {
+                "project_id": project.project_id,
+                "outcome": "planning_recovery_gate",
+                "applied": False,
+                "planning_transaction": gate,
+                "feature_factory_would_launch": False,
+                "milestone_integrator_would_launch": False,
+                "application_source_written": False,
+            }
+        recovery = {
+            **validation,
+            "status": "planning_changes_validated",
+            "recovery": True,
+            "recovery_expected_starting_head": expected_starting_head,
+            "recovery_expected_diff_fingerprint": expected_diff_fingerprint,
+            "recovery_expected_changed_paths": expected_paths,
+            "recovery_expected_session_id": expected_session_id,
+            "planning_commit_status": "would_commit" if dry_run else "pending",
+            "repository_clean": inspector.is_clean,
+            "planning_commit_would_be_created": True,
+            "selected_feature_starting_commit": None,
+            "next_state": "feature_ready" if validation.get("selected_feature") else "paused",
+        }
+        if dry_run:
+            return {
+                "project_id": project.project_id,
+                "outcome": "planning_recovery_validated",
+                "applied": False,
+                "planning_transaction": recovery,
+                "feature_factory_would_launch": False,
+                "milestone_integrator_would_launch": False,
+                "application_source_written": False,
+            }
+
+        inspector.ensure_runtime_ignored()
+        identity = inspector.identity()
+        reservation = self._launch_lock(effective, inspector)
+        reservation.acquire(make_lock_record(
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            run_id=run_id,
+            current_feature=validation.get("selected_feature"),
+            current_phase="queue_reconciliation_recovery",
+        ))
+        lease = PlanningWriterLease(
+            inspector.writer_lock_path(
+                self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+            ),
+            project.repository,
+        )
+        try:
+            lease.acquire(
+                repository_identity=identity["repository_id"],
+                project_id=project.project_id,
+                milestone=project.active_milestone or "",
+                run_id=run_id,
+                session_id=expected_session_id,
+                branch=str(inspector.current_branch or ""),
+                head=expected_starting_head,
+                worktree_fingerprint=stable_fingerprint({
+                    "diff": expected_diff_fingerprint,
+                    "paths": expected_paths,
+                }),
+                allowed_paths=expected_paths,
+            )
+            try:
+                lease.revalidate(
+                    run_id=run_id,
+                    session_id=expected_session_id,
+                    repository_identity=identity["repository_id"],
+                    branch=str(inspector.current_branch or ""),
+                    head=expected_starting_head,
+                )
+                persist_planning_transaction(transaction_path, {
+                    **recovery,
+                    "status": "planning_changes_committing",
+                    "planning_commit_status": "committing",
+                    "updated_at": utc_now(),
+                })
+                committed = finalize_planning_commit(effective, inspector, validation)
+                committed.update({
+                    "recovery": True,
+                    "recovery_expected_starting_head": expected_starting_head,
+                    "recovery_expected_diff_fingerprint": expected_diff_fingerprint,
+                    "recovery_expected_changed_paths": expected_paths,
+                    "recovery_expected_session_id": expected_session_id,
+                    "next_state": "feature_ready" if committed.get("selected_feature") else "paused",
+                })
+                persist_planning_transaction(transaction_path, committed)
+                document = self._project_document(
+                    effective, run_id, identity["path_fingerprint"]
+                )
+                target = committed["next_state"]
+                self._transition_project(
+                    effective,
+                    document,
+                    target,
+                    run_id=run_id,
+                    checkpoint="planning_recovery_committed",
+                    feature=committed.get("selected_feature"),
+                    state_evidence={"planning_transaction": committed},
+                    event_branch=inspector.current_branch,
+                    event_commit=committed.get("planning_result_commit"),
+                    event_command_category="planning_commit_recovery",
+                    event_validation_outcome="passed",
+                )
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "planning_recovery_committed",
+                    "applied": True,
+                    "planning_transaction": committed,
+                    "feature_factory_would_launch": False,
+                    "milestone_integrator_would_launch": False,
+                    "application_source_written": False,
+                }
+            finally:
+                lease.release(run_id=run_id)
+        finally:
+            reservation.release(run_id)
 
     def recover_feature_branch(self, project: Project, *, dry_run: bool) -> dict[str, Any]:
         """Recover an exact dirty milestone checkout by creating its persisted feature branch."""
@@ -3686,6 +4240,24 @@ class CycleEngine:
         plan = self.project_plan(project)
         if dry_run or mode == "audit":
             return plan
+        if plan["proposed_next_action"] == "planning_finalization":
+            transaction = plan.get("current_planning_transaction") or {}
+            if transaction.get("recovery_exact_expectation_recorded") is not False:
+                return self.recover_planning_transaction(
+                    project,
+                    run_id=str(transaction["run_id"]),
+                    expected_starting_head=str(transaction["planning_start_commit"]),
+                    expected_diff_fingerprint=str(transaction["diff_fingerprint"]),
+                    expected_changed_paths=list(transaction["changed_paths"]),
+                    expected_session_id=str(transaction["session_id"]),
+                    dry_run=False,
+                )
+            return {
+                "project_id": project.project_id,
+                "outcome": "planning_recovery_required",
+                "plan": plan,
+                "next_action": "scripts/conveyor recover-planning --help",
+            }
         if plan["proposed_next_action"] in {"disabled", "repository_dirty", "writer_locked", "human_decision_required", "conveyor_error"}:
             return {"project_id": project.project_id, "outcome": plan["proposed_next_action"], "plan": plan}
         run_id = str(uuid.uuid4())

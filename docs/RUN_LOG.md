@@ -309,3 +309,24 @@ This log records model configuration and deterministic deployment evidence. It n
 - Final-tree validation: the focused post-integration suite passed `35/35`; full `python3 -m unittest discover -s tests -v` passed `247/247`; final-tree `python3 -m pytest` passed `247/247` in `187.93s` using a temporary isolated environment; and `python3 -m compileall -q src scripts tests`, `scripts/conveyor validate-config`, and `git diff --check` passed.
 - Model execution evidence: `feature-worker` used `gpt-5.6-sol`, reasoning `high`, source `agent_file`; `test-engineer` used `gpt-5.6-terra`, reasoning `high`, source `agent_file`; and `adversarial-reviewer` used `gpt-5.6-sol`, reasoning `xhigh`, source `agent_file`.
 - Final adversarial acceptance: `0 Critical`, `0 High`, and `0 Medium` findings remain. No default-branch merge, push, tag, publication, deployment, release, or application production-code mutation occurred.
+
+### Queue-reconciliation finalization repair — 2026-07-19
+
+- Root cause: durable P0-001 integration success reused live repository cleanliness, writer-lease, and Git-operation observations after the integration phase had already ended. The successful P0 queue-reconciliation session then left its authorized seven-file metadata transaction uncommitted, so live planning dirtiness incorrectly changed the historical integration conclusion to validation failure.
+- Phase isolation: completed integration now uses its terminal clean-worktree and released-lease observations while continuing to require durable report, runtime, queue, commit, ancestry, and validation agreement. Current planning state is reported independently and cannot rewrite the terminal integration report.
+- Planning transaction: queue reconciliation captures its clean starting snapshot, acquires a planning-specific writer lease before session mutation, binds the returned session, validates exact paths/diff/queue/semantics/inventory/model evidence, and creates one focused Factory planning commit. Controller state records non-self-referential start, result, evidence, previous validated, and effective milestone commit fields.
+- Recovery: `recover-planning` requires an explicit run, session, starting HEAD, diff fingerprint, and exact changed paths. Dry-run writes nothing; apply commits only validated planning files, stops at `feature_ready`, and supports duplicate and post-commit interruption recognition.
+- Synthetic coverage: added planning lease, authorized and unauthorized path, semantic agreement, exact seven-file recovery, fingerprint/head/path/queue divergence, commit, cleanliness, idempotency, non-self-reference, status separation, and no-launch tests. Historical integration dirtiness coverage verifies that pending planning changes do not retroactively invalidate a finalized integration.
+- Final validation: `python3 -m unittest discover -s tests -q` passed all 266 tests in 178.417 seconds. Pytest passed the same 266 tests using the existing local `/Users/dany/Documents/planhat-takehome/.venv/bin/python` environment; the system and bundled Python runtimes did not contain the optional `pytest` module. `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, and `git diff --check` passed.
+- Live recovery dry-run: run `f2a11cf5-c3af-4737-89c2-96b017155d97`, session `019f77e1-c551-7f00-9409-2fff9f6ee79b`, starting HEAD `0f43ad23a3820ccd3e27f4a6a475e42dc70957bc`, seven exact planning paths, and diff fingerprint `e1b6f21eaa8b2254bf3080d800945aa05ff388ad88387e94c445d11fda5c1c81` validated without writes. P0-003 remained the sole ready feature; Feature Factory and Milestone Integrator launch flags were false.
+- Live recovery apply: created exactly one Case Manager planning commit, `f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0` (`factory: reconcile P0 queue and ready P0-003`), on `codex/p0-foundation`. The worktree is clean, no writer lease or Git operation exists, P0-001 remains historically `INTEGRATED`, P0-003 remains ready, and its starting commit is the planning result commit. Post-apply milestone dry-run projects only `$feature-factory`; it writes nothing and does not launch Milestone Integrator.
+
+### Model execution — 2026-07-19T02:10:25+00:00
+
+- Agent role: `default-interactive`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `global_default`
+- Event: `start`
+- Reason code: `queue_reconciliation_finalization_repair`
+- Safety and autonomy contracts unchanged: `true`
