@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "projection-cache.schema.json",
+  "type": "object",
+  "required": ["schema_version", "project_id", "repository_identity", "repository_path_fingerprint", "ledger_sequence", "ledger_fingerprint", "current_state", "active_transaction", "session_resume_eligible", "historical_integration_outcomes", "transactions", "projection_fingerprint"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "project_id": {"type": "string"},
+    "repository_identity": {"type": "string"},
+    "repository_path_fingerprint": {"type": "string"},
+    "ledger_sequence": {"type": "integer", "minimum": 0},
+    "ledger_fingerprint": {"type": "string"},
+    "current_state": {"type": "string"},
+    "active_transaction": {"type": ["string", "null"]},
+    "session_resume_eligible": {"type": "boolean"},
+    "historical_integration_outcomes": {"type": "array"},
+    "transactions": {"type": "array"},
+    "projection_fingerprint": {"type": "string"}
+  }
+}

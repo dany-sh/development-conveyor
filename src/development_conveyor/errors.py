@@ -48,3 +48,22 @@ class SessionError(ConveyorError):
 class RetryExhausted(ConveyorError):
     """The configured focused-attempt limit was reached."""
 
+
+class TransactionError(ConveyorError):
+    """A workflow transaction violates the kernel contract."""
+
+
+class EvidenceError(ConveyorError):
+    """Controller-owned evidence is malformed or contradictory."""
+
+
+class CorruptEvidenceError(EvidenceError):
+    """The append-only evidence ledger failed integrity validation."""
+
+
+class ProjectionError(EvidenceError):
+    """A projection or projection cache cannot be trusted."""
+
+
+class StaleProjectionCache(ProjectionError):
+    """A valid cache is older than its authoritative ledger and may be rebuilt."""

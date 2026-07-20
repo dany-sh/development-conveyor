@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "project": {
+    "id": "development-conveyor",
+    "name": "development-conveyor"
+  },
+  "project_profile": {
+    "usage": "personal_private",
+    "intended_users": [
+      "owner"
+    ],
+    "distribution": "local_private",
+    "preserve_personalization": true,
+    "portability_target": "current_owner_environment"
+  },
+  "content_policy": {
+    "personal_names": "allow",
+    "company_names": "allow",
+    "personalized_prompts": "allow",
+    "personalized_test_fixtures": "allow",
+    "documented_absolute_paths": "allow",
+    "production_absolute_paths": "warn",
+    "personal_bundle_identifier": "preserve",
+    "sensitive_source_data": "report",
+    "secrets": "block",
+    "generated_artifacts": "ignore"
+  },
+  "repository": {
+    "default_branch": "codex/development-conveyor"
+  },
+  "git": {
+    "default_branch": "codex/development-conveyor",
+    "automatic_merge_to_main": false,
+    "automatic_push": false,
+    "one_commit_per_feature": true,
+    "feature_branch_pattern": "codex/{feature_id_lower}-{slug}",
+    "milestone_branch_pattern": "codex/{milestone_id_lower}-{slug}",
+    "branch_after_integration": "milestone"
+  },
+  "integration": {
+    "enabled": true,
+    "strategy": "cherry_pick",
+    "verify_commit_identity": true,
+    "require_clean_worktree": true,
+    "require_accepted_feature": true,
+    "require_feature_commit": true,
+    "automatically_prepare_next_feature": true,
+    "automatically_remove_integrated_worktree": false,
+    "stop_on_conflict": "semantic",
+    "rerun_milestone_gates": true
+  },
+  "technology": {
+    "detected": [
+      "Python"
+    ]
+  },
+  "commands": {
+    "setup": [],
+    "build": [],
+    "test": [],
+    "lint": [],
+    "package": [],
+    "validate": [
+      [
+        "python3",
+        "-m",
+        "compileall",
+        "src",
+        "scripts"
+      ],
+      [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-q"
+      ],
+      [
+        "scripts/conveyor",
+        "validate-config"
+      ]
+    ]
+  },
+  "factory": {
+    "feature_queue": "docs/FEATURE_QUEUE.yaml",
+    "feature_specs": "docs/features",
+    "autonomy_contract": "docs/AUTONOMY_CONTRACT.md",
+    "run_log": "docs/RUN_LOG.md",
+    "approved_content": ".factory/approved-content.yaml"
+  },
+  "policy": {
+    "primary_writer_limit": 1,
+    "auto_merge": false,
+    "auto_push": false
+  },
+  "command_evidence": [
+    "Python commands require python3 on PATH; optional modules were checked before inclusion."
+  ],
+  "unresolved_command_followups": []
+}

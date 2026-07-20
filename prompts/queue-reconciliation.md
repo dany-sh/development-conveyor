@@ -4,6 +4,11 @@ Repository: `{repository}`
 Project: `{project_id}`
 Active milestone: `{milestone}`
 Conveyor run: `{run_id}`
+Transaction: `{transaction_id}`
+Repository identity: `{repository_identity}`
+Starting branch: `{starting_branch}`
+Starting commit: `{starting_commit}`
+Authorized paths: `{allowed_paths}`
 
 Work only in this repository. First invoke the named `product-architect` in planning-only, read-only mode to inspect completed work, dependencies, milestone scope, Git evidence, incomplete specifications, and current queue accuracy. Then use the existing `$feature-inventory` workflow for any evidence-supported queue or feature-specification correction. Do not edit application production source.
 
@@ -11,8 +16,6 @@ Validate the resulting JSON-compatible queue deterministically. Mark a feature r
 
 Stop for product or architecture judgment that cannot be proven from repository evidence. Never merge into the default branch, push, force-push, tag, publish, deploy, release, notarize, reset, clean, stash, discard work, or begin feature implementation. Record every participating role's effective model and reasoning in the repository run log without hidden reasoning or secrets.
 
-Your final response must end with exactly one single-line structured result prefixed by `CONVEYOR_RESULT=`. Do not put the marker in a code fence. Use this contract:
-
-`CONVEYOR_RESULT={{"schema_version":1,"classification":"reconciled_ready_work|reconciled_no_ready_work|milestone_complete|legitimately_blocked|human_decision_required|invalid_queue|session_execution_failed|structured_output_invalid","summary":"redacted concise result","next_action":"safe next controller action","queue_validation":{{"valid":true,"milestone_found":true,"feature_count":0}},"retryable":false,"human_decision":null}}`
+Leave authorized planning changes uncommitted and unstaged. The controller kernel owns the planning commit. Your final response must end with exactly one compact `CONVEYOR_TRANSACTION_RESULT=` JSON line matching the generic session-result schema and bound to transaction `{transaction_id}`, repository `{repository_identity}`, run `{run_id}`, actual session ID, starting branch `{starting_branch}`, unchanged current commit `{starting_commit}`, null feature, and the exact sorted changed paths. Map the result to `RECONCILED_READY_WORK`, `RECONCILED_NO_READY_WORK`, `MILESTONE_COMPLETE`, `HUMAN_DECISION_REQUIRED`, `PLANNING_VALIDATION_FAILED`, `RETRYABLE_PLANNING_FAILURE`, or `TERMINAL_PLANNING_FAILURE`, with the corresponding next state. Put the deterministic queue-validation facts, concise redacted summary, retryability, and optional human decision inside `evidence`. The marker must be unique and final.
 
 Set `feature_count` to the actual number of features in the configured milestone after deterministic milestone normalization. A validated queue with no ready feature is `reconciled_no_ready_work`, not an execution failure. Use `human_decision_required` only with a non-null `human_decision` object. Never include secrets, hidden reasoning, raw provider payloads, or private workspace data.

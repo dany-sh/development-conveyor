@@ -13,17 +13,42 @@ class ProhibitedActionTests(unittest.TestCase):
             commands = [
                 ["git", "push", "origin", "main"],
                 ["git", "tag", "v1"],
+                ["npm", "run", "deploy"],
+                ["npm", "publish"],
+                ["gh", "release", "create", "v1"],
+                ["xcrun", "notarytool", "submit"],
+            ]
+            with SafetyPolicy.observe_command_attempts() as observed:
+                for command in commands:
+                    with self.subTest(command=command), self.assertRaises(SafetyViolation):
+                        SafetyPolicy.validate_controller_command(
+                            command, cwd=root, registered_repository=root
+                        )
+            self.assertEqual(len(commands), len(observed))
+            self.assertEqual(
+                {"push", "tag", "deploy", "publish", "release", "notarize"},
+                {
+                    category for item in observed
+                    for category in item["prohibited_categories"]
+                },
+            )
+            self.assertTrue(all(item["authority"] == "controller" for item in observed))
+
+    def test_other_destructive_git_operations_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands = [
                 ["git", "merge", "feature"],
                 ["git", "reset", "--hard", "HEAD"],
                 ["git", "stash"],
                 ["git", "clean", "-fd"],
                 ["git", "checkout", "-f", "main"],
-                ["npm", "run", "deploy"],
-                ["xcrun", "notarytool", "submit"],
             ]
             for command in commands:
                 with self.subTest(command=command), self.assertRaises(SafetyViolation):
-                    SafetyPolicy.validate_controller_command(command, cwd=root, registered_repository=root)
+                    SafetyPolicy.validate_controller_command(
+                        command, cwd=root, registered_repository=root
+                    )
 
     def test_read_only_git_and_safe_codex_launcher_are_allowed(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -35,4 +60,3 @@ class ProhibitedActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
             with self.assertRaises(SafetyViolation):
                 SafetyPolicy.validate_controller_command(["git", "status"], cwd=Path(first), registered_repository=Path(second))
-

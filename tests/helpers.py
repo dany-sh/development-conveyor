@@ -9,6 +9,7 @@ from typing import Any
 from development_conveyor.config import Configuration
 from development_conveyor.registry import Project
 from development_conveyor.sessions import SessionPlan, SessionResult
+from development_conveyor.repository import RepositoryInspector
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -135,8 +136,11 @@ class SyntheticLauncher:
     def __init__(self):
         self.actions: list[str] = []
 
-    def launch(self, request):
+    def launch(self, request, on_session_started=None):
         self.actions.append(request.action)
+        session_id = f"session-{len(self.actions)}"
+        if on_session_started is not None:
+            on_session_started(session_id)
         structured = None
         structured_validation = "not_required"
         classification = None
@@ -145,7 +149,7 @@ class SyntheticLauncher:
             queue = json.loads(queue_path.read_text(encoding="utf-8"))
             queue["features"][0]["status"] = "ready"
             write_json(queue_path, queue)
-            structured = {
+            legacy = {
                 "schema_version": 1,
                 "classification": "reconciled_ready_work",
                 "summary": "Synthetic queue reconciled.",
@@ -154,26 +158,98 @@ class SyntheticLauncher:
                 "retryable": False,
                 "human_decision": None,
             }
+            structured = (
+                {
+                    "schema_version": 1,
+                    "workflow_type": "queue_reconciliation",
+                    "classification": "RECONCILED_READY_WORK",
+                    "project_id": request.project.project_id,
+                    "repository_identity": request.repository_identity,
+                    "transaction_id": request.transaction_id,
+                    "run_id": request.run_id,
+                    "session_id": session_id,
+                    "starting_branch": request.starting_branch,
+                    "starting_commit": request.starting_commit,
+                    "current_commit": request.starting_commit,
+                    "feature_id": None,
+                    "changed_paths": sorted(RepositoryInspector(request.project.repository).tracked_changed_paths()),
+                    "evidence": legacy,
+                    "next_state": "feature_ready",
+                }
+                if request.transaction_id else legacy
+            )
             structured_validation = "valid"
-            classification = "reconciled_ready_work"
+            classification = "RECONCILED_READY_WORK" if request.transaction_id else "reconciled_ready_work"
         elif request.action == "feature_cycle":
             self._accept_feature(request.project)
+            changed = sorted(RepositoryInspector(request.project.repository).tracked_changed_paths())
+            structured = {
+                "schema_version": 1,
+                "workflow_type": "feature_execution",
+                "classification": "FEATURE_ACCEPTED",
+                "project_id": request.project.project_id,
+                "repository_identity": request.repository_identity,
+                "transaction_id": request.transaction_id,
+                "run_id": request.run_id,
+                "session_id": session_id,
+                "starting_branch": request.starting_branch,
+                "starting_commit": request.starting_commit,
+                "current_commit": request.starting_commit,
+                "feature_id": request.feature,
+                "changed_paths": changed,
+                "evidence": {"tests_passed": True, "review_passed": True},
+                "next_state": "feature_accepted",
+            }
+            structured_validation = "valid"
+            classification = "FEATURE_ACCEPTED"
         elif request.action == "milestone_integration":
-            self._integrate_feature(request.project)
+            structured = {
+                "schema_version": 1,
+                "workflow_type": "milestone_integration",
+                "classification": "INTEGRATED",
+                "project_id": request.project.project_id,
+                "repository_identity": request.repository_identity,
+                "transaction_id": request.transaction_id,
+                "run_id": request.run_id,
+                "session_id": session_id,
+                "starting_branch": request.starting_branch,
+                "starting_commit": request.starting_commit,
+                "current_commit": request.starting_commit,
+                "feature_id": request.feature,
+                "changed_paths": list(request.allowed_paths),
+                "evidence": {"accepted_commit_verified": True},
+                "next_state": "feature_integrated",
+            }
+            structured_validation = "valid"
+            classification = "INTEGRATED"
         elif request.action == "milestone_gate":
             queue_path = request.project.repository / request.project.queue_location
             queue = json.loads(queue_path.read_text(encoding="utf-8"))
             queue["milestones"][0]["status"] = "gate_passed"
             write_json(queue_path, queue)
-            git(request.project.repository, "add", request.project.queue_location)
-            git(request.project.repository, "commit", "-m", "factory: M0 gate passed")
+            structured = {
+                "schema_version": 1, "workflow_type": "milestone_gate",
+                "classification": "MILESTONE_GATE_PASSED",
+                "project_id": request.project.project_id,
+                "repository_identity": request.repository_identity,
+                "transaction_id": request.transaction_id, "run_id": request.run_id,
+                "session_id": session_id, "starting_branch": request.starting_branch,
+                "starting_commit": request.starting_commit,
+                "current_commit": request.starting_commit, "feature_id": None,
+                "changed_paths": [request.project.queue_location],
+                "evidence": {"release_audit": "passed"},
+                "next_state": "milestone_ready_for_merge",
+            }
+            structured_validation = "valid"
+            classification = "MILESTONE_GATE_PASSED"
         plan = SessionPlan(
             argv=("codex", "exec"), cwd=request.project.repository, prompt="synthetic", prompt_sha256="0" * 64,
             sandbox="workspace-write",
         )
         redacted_stdout = "synthetic"
         if structured is not None:
-            marker = "CONVEYOR_RESULT=" + json.dumps(structured, separators=(",", ":"))
+            marker_name = "CONVEYOR_TRANSACTION_RESULT=" if request.transaction_id else "CONVEYOR_RESULT="
+            marker = marker_name + json.dumps(structured, separators=(",", ":"))
             redacted_stdout = json.dumps({
                 "type": "item.completed",
                 "item": {"type": "agent_message", "text": marker},
@@ -181,36 +257,23 @@ class SyntheticLauncher:
         return SessionResult(
             request.action,
             0,
-            f"session-{len(self.actions)}",
+            session_id,
             "synthetic",
             plan,
             redacted_stdout=redacted_stdout,
             structured_result=structured,
             structured_output_validation=structured_validation,
             result_classification=classification,
+            transaction_envelope=structured if request.transaction_id else None,
         )
 
     def _accept_feature(self, project: Project) -> None:
         repository = project.repository
-        queue_path = repository / project.queue_location
-        queue = json.loads(queue_path.read_text(encoding="utf-8"))
-        feature = queue["features"][0]
-        if feature.get("status") in {"accepted", "integration_pending", "integrated"}:
+        if (repository / "app.txt").read_text(encoding="utf-8").endswith(
+            "F001 integrated behavior\n"
+        ):
             return
-        base = git(repository, "rev-parse", project.milestone_branch)
-        branch = "codex/f001-synthetic-feature"
-        feature.update({
-            "status": "integration_pending",
-            "branch": branch,
-            "integration_base_commit": base,
-            "accepted_commit": "SELF",
-            "integration_status": "pending",
-            "acceptance": {"tests_passed": True, "review_passed": True, "documentation_current": True},
-        })
-        write_json(queue_path, queue)
         (repository / "app.txt").write_text("baseline\nF001 integrated behavior\n", encoding="utf-8")
-        git(repository, "add", "app.txt", project.queue_location)
-        git(repository, "commit", "-m", "F001: implement synthetic feature")
 
     def _integrate_feature(self, project: Project) -> None:
         repository = project.repository

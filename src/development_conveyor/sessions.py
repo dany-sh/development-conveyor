@@ -7,15 +7,17 @@ import json
 import os
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .compatibility import CompatibilityResult, check_compatibility, resolve_model_selection
 from .errors import SessionError
 from .redaction import redact_text
 from .registry import Project
 from .validation import SafetyPolicy
+from .contracts import extract_terminal_envelope
 
 ACTION_PROMPTS = {
     "queue_reconciliation": "queue-reconciliation.md",
@@ -81,6 +83,11 @@ class SessionRequest:
     remediation_action: str | None = None
     repair_supporting_evidence: str | None = None
     continuation_reason: str | None = None
+    transaction_id: str | None = None
+    repository_identity: str | None = None
+    starting_branch: str | None = None
+    starting_commit: str | None = None
+    allowed_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -119,6 +126,7 @@ class SessionResult:
     retry_evidence: str | None = None
     post_integration_commands: tuple[dict[str, Any], ...] = ()
     optional_warnings: tuple[str, ...] = ()
+    transaction_envelope: dict[str, Any] | None = None
 
 
 def _content_text(content: Any) -> str:
@@ -604,6 +612,11 @@ class SessionLauncher:
             feature=request.feature or "NONE",
             run_id=request.run_id,
             mode=request.mode,
+            transaction_id=request.transaction_id or "LEGACY_UNBOUND",
+            repository_identity=request.repository_identity or "LEGACY_UNBOUND",
+            starting_branch=request.starting_branch or "LEGACY_UNBOUND",
+            starting_commit=request.starting_commit or "LEGACY_UNBOUND",
+            allowed_paths=json.dumps(list(request.allowed_paths), separators=(",", ":")),
         )
         if request.repair_attempt is not None:
             prompt += (
@@ -692,7 +705,11 @@ class SessionLauncher:
             compatibility=compatibility.as_dict(),
         )
 
-    def launch(self, request: SessionRequest) -> SessionResult:
+    def launch(
+        self,
+        request: SessionRequest,
+        on_session_started: Callable[[str], None] | None = None,
+    ) -> SessionResult:
         plan = self.plan(request)
         environment = dict(os.environ)
         environment.update({
@@ -702,15 +719,68 @@ class SessionLauncher:
             "CONVEYOR_FEATURE": request.feature or "",
         })
         environment.update(self._trusted_resolution_environment(request))
+        process: subprocess.Popen[str] | None = None
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        callback_errors: list[BaseException] = []
+        observed_session: list[str] = []
+        observer_lock = threading.Lock()
+
+        def consume(stream: Any, destination: list[str], observe: bool) -> None:
+            try:
+                for line in iter(stream.readline, ""):
+                    destination.append(line)
+                    if observe and on_session_started is not None:
+                        session = self._session_id(line)
+                        if session:
+                            with observer_lock:
+                                if not observed_session:
+                                    observed_session.append(session)
+                                    on_session_started(session)
+                        elif len(destination) == 1:
+                            raise SessionError(
+                                "typed workflow did not expose a session identity before work began"
+                            )
+            except BaseException as exc:  # surfaced on the launching thread below
+                callback_errors.append(exc)
+                if process is not None and process.poll() is None:
+                    process.kill()
+            finally:
+                stream.close()
+
         try:
-            result = subprocess.run(
-                list(plan.argv), cwd=plan.cwd, env=environment, input=plan.prompt, text=True,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-                timeout=int(self.configuration["codex"]["session_timeout_seconds"]),
+            process = subprocess.Popen(
+                list(plan.argv), cwd=plan.cwd, env=environment, text=True,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            if process.stdin is None or process.stdout is None or process.stderr is None:
+                raise OSError("repository session pipes are unavailable")
+            stdout_reader = threading.Thread(
+                target=consume, args=(process.stdout, stdout_lines, True), daemon=True
+            )
+            stderr_reader = threading.Thread(
+                target=consume, args=(process.stderr, stderr_lines, False), daemon=True
+            )
+            stdout_reader.start()
+            stderr_reader.start()
+            process.stdin.write(plan.prompt)
+            process.stdin.close()
+            returncode = process.wait(timeout=int(self.configuration["codex"]["session_timeout_seconds"]))
+            stdout_reader.join()
+            stderr_reader.join()
+            if callback_errors:
+                raise callback_errors[0]
+            if on_session_started is not None and not observed_session:
+                raise SessionError("typed workflow completed without an early session identity")
+            result = subprocess.CompletedProcess(
+                list(plan.argv), returncode, "".join(stdout_lines), "".join(stderr_lines)
             )
         except subprocess.TimeoutExpired as exc:
-            stdout = redact_text(str(exc.stdout or ""))
-            stderr = redact_text(str(exc.stderr or ""))
+            if process is not None:
+                process.kill()
+                process.wait()
+            stdout = redact_text("".join(stdout_lines))
+            stderr = redact_text("".join(stderr_lines))
             raise SessionError(
                 f"repository session timed out; redacted stdout: {stdout[-1000:]}; "
                 f"redacted stderr: {stderr[-1000:]}"
@@ -728,9 +798,20 @@ class SessionLauncher:
             "secondary_diagnostics": (),
         }
         structured = None
+        transaction_envelope = None
         validation = "not_required"
         classification = None
-        if request.action == "queue_reconciliation":
+        if request.transaction_id and request.action in {"queue_reconciliation", "feature_cycle", "milestone_integration", "milestone_gate"}:
+            try:
+                envelope = extract_terminal_envelope(result.stdout)
+                transaction_envelope = envelope.to_dict()
+                structured = transaction_envelope
+                validation = "valid"
+                classification = envelope.classification
+            except Exception:
+                validation = "invalid"
+                classification = "structured_output_invalid"
+        elif request.action == "queue_reconciliation":
             structured, validation = parse_reconciliation_result(result.stdout)
             classification = classify_session_result(result.returncode, structured, validation)
         elif request.action == "milestone_integration":
@@ -811,6 +892,7 @@ class SessionLauncher:
             retry_evidence=(structured or {}).get("supporting_evidence") if failure["retryable"] else None,
             post_integration_commands=post_integration_commands,
             optional_warnings=optional_warnings,
+            transaction_envelope=transaction_envelope,
         )
 
     @staticmethod

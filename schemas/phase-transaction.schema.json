@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase-transaction.schema.json",
+  "type": "object",
+  "required": ["schema_version", "transaction_id", "workflow_type", "project_id", "repository_identity", "repository_path_fingerprint", "run_id", "session_ids", "starting_branch", "starting_head", "starting_queue_fingerprint", "starting_tracked_diff_fingerprint", "starting_untracked_fingerprint", "allowed_mutation_policy", "current_state", "terminal_classification", "terminal_reference", "next_project_state"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "transaction_id": {"type": "string", "minLength": 1},
+    "workflow_type": {"type": "string", "enum": ["queue_reconciliation", "feature_preparation", "feature_execution", "feature_acceptance", "milestone_integration", "milestone_gate", "human_decision_resolution", "recovery"]},
+    "project_id": {"type": "string", "minLength": 1},
+    "repository_identity": {"type": "string", "minLength": 64},
+    "repository_path_fingerprint": {"type": "string", "minLength": 64},
+    "run_id": {"type": "string", "minLength": 1},
+    "session_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "starting_branch": {"type": "string", "minLength": 1},
+    "starting_head": {"type": "string", "minLength": 1},
+    "starting_queue_fingerprint": {"type": ["string", "null"]},
+    "starting_tracked_diff_fingerprint": {"type": "string", "minLength": 64},
+    "starting_untracked_fingerprint": {"type": "string", "minLength": 64},
+    "allowed_mutation_policy": {"type": "object"},
+    "current_state": {"type": "string", "enum": ["created", "lease_pending", "active", "result_pending", "validating", "finalizing", "completed", "blocked", "human_decision_required", "retryable_failure", "terminal_failure", "superseded"]},
+    "terminal_classification": {"type": ["string", "null"]},
+    "terminal_reference": {"type": ["string", "null"]},
+    "next_project_state": {"type": ["string", "null"]}
+  }
+}

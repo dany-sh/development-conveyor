@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+import json
+from dataclasses import replace
 from pathlib import Path
 
 from development_conveyor.cycle_engine import CycleEngine
@@ -15,10 +17,12 @@ class OneFailureLauncher(SyntheticLauncher):
         self.failed = False
         self.repair_request = None
 
-    def launch(self, request):
+    def launch(self, request, on_session_started=None):
         if not self.failed and request.action == "feature_cycle":
             self.failed = True
             self.actions.append(request.action)
+            if on_session_started is not None:
+                on_session_started("retryable-session")
             plan = SessionPlan(("codex", "exec"), request.project.repository, "synthetic", "0" * 64, "workspace-write")
             return SessionResult(
                 request.action,
@@ -34,13 +38,15 @@ class OneFailureLauncher(SyntheticLauncher):
             )
         if request.action == "feature_cycle":
             self.repair_request = request
-        return super().launch(request)
+        return super().launch(request, on_session_started=on_session_started)
 
 
 class ExhaustingLauncher(SyntheticLauncher):
-    def launch(self, request):
+    def launch(self, request, on_session_started=None):
         self.actions.append(request.action)
         attempt = len(self.actions)
+        if on_session_started is not None:
+            on_session_started("failing-session")
         plan = SessionPlan(("codex", "exec"), request.project.repository, "synthetic", "0" * 64, "workspace-write")
         return SessionResult(
             request.action,
@@ -56,7 +62,48 @@ class ExhaustingLauncher(SyntheticLauncher):
         )
 
 
+class PlanningMutationDuringFeatureLauncher(SyntheticLauncher):
+    def launch(self, request, on_session_started=None):
+        result = super().launch(request, on_session_started=on_session_started)
+        if request.action != "feature_cycle":
+            return result
+        queue_path = request.project.repository / request.project.queue_location
+        queue = json.loads(queue_path.read_text(encoding="utf-8"))
+        queue["features"][0]["title"] = "unauthorized planning mutation"
+        queue_path.write_text(json.dumps(queue, indent=2) + "\n", encoding="utf-8")
+        envelope = dict(result.transaction_envelope or {})
+        envelope["changed_paths"] = sorted(
+            RepositoryInspector(request.project.repository).tracked_changed_paths()
+        )
+        return replace(result, transaction_envelope=envelope, structured_result=envelope)
+
+
 class CycleEngineTests(unittest.TestCase):
+    def test_feature_execution_rejects_planning_control_plane_mutation_without_commit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, project = synthetic_repository(root)
+            starting_head = git(repository, "rev-parse", "HEAD")
+            engine = CycleEngine(
+                controller_configuration(root, project),
+                PlanningMutationDuringFeatureLauncher(),
+            )
+            with self.assertRaisesRegex(Exception, "denied control-plane mutation"):
+                engine.run_project(project, "one_feature")
+            self.assertEqual(starting_head, git(repository, "rev-parse", "HEAD"))
+            ledger_path = root / "controller/state/projects/synthetic/evidence-ledger.jsonl"
+            events = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+            feature_events = [item for item in events if item["workflow_type"] == "feature_execution"]
+            self.assertFalse(any(item["event_type"] == "CommitFinalized" for item in feature_events))
+            terminal = [
+                item for item in feature_events
+                if item["event_type"] in {
+                    "TransactionBlocked", "TransactionCompleted", "TransactionSuperseded", "HumanGateRaised",
+                }
+            ]
+            self.assertEqual(1, len(terminal))
+            self.assertEqual("TransactionBlocked", terminal[0]["event_type"])
+
     def test_complete_one_feature_cycle_integrates_exactly_one_commit(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -86,6 +133,17 @@ class CycleEngineTests(unittest.TestCase):
             result = engine.run_project(project, "one_feature")
             self.assertEqual(result["outcome"], "one_feature_integrated")
             self.assertEqual(launcher.actions[:2], ["queue_reconciliation", "feature_cycle"])
+            ledger_path = root / "controller/state/projects/synthetic/evidence-ledger.jsonl"
+            events = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+            started = next(item for item in events if item["workflow_type"] == "queue_reconciliation" and item["event_type"] == "TransactionStarted")
+            phase = [item for item in events if item["transaction_id"] == started["transaction_id"]]
+            names = [item["event_type"] for item in phase]
+            self.assertEqual(1, names.count("LeaseAcquired"))
+            self.assertEqual(1, names.count("TransactionCompleted"))
+            self.assertLess(names.index("LeaseAcquired"), names.index("SnapshotCaptured"))
+            self.assertLess(names.index("SessionLaunched"), names.index("ChangesDetected"))
+            self.assertLess(names.index("TransactionCompleted"), names.index("LeaseReleased"))
+            self.assertLess(names.index("LeaseReleased"), names.index("ProjectionUpdated"))
 
     def test_dry_run_does_not_write_application_repository(self):
         with tempfile.TemporaryDirectory() as temporary:

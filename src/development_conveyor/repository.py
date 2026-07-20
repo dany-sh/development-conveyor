@@ -5,6 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import os
+import stat
+import contextvars
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +26,20 @@ class GitResult:
 
 
 class RepositoryInspector:
+    _content_read_observer: contextvars.ContextVar[list[str] | None] = (
+        contextvars.ContextVar("repository_content_read_observer", default=None)
+    )
+
+    @classmethod
+    @contextmanager
+    def observe_content_reads(cls):
+        observed: list[str] = []
+        token = cls._content_read_observer.set(observed)
+        try:
+            yield observed
+        finally:
+            cls._content_read_observer.reset(token)
+
     def __init__(self, root: Path):
         self.root = root.expanduser().resolve()
         if not self.root.is_dir():
@@ -33,7 +51,14 @@ class RepositoryInspector:
     def git(self, arguments: list[str], check: bool = True) -> GitResult:
         argv = ["git", *arguments]
         SafetyPolicy.validate_controller_command(argv, cwd=self.root, registered_repository=self.root)
-        result = subprocess.run(argv, cwd=self.root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        environment = dict(os.environ)
+        # Read-only inspection must never refresh application index stat data.
+        # Mandatory locks for explicit Git mutations still work normally.
+        environment["GIT_OPTIONAL_LOCKS"] = "0"
+        result = subprocess.run(
+            argv, cwd=self.root, text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, env=environment,
+        )
         if check and result.returncode != 0:
             raise RepositoryError(result.stderr.strip() or result.stdout.strip() or f"Git command failed: {arguments!r}")
         return GitResult(tuple(argv), result.stdout, result.stderr, result.returncode)
@@ -136,6 +161,71 @@ class RepositoryInspector:
     def planning_diff_fingerprint(self) -> str:
         return hashlib.sha256(self.planning_diff()).hexdigest()
 
+    def content_diff_fingerprint(
+        self, paths: list[str] | tuple[str, ...], *, commit: str | None = None,
+    ) -> str:
+        """Fingerprint resulting path contents identically before/after commit."""
+
+        digest = hashlib.sha256()
+        for relative in sorted(set(paths)):
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            if commit is None:
+                content = self.safe_worktree_file_bytes(relative, allow_missing=True)
+            else:
+                result = subprocess.run(
+                    ["git", "show", f"{commit}:{relative}"], cwd=self.root,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                    env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+                )
+                content = result.stdout if result.returncode == 0 else None
+            if content is None:
+                digest.update(b"deleted\0")
+            else:
+                digest.update(b"file\0")
+                digest.update(hashlib.sha256(content).digest())
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    def safe_worktree_file_bytes(
+        self, relative: str, *, allow_missing: bool = False
+    ) -> bytes | None:
+        """Read one repository file through a no-follow, single-link descriptor."""
+
+        candidate = self.root / relative
+        resolved_parent = candidate.parent.resolve()
+        try:
+            resolved_parent.relative_to(self.root)
+        except ValueError as exc:
+            raise RepositoryError(f"worktree path escapes the registered repository: {relative}") from exc
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(candidate, flags)
+        except FileNotFoundError:
+            if allow_missing:
+                return None
+            raise RepositoryError(f"worktree path is missing: {relative}")
+        except OSError as exc:
+            raise RepositoryError(f"cannot securely open worktree path: {relative}") from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise RepositoryError(f"worktree path is not a regular file: {relative}")
+            if metadata.st_nlink != 1:
+                raise RepositoryError(f"worktree path has an unsafe hard-link count: {relative}")
+            observer = self._content_read_observer.get()
+            if observer is not None:
+                observer.append(relative)
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(descriptor)
+
     def tracked_changed_paths(self) -> list[str]:
         output = self.git(["diff", "--name-only", "HEAD", "--"]).stdout
         return sorted(line for line in output.splitlines() if line)
@@ -159,14 +249,9 @@ class RepositoryInspector:
                 ".factory/conveyor-state.json",
             } or relative.startswith(".factory/runtime/"):
                 continue
-            candidate = (self.root / relative).resolve()
-            try:
-                candidate.relative_to(self.root)
-            except ValueError as exc:
-                raise RepositoryError("untracked path escapes the registered repository") from exc
-            if not candidate.is_file():
-                raise RepositoryError(f"untracked planning path is not a regular file: {relative}")
-            hashes[relative] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+            payload = self.safe_worktree_file_bytes(relative)
+            assert payload is not None
+            hashes[relative] = hashlib.sha256(payload).hexdigest()
         return dict(sorted(hashes.items()))
 
     def stage_planning_paths(self, paths: list[str], *, commit_subject: str) -> None:

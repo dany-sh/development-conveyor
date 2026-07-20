@@ -30,7 +30,9 @@ class ObservingLauncher(SyntheticLauncher):
         self.event_states_at_feature_launch: list[tuple[str | None, str | None]] = []
         self.reservation_at_feature_launch = False
 
-    def launch(self, request):
+    def launch(self, request, on_session_started=None):
+        if on_session_started is not None:
+            on_session_started(f"session-{len(self.actions) + 1}")
         if request.action == "feature_cycle":
             assert self.engine is not None
             document = self.engine.load_project_state(request.project)
@@ -46,7 +48,7 @@ class ObservingLauncher(SyntheticLauncher):
                     self.event_states_at_feature_launch.append(
                         (event.get("previous_state"), event.get("next_state"))
                     )
-        return super().launch(request)
+        return super().launch(request, on_session_started=None)
 
 
 class ContentionLauncher(SyntheticLauncher):
@@ -56,7 +58,9 @@ class ContentionLauncher(SyntheticLauncher):
         self.competitor_result = None
         self.competitor_wrote_state = None
 
-    def launch(self, request):
+    def launch(self, request, on_session_started=None):
+        if on_session_started is not None:
+            on_session_started(f"session-{len(self.actions) + 1}")
         if request.action == "feature_cycle" and self.competitor_result is None:
             assert self.competitor is not None
             project_path = self.competitor.project_state_path(request.project)
@@ -65,7 +69,7 @@ class ContentionLauncher(SyntheticLauncher):
             self.competitor_result = self.competitor.run_project(request.project, "one_feature")
             after = (project_path.read_bytes(), cycle_path.read_bytes())
             self.competitor_wrote_state = before != after
-        return super().launch(request)
+        return super().launch(request, on_session_started=None)
 
 
 class StartupReconciliationTests(unittest.TestCase):
@@ -148,11 +152,13 @@ class StartupReconciliationTests(unittest.TestCase):
             self._persist_state(engine, project, "milestone_gate")
             result = engine.run_project(project, "one_feature")
             self.assertEqual(result["outcome"], "one_feature_integrated")
-            self.assertEqual(launcher.state_at_feature_launch, "feature_running")
+            # Compatibility state remains at the last completed kernel
+            # projection until the feature transaction terminalizes.
+            self.assertEqual(launcher.state_at_feature_launch, "feature_ready")
             self.assertTrue(launcher.reservation_at_feature_launch)
             self.assertIn(("milestone_gate", "queue_reconciliation"), launcher.event_states_at_feature_launch)
             self.assertIn(("queue_reconciliation", "feature_ready"), launcher.event_states_at_feature_launch)
-            self.assertIn(("feature_ready", "feature_running"), launcher.event_states_at_feature_launch)
+            self.assertNotIn(("feature_ready", "feature_running"), launcher.event_states_at_feature_launch)
 
     def test_competing_controller_cannot_write_during_feature_execution(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -165,7 +171,7 @@ class StartupReconciliationTests(unittest.TestCase):
             self._persist_state(engine, project, "milestone_gate")
             result = engine.run_project(project, "one_feature")
             self.assertEqual(result["outcome"], "one_feature_integrated")
-            self.assertEqual(launcher.competitor_result["outcome"], "writer_locked")
+            self.assertEqual(launcher.competitor_result["outcome"], "kernel_recovery_required")
             self.assertFalse(launcher.competitor_wrote_state)
             self.assertEqual(git(repository, "branch", "--show-current"), project.milestone_branch)
 
@@ -357,8 +363,8 @@ class StartupReconciliationTests(unittest.TestCase):
             self.assertEqual(result["outcome"], "state_repaired")
             self.assertEqual(result["current_state"], "feature_ready")
             self.assertEqual(result["selected_feature"], "F001")
-            repeated = engine.run_project(project, "resume")
-            self.assertEqual(repeated["outcome"], "no_active_cycle")
+            repeated = engine.run_project(project, "resume", dry_run=True)
+            self.assertEqual(repeated["proposed_next_action"], "feature_cycle")
 
     def test_live_controller_reservation_prevents_racing_repair(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -439,12 +445,8 @@ class StartupReconciliationTests(unittest.TestCase):
                 last_accepted_feature="F001 Synthetic Feature",
                 last_accepted_commit=result["accepted_commit"],
             )
-            queue_path = repository / project.queue_location
-            queue = json.loads(queue_path.read_text(encoding="utf-8"))
-            queue["features"][0]["accepted_commit"] = result["accepted_commit"]
-            write_json(queue_path, queue)
-            git(repository, "add", project.queue_location)
-            git(repository, "commit", "-m", "test: canonicalize accepted commit evidence")
+            # The kernel integration transaction already canonicalizes accepted
+            # commit evidence; no compatibility-only follow-up commit is needed.
             document = engine.load_project_state(project)
             document.update({"current_state": "feature_running", "current_feature": "F001"})
             engine.project_store.write(engine.project_state_path(project), document)

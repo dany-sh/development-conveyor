@@ -330,3 +330,120 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `queue_reconciliation_finalization_repair`
 - Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-20T08:42:00+00:00
+
+- Agent role: `feature-worker`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_transactional_workflow_kernel`
+- Safety and autonomy contracts unchanged: `true`
+
+### M1 transactional workflow kernel focused validation — 2026-07-20
+
+- Cutover: all eight writable workflow types use `WorkflowKernel`; feature and integration commits are kernel-owned, feature acceptance is a distinct exact-commit transaction, and duplicate integration fails before mutation.
+- Durable side effects: compatibility materialization records a deterministic pending descriptor before terminal evidence, replays after interruption while unacknowledged, and appends one acknowledgment after idempotent persistence. A real child-process death after human-resolution terminal evidence recovered and materialized without a duplicate terminal.
+- Filesystem safety: mutation paths reject symbolic links, non-regular files, and unsafe hard-link counts before session launch and at finalization. Projection cache and recovered-lease archive paths are controller-confined and reject symbolic-link or hard-link targets without changing external sentinels.
+- Lease identity: kernel revalidation exact-matches lease type and ID, repository identity/path/fingerprint, project, milestone, feature, branch, HEAD, run, current session, mutation policy, host, PID, and process-start evidence.
+- Focused evidence: all 34 human-resolution tests passed. Seven lifecycle/security compatibility tests passed. Four security test methods passed across 14 adversarial subcases. The genuine 15-boundary cross-process recovery test passed in 44.172 seconds. The aggregate eight-workflow by fifteen-boundary simulation passed with zero failures and errors in 282.821 seconds.
+- Acceptance status: final adversarial recheck and configured broad validation remain pending. No commit, integration, default-branch merge, push, tag, publication, deployment, or release was performed.
+
+### M1 direct-coverage closure — 2026-07-20
+
+- Starting-HEAD invariant: a same-branch external commit after validation is rejected before kernel staging. The test proves the advanced HEAD and empty staged diff remain unchanged, the ledger sequence does not advance, and neither `CommitFinalized` nor successful terminal evidence appears.
+- Interruption projection: after a real feature-execution `after_commit` interruption and recovery, the rebuilt projection exactly matches the persisted cache and returned projection, has no active transaction, binds the ledger sequence and fingerprint, validates its own projection fingerprint, and retains the exact accepted and integrated commits in historical integration evidence.
+- Prohibited actions: the common subprocess authority now offers scoped privacy-safe observation before validation. Focused evidence observes and rejects push, tag, deploy, publish, release, and notarize categories; other destructive Git operations remain rejected separately.
+- Traceability: requirements 18, 20, 21, 36, and 57 now cite direct kernel, recovery, projection, and common-authority evidence.
+- Focused validation: `python3 -m compileall -q src tests` and six selected unittest methods passed in 12.169 seconds. Broad configured gates remain deferred until the final adversarial coverage recheck.
+
+### M1 final-blocker repair — 2026-07-20
+
+- Canonical continuation: completed ledger projection is authoritative for status, planning, run, and resume. Post-migration Case Manager routes to a fresh kernel feature transaction for P0-003; Interview Companion routes to a fresh kernel integration transaction for F005. The writable legacy SessionRequest/direct-reconciliation resume body was removed, and terminal legacy adapter replay returns without invoking its mutation again.
+- Recovery and migration: `CommitFinalized` accepted-commit evidence survives finalization-incomplete recovery; migration resolves only the configured active milestone and rejects multiple active integration candidates; exact stale-lease proof supports idempotent recovery at lease, terminal, release, and projection boundaries; and ledger reads repair only the exact complete-one-record-ahead JSONL versus durable-head crash shape.
+- Filesystem and gate safety: authorized mutation paths are descriptor-opened and validated as confined, regular, non-symlink, single-link files before any content read. Human terminals require one safe unique gate ID with exact fingerprint-bound resolution evidence. Milestone gates authorize only explicit gate documentation paths and execute adapter and required-command arrays pinned before launch.
+- Focused evidence: the five resume/gate compatibility methods passed in 18.188 seconds. The compact blocker set produced nine substantive passes in 30.522 seconds; its sole invocation error was an incorrect unittest class qualifier, and the exact ledger method passed immediately under the correct class in 0.039 seconds. `LedgerTests.test_legacy_terminal_replay_does_not_repeat_mutation` passed in 0.199 seconds.
+- Status: M1-001 remains `in_progress`. Final adversarial recheck, configured broad validation, content audit, acceptance metadata, and the immutable feature commit remain pending. No commit, integration, default-branch merge, push, tag, publication, deployment, or release was performed.
+
+### M1 final-review closure — 2026-07-20
+
+- Resolvable gates: `WorkflowKernel.block` is the single authoritative normalization boundary for human terminals. It derives a deterministic unique gate ID and binds the exact transaction ID, project ID, repository identity, repository path fingerprint, workflow type, nonempty classification/reason, and `queue_reconciliation` approved continuation before ledger or compatibility-cache persistence.
+- Exact dirty recovery: a recovery transaction may observe only the exact dirty baseline authorized by the target transaction's immutable path and diff fingerprints. Matching baseline dirt is zero recovery-owned mutation and is never staged or committed by recovery. Any branch, HEAD, queue, tracked-diff, untracked-file, or content/path drift after the recovery snapshot fails closed. Continuation reacquires the original typed lease with its exact last bound session identity.
+- Command safety: adapter-pinned build, test, lint, package, and validation argument arrays pass through `SafetyPolicy.validate_configured_command` before process launch. The policy records the common privacy-safe observation, confines execution to the registered repository, rejects prohibited release/publication/deployment/notarization tokens, rejects shell `-c` indirection, and limits configured Git to read-only operations.
+- Focused validation: five production methods passed in 13.263 seconds: production CLI clean/dirty/validated/failure recovery, unexpected dirty-baseline drift rejection, exact human-gate identity, prohibited configured-command pre-launch rejection, and milestone-gate command pinning/authority.
+- Status: M1-001 remains `in_progress`; final reviewer confirmation and configured broad gates are pending. No commit, integration, merge, push, tag, publication, deployment, or release was performed.
+
+### M1 exact-dirty recovery window closure — 2026-07-20
+
+- Durable plan binding: exact-dirty inspection returns the immutable mutation-boundary paths and content fingerprint together with the original starting branch and HEAD. After stale-lease takeover, recovery revalidates all four values immediately before beginning or snapshotting its observation-only transaction; mismatch releases the preacquired recovery lease and records no recovery transaction, commit, or terminal.
+- No boundary replacement: each transaction may append exactly one `ChangesDetected` event. Validation and finalization independently compare current paths and content fingerprint to that original durable boundary. Restored execution cannot append a replacement fingerprint or bless drift discovered after recovery.
+- Focused evidence: production CLI clean, dirty, validated, and terminal-failure recovery plus pre- and post-observation drift negatives passed together as three methods in 15.604 seconds. `test_restored_validation_rejects_durable_boundary_drift_without_replacement` passed separately in 3.162 seconds and proves the original boundary remains singular with no recovered feature commit or terminal.
+- Status: M1-001 remains `in_progress`; no commit, integration, merge, push, tag, publication, deployment, or release was performed.
+
+### M1 clean-commit recovery scope correction — 2026-07-20
+
+- Scope correction: observation-only dirty mode now requires both a `resume` recovery classification and a currently dirty worktree with durable exact paths and fingerprint. `commit_succeeded_before_evidence` may carry changed commit paths while its worktree is clean; it stays on the clean recovery path and is authorized only by exact commit, ancestry, patch, and accepted-commit evidence.
+- Focused evidence: `test_integration_after_commit_recovery_preserves_exact_accepted_commit`, `test_interruption_rebuilds_exact_projection_and_cache_evidence`, the production CLI clean/dirty/validated/failure matrix, both pre/post-observation drift negatives, and the restored durable-boundary no-replacement test passed 6/6 in 51.685 seconds.
+- Status: M1-001 remains `in_progress`; no commit, integration, merge, push, tag, publication, deployment, or release was performed.
+
+### M1 clean takeover-window cleanup — 2026-07-20
+
+- Clean baseline revalidation: `commit_succeeded_before_evidence` recovery now pins and rechecks the observed branch, HEAD, clean worktree, exact commit paths, and content or patch fingerprint after takeover and before a recovery transaction begins.
+- Prestart cleanup: revalidation, kernel begin, typed lease acquisition, and snapshot capture are enclosed by one failure cleanup. If any step fails, a matching preacquired recovery lease is released even when no durable recovery transaction exists yet.
+- Focused evidence: the prior six clean/dirty recovery closure tests plus `test_clean_commit_recovery_rejects_before_lease_drift_and_releases_lease` passed 7/7 in 58.485 seconds. The new negative mutates the worktree at `before_lease`, then proves rejection, no recovery commit or terminal, and no residual physical writer lease.
+- Status: M1-001 remains `in_progress`; no commit, integration, merge, push, tag, publication, deployment, or release was performed.
+
+### Model execution — 2026-07-20T16:59:19+00:00
+
+- Agent role: `repository-explorer`
+- Effective model: `gpt-5.6-terra`
+- Effective reasoning effort: `medium`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_repository_evidence_map`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-20T16:59:19+00:00
+
+- Agent role: `test-engineer`
+- Effective model: `gpt-5.6-terra`
+- Effective reasoning effort: `high`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_test_traceability_and_validation`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-20T16:59:19+00:00
+
+- Agent role: `product-architect`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `xhigh`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_architecture_contract_review`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-20T16:59:19+00:00
+
+- Agent role: `adversarial-reviewer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `xhigh`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_final_adversarial_acceptance`
+- Safety and autonomy contracts unchanged: `true`
+
+### M1-001 final acceptance evidence — 2026-07-20
+
+- Acceptance: M1-001 is `accepted` on `codex/m1-transactional-workflow-kernel`; the queue uses `accepted_commit: SELF`, `integration_status: pending`, and `integrated_commit: null`. Milestone M1 remains `active`, its integration branch is unchanged, and its human gate remains required.
+- Configured validation: `python3 -m compileall src scripts` passed. `python3 -m unittest discover -s tests -q` passed `357/357` in `982.076s`. `python3 -m pytest` passed `357/357` in `1045.87s` in a disposable isolated environment. `scripts/conveyor validate-config` passed with two valid registered projects. The temporary pytest environment was moved to Trash after validation.
+- Lifecycle simulation: the twenty-feature milestone completed with 20 unique accepted commits and 20 integrations, no duplicate commit or integration, no conflicting terminal, stale lease, prohibited Git command, push, release, deployment, tag, remote, or default-branch movement. The complete eight-workflow by fifteen-boundary matrix passed all 120 cases with one terminal per transaction, no stale lease, no duplicate commit or integration, no conflicting terminal, and an unchanged default branch.
+- Real consistency: Case Manager and Interview Companion each returned `RECOVERABLE_INCONSISTENCY` solely because the canonical ledger has not yet been imported (`ledger_integrity`; migration required). Every other invariant passed, including Case Manager's configured `P0` alias resolving to queue milestone `phase-0` for projected feature P0-003.
+- Exact Case Manager projection: `current_state=feature_ready`, `current_feature=P0-003`, `allowed_next_action=feature_cycle`, `milestone=phase-0`, `milestone_branch=codex/p0-foundation`, `selected_feature_starting_commit=f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0`, and `old_session_resume=false`.
+- Exact Interview Companion projection: `current_state=integration_ready`, `current_feature=F005`, `accepted_feature_commit=a1f2c8dd47aaa68580cd7dfc3dc6923e04469857`, `allowed_next_action=milestone_integration`, `feature_branch=codex/F005-persistent-data-store`, `milestone_branch=codex/m0-foundation`, `selected_feature_starting_commit=e07d8803fbe56bbbfb7430aeb19e888f3d7d06a7`, `old_session_resume=false`, and `session_resume_eligible=false`.
+- Migration safety: both application migrations were dry-run plans only. Neither was applied; both reported `application_repository_written=false` and no application Git mutations.
+- Application isolation: the final pre/post snapshots for both registered applications matched exactly across HEAD, tree, refs, status, worktrees, index, writer and index locks, active Git operations, and the absence of controller ledger and projection-cache files. No application repository file, ref, branch, commit, staging semantic, worktree status, lock, controller ledger, or controller cache was changed by acceptance validation.
+- Transparency: earlier in the run, ordinary read-only `git status` refreshed `.git/index` stat-cache bytes relative to the user's starting snapshot. No tracked content, refs, staging semantics, worktree status, or application behavior changed.
+- Content audit: the deterministic profile-aware audit initially flagged a token-shaped redaction fixture. The fixture was replaced with a non-credential Authorization-header placeholder while preserving the test's purpose; the focused unittest and pytest checks passed, and the final audit reported no secret, sensitive-data, binary, destructive-operation, or other hard gate.
+- Final adversarial acceptance: `0 Critical`, `0 High`, and `0 Medium` findings remain. No commit, milestone integration, default-branch merge, push, force-push, tag, publication, deployment, release, or application production-code mutation was performed.

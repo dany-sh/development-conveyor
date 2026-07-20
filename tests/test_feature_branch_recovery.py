@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from development_conveyor.cycle_engine import CycleEngine
-from development_conveyor.errors import RecoveryError
+from development_conveyor.errors import RecoveryError, SessionError
 from development_conveyor.recovery import assess_recovery
 from development_conveyor.repository import RepositoryInspector
 from development_conveyor.sessions import SessionPlan, SessionResult
@@ -18,16 +18,19 @@ class SuccessfulNoEvidenceLauncher:
         self.requests = []
         self.mutate = mutate
 
-    def launch(self, request):
+    def launch(self, request, on_session_started=None):
         self.actions.append(request.action)
         self.requests.append(request)
+        session_id = request.session_id or "normal-session"
+        if on_session_started is not None:
+            on_session_started(session_id)
         if self.mutate:
             self.mutate(request)
         plan = SessionPlan(
             ("codex", "exec"), request.project.repository, "synthetic", "0" * 64,
             "workspace-write",
         )
-        return SessionResult(request.action, 0, request.session_id or "normal-session", "done", plan)
+        return SessionResult(request.action, 0, session_id, "done", plan)
 
 
 class FeatureBranchRecoveryTests(unittest.TestCase):
@@ -79,10 +82,13 @@ class FeatureBranchRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             repository, project = synthetic_repository(Path(temporary))
             engine = CycleEngine(controller_configuration(Path(temporary), project), SuccessfulNoEvidenceLauncher())
-            with self.assertRaisesRegex(RecoveryError, "session_claimed_completion_without_evidence"):
+            # Typed feature execution rejects a zero-exit result without the
+            # required final transaction envelope.
+            with self.assertRaises(SessionError):
                 engine.run_project(project, "one_feature")
             state = engine.cycle_store.read(RepositoryInspector(repository).cycle_state_path())
-            self.assertEqual(state["session_completion_classification"], "session_claimed_completion_without_evidence")
+            self.assertEqual(state["current_phase"], "human_decision_required")
+            self.assertIsNone(state["accepted_feature_commit"])
 
     def test_04_dirty_worktree_after_success_is_uncommitted_feature_work(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -94,10 +100,11 @@ class FeatureBranchRecoveryTests(unittest.TestCase):
                 path.write_text(path.read_text(encoding="utf-8") + "partial\n", encoding="utf-8")
 
             engine = CycleEngine(controller_configuration(root, project), SuccessfulNoEvidenceLauncher(mutate))
-            with self.assertRaisesRegex(RecoveryError, "uncommitted_feature_work"):
+            with self.assertRaises(SessionError):
                 engine.run_project(project, "one_feature")
             state = engine.cycle_store.read(RepositoryInspector(repository).cycle_state_path())
-            self.assertEqual(state["session_completion_classification"], "uncommitted_feature_work")
+            self.assertEqual(state["current_phase"], "human_decision_required")
+            self.assertIn("partial", (repository / "app.txt").read_text(encoding="utf-8"))
 
     def test_05_absent_writer_lease_has_explicit_resume_plan(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -159,9 +166,12 @@ class FeatureBranchRecoveryTests(unittest.TestCase):
 
             launcher = SuccessfulNoEvidenceLauncher(verify_lease)
             engine.launcher = launcher
-            with self.assertRaises(RecoveryError):
-                engine.resume_project(project)
-            self.assertEqual(launcher.actions, ["feature_cycle"])
+            # Legacy cycle JSON has no exact kernel transaction and therefore
+            # cannot authorize a writable continuation.
+            result = engine.resume_project(project)
+            self.assertEqual(result["outcome"], "human_decision_required")
+            self.assertTrue(result["legacy_resume_blocked"])
+            self.assertEqual(launcher.actions, [])
 
     def test_12_same_session_continues_only_after_branch_and_lock_verification(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -170,11 +180,10 @@ class FeatureBranchRecoveryTests(unittest.TestCase):
             engine.recover_feature_branch(project, dry_run=False)
             launcher = SuccessfulNoEvidenceLauncher()
             engine.launcher = launcher
-            with self.assertRaises(RecoveryError):
-                engine.resume_project(project)
-            request = launcher.requests[0]
-            self.assertEqual(request.session_id, "completed-session")
-            self.assertEqual(request.continuation_reason, "uncorroborated_completion")
+            result = engine.resume_project(project)
+            self.assertEqual(result["outcome"], "human_decision_required")
+            self.assertTrue(result["legacy_resume_blocked"])
+            self.assertEqual(launcher.requests, [])
 
     def test_13_integration_is_not_launched_without_accepted_commit(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -182,7 +191,7 @@ class FeatureBranchRecoveryTests(unittest.TestCase):
             _, project = synthetic_repository(root)
             launcher = SuccessfulNoEvidenceLauncher()
             engine = CycleEngine(controller_configuration(root, project), launcher)
-            with self.assertRaises(RecoveryError):
+            with self.assertRaises(SessionError):
                 engine.run_project(project, "one_feature")
             self.assertEqual(launcher.actions, ["feature_cycle"])
 
@@ -224,7 +233,7 @@ class FeatureBranchRecoveryTests(unittest.TestCase):
             engine = CycleEngine(
                 controller_configuration(root, project), SuccessfulNoEvidenceLauncher(commit_queue_only)
             )
-            with self.assertRaisesRegex(RecoveryError, "session_claimed_completion_without_evidence"):
+            with self.assertRaises(SessionError):
                 engine.run_project(project, "one_feature")
             state = engine.cycle_store.read(RepositoryInspector(repository).cycle_state_path())
             self.assertIsNone(state["accepted_feature_commit"])
@@ -248,10 +257,10 @@ class FeatureBranchRecoveryTests(unittest.TestCase):
             engine = CycleEngine(
                 controller_configuration(root, project), SuccessfulNoEvidenceLauncher(invalidate_queue)
             )
-            with self.assertRaisesRegex(RecoveryError, "queue_evidence_missing"):
+            with self.assertRaises(SessionError):
                 engine.run_project(project, "one_feature")
             state = engine.cycle_store.read(RepositoryInspector(repository).cycle_state_path())
-            self.assertEqual(state["session_completion_classification"], "queue_evidence_missing")
+            self.assertEqual(state["current_phase"], "human_decision_required")
 
 
 if __name__ == "__main__":

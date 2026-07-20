@@ -59,12 +59,33 @@ class MutatingLauncher:
         self.mutation = mutation
         self.lease_at_launch = None
 
-    def launch(self, request):
+    def launch(self, request, on_session_started=None):
+        if on_session_started is not None:
+            on_session_started(SESSION_ID)
         lock = request.project.repository / ".factory/locks/writer.json"
         self.lease_at_launch = json.loads(lock.read_text(encoding="utf-8"))
         self.mutation(request.project.repository, request.project.queue_location)
         queue = json.loads((request.project.repository / request.project.queue_location).read_text())
         value, output = assistant_result("reconciled_ready_work", len(queue["features"]))
+        structured = {
+            "schema_version": 1,
+            "workflow_type": "queue_reconciliation",
+            "classification": "RECONCILED_READY_WORK",
+            "project_id": request.project.project_id,
+            "repository_identity": request.repository_identity,
+            "transaction_id": request.transaction_id,
+            "run_id": request.run_id,
+            "session_id": SESSION_ID,
+            "starting_branch": request.starting_branch,
+            "starting_commit": request.starting_commit,
+            "current_commit": request.starting_commit,
+            "feature_id": None,
+            "changed_paths": sorted(
+                RepositoryInspector(request.project.repository).tracked_changed_paths()
+            ),
+            "evidence": value,
+            "next_state": "feature_ready",
+        }
         plan = SessionPlan(
             ("codex", "exec"), request.project.repository, "synthetic", "0" * 64,
             "workspace-write",
@@ -76,9 +97,10 @@ class MutatingLauncher:
             output,
             plan,
             redacted_stdout=output,
-            structured_result=value,
+            structured_result=structured,
             structured_output_validation="valid",
-            result_classification="reconciled_ready_work",
+            result_classification="RECONCILED_READY_WORK",
+            transaction_envelope=structured,
         )
 
 
@@ -216,7 +238,9 @@ class PlanningTransactionTests(unittest.TestCase):
             result = engine._execute_queue_reconciliation(project, "one_feature", RUN_ID, state)
             commit = result["planning_result_commit"]
             self.assertEqual(RepositoryInspector(repository).changed_paths(commit), ["docs/FEATURE_QUEUE.yaml"])
-            self.assertEqual(RepositoryInspector(repository).commit_subject(commit), "factory: reconcile M0 queue and ready F001")
+            # Kernel planning commits describe the exact phase mutation; feature
+            # selection remains projection evidence rather than commit-message authority.
+            self.assertEqual(RepositoryInspector(repository).commit_subject(commit), "factory: reconcile M0 queue")
             self.assertTrue(RepositoryInspector(repository).is_clean)
 
     def test_03_unauthorized_production_change_rejects_finalization_and_preserves_bytes(self):

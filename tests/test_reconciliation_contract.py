@@ -50,8 +50,11 @@ class ContractLauncher:
     def plan(self, request):
         return SessionPlan(("codex", "exec"), request.project.repository, "synthetic", "0" * 64, "read-only")
 
-    def launch(self, request):
+    def launch(self, request, on_session_started=None):
         self.actions.append(request.action)
+        session_id = "synthetic-session"
+        if on_session_started is not None:
+            on_session_started(session_id)
         if self.mutate_status:
             queue_path = request.project.repository / request.project.queue_location
             document = json.loads(queue_path.read_text())
@@ -61,19 +64,46 @@ class ContractLauncher:
             self.classification,
             human={"question": "Synthetic decision"} if self.classification == "human_decision_required" else None,
         )
+        canonical, next_state = {
+            "reconciled_ready_work": ("RECONCILED_READY_WORK", "feature_ready"),
+            "reconciled_no_ready_work": ("RECONCILED_NO_READY_WORK", "paused"),
+            "legitimately_blocked": ("RECONCILED_NO_READY_WORK", "paused"),
+            "milestone_complete": ("MILESTONE_COMPLETE", "milestone_gate"),
+            "human_decision_required": ("HUMAN_DECISION_REQUIRED", "human_decision_required"),
+        }.get(self.classification, (self.classification, "validation_failed"))
+        structured = {
+            "schema_version": 1,
+            "workflow_type": "queue_reconciliation",
+            "classification": canonical,
+            "project_id": request.project.project_id,
+            "repository_identity": request.repository_identity,
+            "transaction_id": request.transaction_id,
+            "run_id": request.run_id,
+            "session_id": session_id,
+            "starting_branch": request.starting_branch,
+            "starting_commit": request.starting_commit,
+            "current_commit": request.starting_commit,
+            "feature_id": None,
+            "changed_paths": sorted(
+                RepositoryInspector(request.project.repository).tracked_changed_paths()
+            ),
+            "evidence": value,
+            "next_state": next_state,
+        }
         plan = self.plan(request)
         return SessionResult(
             request.action,
             self.returncode,
-            "synthetic-session",
+            session_id,
             "synthetic",
             plan,
             redacted_stdout=assistant_event(
                 "CONVEYOR_RESULT=" + json.dumps(value, separators=(",", ":"))
             ),
-            structured_result=value,
+            structured_result=structured,
             structured_output_validation="valid",
-            result_classification=self.classification,
+            result_classification=canonical,
+            transaction_envelope=structured,
         )
 
 
@@ -81,9 +111,11 @@ class FailingThenNoReadyLauncher(ContractLauncher):
     def __init__(self):
         super().__init__("reconciled_no_ready_work")
 
-    def launch(self, request):
+    def launch(self, request, on_session_started=None):
         if not self.actions:
             self.actions.append(request.action)
+            if on_session_started is not None:
+                on_session_started("synthetic-session")
             plan = self.plan(request)
             return SessionResult(
                 request.action,
@@ -101,7 +133,7 @@ class FailingThenNoReadyLauncher(ContractLauncher):
                 remediation_action="rerun with the structured output contract emphasized",
                 retry_evidence="the result failed JSON validation",
             )
-        return super().launch(request)
+        return super().launch(request, on_session_started=on_session_started)
 
 
 class ReconciliationContractTests(unittest.TestCase):
@@ -246,8 +278,10 @@ class ReconciliationContractTests(unittest.TestCase):
 
     def test_14_legitimately_blocked_result(self):
         with tempfile.TemporaryDirectory() as temporary:
-            *_, result = self._execute(Path(temporary), "blocked", "legitimately_blocked")
-            self.assertEqual(result["next_state"], "paused")
+            # The typed queue contract has no legacy `legitimately_blocked`
+            # terminal; relabeling it as no-ready must fail semantic agreement.
+            with self.assertRaisesRegex(SessionError, "contradicts deterministic queue classification"):
+                self._execute(Path(temporary), "blocked", "legitimately_blocked")
 
     def test_15_nonzero_human_decision_is_classified_not_retried(self):
         with tempfile.TemporaryDirectory() as temporary:

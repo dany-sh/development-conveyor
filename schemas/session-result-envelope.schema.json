@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-result-envelope.schema.json",
+  "type": "object",
+  "required": ["schema_version", "workflow_type", "classification", "project_id", "repository_identity", "transaction_id", "run_id", "session_id", "starting_branch", "starting_commit", "current_commit", "changed_paths", "evidence", "next_state"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "workflow_type": {"type": "string"},
+    "classification": {"type": "string", "minLength": 1},
+    "project_id": {"type": "string", "minLength": 1},
+    "repository_identity": {"type": "string", "minLength": 1},
+    "transaction_id": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "session_id": {"type": "string", "minLength": 1},
+    "starting_branch": {"type": "string", "minLength": 1},
+    "starting_commit": {"type": "string", "minLength": 1},
+    "current_commit": {"type": "string", "minLength": 1},
+    "feature_id": {"type": ["string", "null"]},
+    "changed_paths": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "evidence": {"type": "object"},
+    "next_state": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": false
+}

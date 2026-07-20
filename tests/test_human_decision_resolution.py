@@ -21,6 +21,8 @@ from development_conveyor.locks import DurableLock, make_lock_record
 from development_conveyor.logging import run_event
 from development_conveyor.registry import ProjectRegistry
 from development_conveyor.repository import RepositoryInspector
+from development_conveyor.ledger import EvidenceLedger
+from development_conveyor.projection import ProjectionEngine
 
 from tests.helpers import controller_configuration, git, synthetic_repository, write_json
 
@@ -276,6 +278,25 @@ class HumanDecisionResolutionTests(unittest.TestCase):
             state = engine.load_project_state(project)
             self.assertEqual(state["current_state"], "queue_reconciliation")
             self.assertIsNone(state["human_decision_required"])
+            identity = RepositoryInspector(project.repository).identity()
+            state_root = engine.root / "state/projects" / project.project_id
+            ledger = EvidenceLedger(
+                state_root / "evidence-ledger.jsonl", project_id=project.project_id,
+                repository_identity=identity["repository_id"],
+                repository_path_fingerprint=identity["path_fingerprint"],
+            )
+            resolved = [
+                event for event in ledger.read()
+                if event["event_type"] == "HumanGateResolved"
+            ]
+            self.assertEqual(1, len(resolved))
+            self.assertEqual(
+                project.human_decision_gate["gate_id"], resolved[0]["payload"]["gate_id"]
+            )
+            projection = ProjectionEngine(
+                ledger, state_root / "projection-cache.json"
+            ).rebuild(persist_cache=False)
+            self.assertIsNone(projection["human_gate"])
 
     def test_15_original_gate_preserved_as_history(self):
         with tempfile.TemporaryDirectory() as temporary:

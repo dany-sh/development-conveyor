@@ -1,0 +1,36 @@
+# Architecture
+
+## System context
+
+Development Conveyor is a Python standard-library controller. It reads registered repositories, launches repository-scoped Codex sessions, and owns controller evidence. Each application repository remains an isolation boundary and exposes only its adapter, queue, Git state, runtime evidence, and shared writer lease.
+
+## Components and data flow
+
+The transactional path is:
+
+```text
+CLI -> phase adapter -> WorkflowKernel -> typed writer lease
+                         |       |
+                         |       +-> exact Git/snapshot/command validation
+                         +-> append-only evidence ledger -> ProjectionEngine -> cache
+```
+
+`PhaseTransaction` supplies one lifecycle for queue reconciliation, feature preparation, feature execution, feature acceptance, milestone integration, milestone gate, human-decision resolution, and recovery. `EvidenceLedger` is canonical JSONL with monotonic sequence numbers, per-record SHA-256 fingerprints, and a previous-fingerprint chain. `ProjectionEngine` rebuilds current state from the ledger; the JSON projection is a disposable cache bound to the ledger sequence, ledger fingerprint, and its own content fingerprint.
+
+`WorkflowWriterLease` is the sole typed repository writer lease. It binds and revalidates repository and path identity, project, transaction and lease identity, workflow and lease type, milestone, feature, branch, HEAD, run, current session, process start, host, and mutation policy. Lease and mutation targets reject symbolic links, non-regular files, and unsafe hard-link counts. `DurableLock` remains only a controller launch reservation.
+
+The `KernelWorkflowBridge` is phase-sized. Its handler may produce mutations and typed evidence, but the kernel owns validation, final commit, terminal event, lease release, and projection. Compatibility materialization intent is recorded before terminal evidence. The deterministic callback remains replayable while that intent is unacknowledged, including after recovery, and a post-terminal append-only acknowledgment is permitted only after idempotent materialization succeeds.
+
+Recovery first inspects immutable evidence and exact repository state. It can resume, finalize one already-created exact commit, supersede an interrupted recovery, block, or require a human decision. Stale lease archives use safe transaction identities, a controller-confined directory, no-follow descriptor access, and reject unsafe archive roots or targets. Migration imports legacy source bytes by fingerprint into a deterministic recovery transaction; dry-run never writes, and apply is idempotent.
+
+## Constraints
+
+- Production code uses only the Python standard library.
+- Subprocesses use argument arrays with `shell=False`.
+- Tests mutate only disposable synthetic repositories.
+- No workflow may merge the default branch, push, tag, publish, deploy, release, or notarize.
+- Cache state never overrides ledger state; corrupt evidence is not auto-repaired.
+
+## Decisions
+
+See `docs/adr/0001-append-only-phase-evidence.md`.

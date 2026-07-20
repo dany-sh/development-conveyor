@@ -128,8 +128,46 @@ def validate_reconciliation_report(
     run_id: str,
     expected_session_id: str | None = None,
 ) -> dict[str, Any]:
-    parsed, marker_validation = parse_reconciliation_result(str(report.get("redacted_stdout") or ""))
     report_structured = report.get("structured_result")
+    if isinstance(report_structured, dict) and report_structured.get("workflow_type") == "queue_reconciliation":
+        canonical = report_structured.get("classification")
+        reverse = {
+            "RECONCILED_READY_WORK": "reconciled_ready_work",
+            "RECONCILED_NO_READY_WORK": "reconciled_no_ready_work",
+            "MILESTONE_COMPLETE": "milestone_complete",
+            "HUMAN_DECISION_REQUIRED": "human_decision_required",
+            "PLANNING_VALIDATION_FAILED": "invalid_queue",
+            "RETRYABLE_PLANNING_FAILURE": "session_execution_failed",
+            "TERMINAL_PLANNING_FAILURE": "session_execution_failed",
+        }
+        classification = reverse.get(canonical)
+        evidence = report_structured.get("evidence")
+        session_id = report_structured.get("session_id")
+        checks = {
+            "schema_version": report.get("schema_version") == 1,
+            "project_id": report.get("project_id") == project.project_id,
+            "run_id": report.get("run_id") == run_id,
+            "action": report.get("action") == "queue_reconciliation",
+            "working_directory": Path(str(report.get("working_directory") or "")).resolve() == project.repository.resolve(),
+            "exit_status": report.get("exit_status") == 0,
+            "typed_envelope": classification is not None,
+            "envelope_project": report_structured.get("project_id") == project.project_id,
+            "envelope_run": report_structured.get("run_id") == run_id,
+            "session_id": isinstance(session_id, str) and bool(session_id),
+            "expected_session_id": expected_session_id is None or session_id == expected_session_id,
+            "evidence": isinstance(evidence, dict),
+        }
+        if not all(checks.values()):
+            failed = ", ".join(key for key, passed in checks.items() if not passed)
+            raise RecoveryError(f"planning typed result validation failed: {failed}")
+        return {
+            "session_id": session_id,
+            "classification": classification,
+            "terminal_classification": canonical,
+            "structured_result": evidence,
+            "checks": checks,
+        }
+    parsed, marker_validation = parse_reconciliation_result(str(report.get("redacted_stdout") or ""))
     session_id = report.get("session_id")
     checks = {
         "schema_version": report.get("schema_version") == 1,
@@ -321,7 +359,9 @@ def validate_planning_changes(
         raise RecoveryError("an unfinished Git operation blocks planning finalization")
     if inspector.staged_changed_paths():
         raise RecoveryError("pre-staged changes are not part of the planning transaction")
-    changed_paths = inspector.tracked_changed_paths()
+    tracked_paths = inspector.tracked_changed_paths()
+    untracked = inspector.untracked_file_hashes()
+    changed_paths = sorted(set(tracked_paths) | set(untracked))
     if not changed_paths:
         raise RecoveryError("planning result contains no tracked changes to finalize")
     if expected_changed_paths is not None and changed_paths != sorted(expected_changed_paths):
@@ -329,10 +369,10 @@ def validate_planning_changes(
     unauthorized = [path for path in changed_paths if not allowed_planning_path(path)]
     if unauthorized:
         raise RecoveryError(f"unauthorized planning changed paths: {', '.join(unauthorized)}")
-    untracked = inspector.untracked_file_hashes()
-    if untracked:
+    unauthorized_untracked = [path for path in untracked if not allowed_planning_path(path)]
+    if unauthorized_untracked:
         raise RecoveryError(
-            "untracked files are not authorized in a planning transaction: " + ", ".join(untracked)
+            "untracked files are outside planning policy: " + ", ".join(unauthorized_untracked)
         )
     diff_fingerprint = inspector.planning_diff_fingerprint()
     if expected_diff_fingerprint is not None and diff_fingerprint != expected_diff_fingerprint:
@@ -457,7 +497,8 @@ def finalize_planning_commit(
 ) -> dict[str, Any]:
     if inspector.head != validation.get("planning_start_commit"):
         raise RecoveryError("planning HEAD changed after validation")
-    if inspector.tracked_changed_paths() != validation.get("changed_paths"):
+    observed_paths = sorted(set(inspector.tracked_changed_paths()) | set(inspector.untracked_file_hashes()))
+    if observed_paths != validation.get("changed_paths"):
         raise RecoveryError("planning paths changed after validation")
     if inspector.planning_diff_fingerprint() != validation.get("diff_fingerprint"):
         raise RecoveryError("planning diff changed after validation")

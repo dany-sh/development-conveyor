@@ -18,6 +18,8 @@ from .queue import FeatureQueue, resolve_queue_path
 from .scheduler import PortfolioScheduler
 from .sessions import SessionLauncher
 from .validation import SafetyPolicy
+from .consistency import ConsistencyChecker
+from .migration import LegacyStateMigrator
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
 
@@ -113,6 +115,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     recover_planning.add_argument("--apply", action="store_true")
     recover_planning.add_argument("--dry-run", action="store_true")
+    verify = subparsers.add_parser(
+        "verify-consistency", help="verify ledger, projection, Git, queue, lease, and legacy evidence"
+    )
+    verify.add_argument("--project", required=True)
+    verify.add_argument("--json", action="store_true", help="emit machine-readable JSON (the default output format)")
+    migrate = subparsers.add_parser(
+        "migrate-state", help="dry-run or apply deterministic legacy-evidence migration"
+    )
+    migrate.add_argument("--project", required=True)
+    mode = migrate.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
     return parser
 
 
@@ -214,6 +228,19 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
             "projects": projects,
         }
 
+    if args.command == "verify-consistency":
+        return ConsistencyChecker(
+            controller_root=controller_root,
+            project=registry.get(args.project),
+        ).check()
+
+    if args.command == "migrate-state":
+        migrator = LegacyStateMigrator(
+            controller_root=controller_root,
+            project=registry.get(args.project),
+        )
+        return migrator.apply() if args.apply else migrator.plan()
+
     if args.command == "plan":
         return engine.run_project(registry.get(args.project), "audit", dry_run=True)
 
@@ -264,6 +291,9 @@ def main(arguments: list[str] | None = None) -> int:
         return 2 if (
             result.get("launch_allowed") is False
             or result.get("outcome") == "resolution_rejected"
+            or result.get("classification") in {
+                "HUMAN_DECISION_REQUIRED", "CORRUPT_EVIDENCE", "UNSAFE_REPOSITORY_STATE"
+            }
         ) else 0
     except (ConveyorError, OSError, ValueError) as exc:
         print(f"development-conveyor: {redact_text(str(exc))}", file=sys.stderr)

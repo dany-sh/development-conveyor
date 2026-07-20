@@ -125,7 +125,7 @@ class CompatibilityGateLauncher:
     def compatibility(self, action, *, project_id=None):
         return self.result
 
-    def launch(self, request):
+    def launch(self, request, on_session_started=None):
         self.launch_count += 1
         raise AssertionError("incompatible launch must not execute")
 
@@ -151,9 +151,11 @@ class UpgradeFailureLauncher:
             f"scripts/conveyor doctor --project {project_id or 'synthetic'}",
         )
 
-    def launch(self, request):
+    def launch(self, request, on_session_started=None):
         self.actions.append(request.action)
         self.requests.append(request)
+        if on_session_started is not None:
+            on_session_started("old-session")
         plan = SessionPlan(
             ("codex", "exec"), request.project.repository, "synthetic", "0" * 64,
             "workspace-write", MODEL, REASONING, "/synthetic/codex",
@@ -201,12 +203,15 @@ class IntegrationUpgradeFailureLauncher:
             },
         )
 
-    def launch(self, request):
+    def launch(self, request, on_session_started=None):
         self.actions.append(request.action)
         plan = self._plan(request)
         if request.action == "feature_cycle":
-            SyntheticLauncher()._accept_feature(request.project)
-            return SessionResult(request.action, 0, "feature-session", "accepted", plan)
+            return SyntheticLauncher().launch(
+                request, on_session_started=on_session_started
+            )
+        if on_session_started is not None:
+            on_session_started("integration-session")
         return SessionResult(
             request.action,
             1,
@@ -412,11 +417,11 @@ class CompatibilityRepairTests(unittest.TestCase):
             class ObservingFailure(UpgradeFailureLauncher):
                 checkpoint = None
 
-                def launch(inner, request):
+                def launch(inner, request, on_session_started=None):
                     inner.checkpoint = json.loads(
                         (request.project.repository / ".factory/conveyor-state.json").read_text()
                     )
-                    return super().launch(request)
+                    return super().launch(request, on_session_started=on_session_started)
 
             launcher = ObservingFailure()
             engine = CycleEngine(controller_configuration(root, project), launcher)
@@ -509,13 +514,13 @@ class CompatibilityRepairTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "cli_upgrade_required"):
                 engine.run_project(project, "one_feature")
             cycle = engine.cycle_store.read(RepositoryInspector(repository).cycle_state_path())
-            self.assertEqual(cycle["feature_session_id"], "feature-session")
+            self.assertEqual(cycle["feature_session_id"], "session-1")
             self.assertEqual(cycle["integration_session_id"], "integration-session")
             self.assertEqual(cycle["current_phase"], "human_decision_required")
             self.assertEqual(cycle["failure_classification"], "cli_upgrade_required")
             before = list(launcher.actions)
             resumed = engine.resume_project(project)
-            self.assertEqual(resumed["outcome"], "human_decision_required")
+            self.assertEqual(resumed["outcome"], "no_exact_transaction_to_resume")
             self.assertEqual(launcher.actions, before)
 
     def test_23_superseded_cycle_is_archived_exactly_before_new_session(self):
@@ -581,12 +586,14 @@ class CompatibilityRepairTests(unittest.TestCase):
             })
             engine.project_store.write(engine.project_state_path(project), project_state)
 
-            with self.assertRaisesRegex(Exception, "cli_upgrade_required"):
-                engine.resume_project(project)
-            self.assertEqual(launcher.actions, ["milestone_integration"])
-            self.assertIsNone(launcher.requests[0].session_id)
+            # Cache-only remediation cannot launch a writable integration
+            # session after the ledger cutover.
+            result = engine.resume_project(project)
+            self.assertEqual(result["outcome"], "human_decision_required")
+            self.assertTrue(result["legacy_resume_blocked"])
+            self.assertEqual(launcher.actions, [])
             refreshed = engine.cycle_store.read(inspector.cycle_state_path())
-            self.assertEqual(refreshed["integration_session_id"], "old-session")
+            self.assertEqual(refreshed["integration_session_id"], "failed-integration-session")
             self.assertEqual(refreshed["current_phase"], "human_decision_required")
 
     def test_25_remediated_milestone_gate_uses_fresh_action_session(self):
@@ -627,12 +634,12 @@ class CompatibilityRepairTests(unittest.TestCase):
             })
             engine.project_store.write(engine.project_state_path(project), project_state)
 
-            with self.assertRaisesRegex(Exception, "cli_upgrade_required"):
-                engine.resume_project(project)
-            self.assertEqual(launcher.actions, ["milestone_gate"])
-            self.assertIsNone(launcher.requests[0].session_id)
+            result = engine.resume_project(project)
+            self.assertEqual(result["outcome"], "human_decision_required")
+            self.assertTrue(result["legacy_resume_blocked"])
+            self.assertEqual(launcher.actions, [])
             refreshed = engine.cycle_store.read(inspector.cycle_state_path())
-            self.assertEqual(refreshed["milestone_gate_session_id"], "old-session")
+            self.assertEqual(refreshed["milestone_gate_session_id"], "failed-gate-session")
             self.assertEqual(refreshed["current_phase"], "human_decision_required")
 
 

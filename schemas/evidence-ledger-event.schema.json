@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evidence-ledger-event.schema.json",
+  "type": "object",
+  "required": ["schema_version", "sequence", "event_id", "event_type", "timestamp", "project_id", "repository_identity", "repository_path_fingerprint", "transaction_id", "workflow_type", "previous_fingerprint", "fingerprint", "payload"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "sequence": {"type": "integer", "minimum": 1},
+    "event_id": {"type": "string", "minLength": 1},
+    "event_type": {"type": "string"},
+    "timestamp": {"type": "string", "minLength": 1},
+    "project_id": {"type": "string", "minLength": 1},
+    "repository_identity": {"type": "string", "minLength": 64},
+    "repository_path_fingerprint": {"type": "string", "minLength": 64},
+    "transaction_id": {"type": "string", "minLength": 1},
+    "workflow_type": {"type": "string"},
+    "previous_fingerprint": {"type": "string", "minLength": 64},
+    "fingerprint": {"type": "string", "minLength": 64},
+    "payload": {"type": "object"}
+  },
+  "additionalProperties": false
+}

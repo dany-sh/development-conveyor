@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "milestones": [
+    {
+      "id": "M1",
+      "name": "Transactional workflow kernel",
+      "status": "active",
+      "base_commit": "eb9a0198f8d1a69db2b7e4099ebd17c3bed9550b",
+      "integration_branch": "codex/m1-transactional-workflow-kernel",
+      "integrated_features": [],
+      "last_validated_commit": null,
+      "human_gate": true
+    }
+  ],
+  "features": [
+    {
+      "id": "M1-001",
+      "title": "Transactional workflow kernel and evidence ledger",
+      "status": "accepted",
+      "priority": 1,
+      "milestone": "M1",
+      "dependencies": [],
+      "spec": "docs/features/M1-001-transactional-workflow-kernel.md",
+      "acceptance_criteria": [
+        "Every writable phase uses the canonical transaction and typed lease contracts",
+        "Ledger, projection, recovery, migration, consistency, and simulation acceptance checks pass",
+        "Both registered application migrations remain read-only dry runs"
+      ],
+      "requires_human_decision": false,
+      "branch": "codex/m1-transactional-workflow-kernel",
+      "integration_base_commit": "eb9a0198f8d1a69db2b7e4099ebd17c3bed9550b",
+      "accepted_commit": "SELF",
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
+    }
+  ]
+}

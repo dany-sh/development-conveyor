@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
+import subprocess
 import uuid
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import Configuration
 from .errors import ConveyorError, LockError, QueueError, RecoveryError, SessionError
@@ -20,6 +22,9 @@ from .locks import (
     make_lock_record,
 )
 from .planning import (
+    ALLOWED_PLANNING_PREFIXES,
+    PLANNING_CLASSIFICATIONS,
+    allowed_planning_path,
     capture_planning_start,
     finalize_planning_commit,
     load_planning_transaction,
@@ -32,7 +37,7 @@ from .planning import (
 )
 from .logging import EventLogger, JsonStateStore, atomic_write_bytes, atomic_write_json, run_event, utc_now
 from .human_resolution import evaluate_human_resolution, gate_fingerprint, resolution_fingerprint
-from .queue import FeatureQueue, resolve_queue_path
+from .queue import FeatureQueue, resolve_feature_commit, resolve_queue_path
 from .recovery import (
     StartupReconciliation,
     assess_durable_integration_success,
@@ -46,6 +51,28 @@ from .repository import RepositoryInspector
 from .retries import RetryBudget
 from .sessions import SessionLauncher, SessionPlan, SessionRequest, SessionResult
 from .state_machine import CYCLE_MACHINE, PORTFOLIO_MACHINE
+from .legacy_adapter import LegacyTransitionAdapter
+from .contracts import (
+    MutationPolicy, SessionResultEnvelope, TransactionState, WorkflowType,
+    TERMINAL_STATES, fingerprint,
+)
+from .kernel import (
+    FeatureExecutionAdapter,
+    FeatureAcceptanceAdapter,
+    HumanDecisionResolutionAdapter,
+    FeaturePreparationAdapter,
+    MilestoneGateAdapter,
+    MilestoneIntegrationAdapter,
+    QueueReconciliationAdapter,
+    RecoveryAdapter,
+    WorkflowKernel,
+)
+from .ledger import EvidenceLedger
+from .projection import ProjectionEngine
+from .workflow_lease import WorkflowWriterLease
+from .command_authority import CommandAuthority
+from .workflow_recovery import RecoveryPlanner
+from .validation import SafetyPolicy
 
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 DETERMINISTIC_COMPATIBILITY_FAILURES = {
@@ -75,12 +102,304 @@ class CycleEngine:
     def project_state_path(self, project: Project) -> Path:
         return self.configuration.owned_path(self.configuration.conveyor["state_directory"]) / "projects" / f"{project.project_id}.json"
 
+    def _kernel_recovery_preflight(
+        self, project: Project, *, apply: bool
+    ) -> dict[str, Any] | None:
+        """Route incomplete M1 ledger state through the canonical recovery planner."""
+
+        inspector = RepositoryInspector(project.repository)
+        identity = inspector.identity()
+        state_root = self.root / "state/projects" / project.project_id
+        ledger_path = state_root / "evidence-ledger.jsonl"
+        if not ledger_path.exists():
+            return None
+        ledger = EvidenceLedger(
+            ledger_path, project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        projection = ProjectionEngine(ledger, state_root / "projection-cache.json")
+        lease = WorkflowWriterLease(inspector.writer_lock_path(
+            self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+        ))
+        planner = RecoveryPlanner(
+            project=project, ledger=ledger, projection=projection, lease=lease
+        )
+        plan = planner.inspect()
+        if plan.get("classification") in {"nothing_to_recover", "no_transaction"}:
+            return None
+        if not apply:
+            return {
+                "project_id": project.project_id,
+                "outcome": "kernel_recovery_required",
+                "kernel_recovery": plan,
+            }
+        if plan.get("recoverable") is not True:
+            return {
+                "project_id": project.project_id,
+                "outcome": "human_decision_required",
+                "kernel_recovery": plan,
+            }
+        applied = planner.apply()
+        if applied.get("action") == "resume_exact_transaction":
+            # Production recovery never resumes an old opaque model session.
+            # It proves and reacquires the exact transaction, then terminalizes
+            # that interrupted attempt so a subsequent command can start a
+            # fresh typed transaction without competing authorities.
+            recovered_id = str(applied["transaction_id"])
+            kernel = WorkflowKernel(
+                project=project, ledger=ledger, projection=projection, lease=lease
+            )
+            recovered = kernel.restore(recovered_id)
+            if applied.get("changed_paths") and applied.get("session_result_recorded"):
+                envelope = kernel.envelope
+                policy = recovered.allowed_mutation_policy
+                if envelope is None or not policy.commit_subject:
+                    return {
+                        "project_id": project.project_id,
+                        "outcome": "human_decision_required",
+                        "kernel_recovery": applied,
+                        "reason": "exact dirty recovery lacks typed result or commit authority",
+                    }
+                adapter_class = {
+                    WorkflowType.QUEUE_RECONCILIATION: QueueReconciliationAdapter,
+                    WorkflowType.FEATURE_EXECUTION: FeatureExecutionAdapter,
+                    WorkflowType.FEATURE_ACCEPTANCE: FeatureAcceptanceAdapter,
+                    WorkflowType.MILESTONE_INTEGRATION: MilestoneIntegrationAdapter,
+                    WorkflowType.MILESTONE_GATE: MilestoneGateAdapter,
+                    WorkflowType.HUMAN_DECISION_RESOLUTION: HumanDecisionResolutionAdapter,
+                    WorkflowType.RECOVERY: RecoveryAdapter,
+                }.get(recovered.workflow_type)
+                if adapter_class is None:
+                    return {
+                        "project_id": project.project_id,
+                        "outcome": "human_decision_required",
+                        "kernel_recovery": applied,
+                        "reason": "workflow has no deterministic dirty-recovery adapter",
+                    }
+                adapter = adapter_class(
+                    allowed_paths=policy.allowed_paths,
+                    allowed_prefixes=policy.allowed_prefixes,
+                    allow_untracked=policy.allow_untracked,
+                    commit_subject=policy.commit_subject,
+                    next_state=envelope.next_state,
+                )
+                terminal_state = adapter.terminal_state(envelope)
+                if terminal_state is not None:
+                    blocked = kernel.block(
+                        state=terminal_state,
+                        classification=envelope.classification,
+                        next_state=envelope.next_state,
+                        human_gate=envelope.evidence.get("human_decision"),
+                    )
+                    applied.update({
+                        "action": "terminalize_exact_dirty_result",
+                        "terminal_projection": blocked,
+                    })
+                    return {
+                        "project_id": project.project_id,
+                        "outcome": "kernel_recovery_applied",
+                        "kernel_recovery": applied,
+                    }
+                if recovered.current_state == TransactionState.VALIDATING:
+                    authority, commands = self._kernel_required_commands(project)
+                    kernel.validate(
+                        authority=authority, command_results=commands,
+                        semantic_validator=adapter.semantic_validate,
+                    )
+                elif recovered.current_state != TransactionState.FINALIZING:
+                    return {
+                        "project_id": project.project_id,
+                        "outcome": "human_decision_required",
+                        "kernel_recovery": applied,
+                        "reason": "dirty recovery is not at a deterministic validation boundary",
+                    }
+                commit = kernel.finalize()
+                evidence = dict(envelope.evidence)
+                if recovered.workflow_type == WorkflowType.MILESTONE_INTEGRATION:
+                    evidence.update({
+                        "accepted_feature_commit": kernel.prepared_integration_accepted_commit,
+                        "integrated_commit": commit,
+                        "integration_status": "passed",
+                    })
+                completion = kernel.complete(evidence=evidence)
+                applied.update({
+                    "action": "finalize_exact_dirty_transaction",
+                    "final_commit": commit,
+                    "terminal_projection": completion["projection"],
+                })
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "kernel_recovery_applied",
+                    "kernel_recovery": applied,
+                    "next_action": (
+                        f"scripts/conveyor run --project {project.project_id} "
+                        f"--mode {project.automation_mode}"
+                    ),
+                }
+            recovery_next_state = {
+                WorkflowType.QUEUE_RECONCILIATION: "queue_reconciliation",
+                WorkflowType.FEATURE_PREPARATION: "feature_ready",
+                WorkflowType.FEATURE_EXECUTION: "feature_ready",
+                WorkflowType.FEATURE_ACCEPTANCE: "feature_review",
+                WorkflowType.MILESTONE_INTEGRATION: "integration_pending",
+                WorkflowType.MILESTONE_GATE: "milestone_gate",
+                WorkflowType.HUMAN_DECISION_RESOLUTION: "human_decision_required",
+                WorkflowType.RECOVERY: "feature_ready",
+            }[recovered.workflow_type]
+            terminal = kernel.block(
+                state=TransactionState.SUPERSEDED,
+                classification="INTERRUPTED_TRANSACTION_SUPERSEDED",
+                next_state=recovered.next_project_state or recovery_next_state,
+                reference=applied.get("recovery_transaction_id"),
+            )
+            applied["superseded_projection"] = terminal
+            applied["action"] = "supersede_interrupted_transaction"
+        return {
+            "project_id": project.project_id,
+            "outcome": "kernel_recovery_applied",
+            "kernel_recovery": applied,
+            "next_action": (
+                f"scripts/conveyor run --project {project.project_id} "
+                f"--mode {project.automation_mode}"
+            ),
+        }
+
+    @staticmethod
+    def _configured_kernel_commands(project: Project) -> tuple[tuple[str, ...], ...]:
+        adapter_path = project.repository / ".factory/project.yaml"
+        try:
+            adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RecoveryError(f"factory adapter is unreadable for kernel validation: {exc}") from exc
+        commands: list[tuple[str, ...]] = []
+        configured = adapter.get("commands") if isinstance(adapter, dict) else None
+        for category in ("build", "test", "lint", "package", "validate"):
+            values = (configured or {}).get(category, []) if isinstance(configured, dict) else []
+            if not isinstance(values, list):
+                raise RecoveryError(f"adapter command category {category} is not an array")
+            for value in values:
+                if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+                    raise RecoveryError(f"adapter command category {category} contains an invalid argument array")
+                command = tuple(value)
+                if command not in commands:
+                    commands.append(command)
+        return tuple(commands)
+
+    @staticmethod
+    def _execute_kernel_commands(
+        project: Project, commands: tuple[tuple[str, ...], ...]
+    ) -> tuple[CommandAuthority, list[Any]]:
+        authority = CommandAuthority(configured_required=commands)
+        records = []
+        for command in commands:
+            SafetyPolicy.validate_configured_command(
+                list(command), cwd=project.repository,
+                registered_repository=project.repository,
+            )
+            result = subprocess.run(
+                list(command), cwd=project.repository, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            records.append(authority.classify(
+                command, result.returncode, configured_source=".factory/project.yaml",
+                diagnostic=(result.stderr.strip() or result.stdout.strip())[-1000:] or None,
+            ))
+        return authority, records
+
+    @staticmethod
+    def _kernel_required_commands(project: Project) -> tuple[CommandAuthority, list[Any]]:
+        return CycleEngine._execute_kernel_commands(
+            project, CycleEngine._configured_kernel_commands(project)
+        )
+
+    @staticmethod
+    def _milestone_gate_adapter(
+        project: Project, inspector: RepositoryInspector
+    ) -> tuple[MilestoneGateAdapter, tuple[str, ...]]:
+        gate_exact_paths = {
+            project.queue_location,
+            "docs/CURRENT_STATUS.md",
+            "docs/FEATURE_CATALOG.md",
+            "docs/RUN_LOG.md",
+        }
+        gate_prefixes = ("docs/milestones", "docs/releases")
+        tracked_paths = tuple(sorted(
+            path for path in inspector.git(["ls-files", "-z"]).stdout.split("\0")
+            if path and (
+                path in gate_exact_paths
+                or any(
+                    path == prefix or path.startswith(prefix + "/")
+                    for prefix in gate_prefixes
+                )
+            )
+        ))
+        return MilestoneGateAdapter(
+            allowed_paths=tracked_paths,
+            allowed_prefixes=gate_prefixes,
+            allow_untracked=True,
+            denied_paths=(".factory/project.yaml", ".factory/approved-content.yaml"),
+            denied_prefixes=(".factory", "src", "tests"),
+            commit_subject=f"factory: record {project.active_milestone} milestone gate",
+            next_state="milestone_ready_for_merge",
+        ), tracked_paths
+
+    @staticmethod
+    def _route_kernel_result(
+        kernel: WorkflowKernel, adapter: Any, envelope: SessionResultEnvelope,
+    ) -> dict[str, Any] | None:
+        """Accept one envelope and terminalize every non-success disposition."""
+
+        kernel.accept_result(envelope)
+        terminal = adapter.terminal_state(envelope)
+        if terminal is None:
+            return None
+        gate = envelope.evidence.get("human_decision") or envelope.evidence.get("gate")
+        return kernel.block(
+            state=terminal, classification=envelope.classification,
+            next_state=envelope.next_state,
+            human_gate=gate if isinstance(gate, dict) else None,
+        )
+
+    @staticmethod
+    def _terminalize_handled_kernel_failure(kernel: WorkflowKernel, adapter: Any, exc: Exception) -> None:
+        transaction = kernel.transaction
+        if transaction is None or transaction.current_state in TERMINAL_STATES or kernel.final_commit is not None:
+            return
+        record = kernel.lease.read()
+        if record is None or record.transaction_id != transaction.transaction_id:
+            return
+        kernel.block(
+            state=TransactionState.TERMINAL_FAILURE,
+            classification=adapter.HANDLED_FAILURE_CLASSIFICATION,
+            next_state=adapter.HANDLED_FAILURE_NEXT_STATE, reference=type(exc).__name__,
+        )
+
     def load_project_state(self, project: Project) -> dict[str, Any] | None:
         return self.project_store.read(self.project_state_path(project))
 
     def effective_project(self, project: Project) -> Project:
+        projection = self._authoritative_projection(project)
+        if projection is not None:
+            return replace(project, current_state=str(projection["current_state"]))
         state = self.load_project_state(project)
         return replace(project, current_state=state["current_state"]) if state else project
+
+    def _authoritative_projection(self, project: Project) -> dict[str, Any] | None:
+        inspector = RepositoryInspector(project.repository)
+        identity = inspector.identity()
+        state_root = self.root / "state/projects" / project.project_id
+        ledger_path = state_root / "evidence-ledger.jsonl"
+        if not ledger_path.exists():
+            return None
+        ledger = EvidenceLedger(
+            ledger_path, project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        return ProjectionEngine(
+            ledger, state_root / "projection-cache.json"
+        ).rebuild(persist_cache=True)
 
     def _project_document(self, project: Project, run_id: str | None, fingerprint: str) -> dict[str, Any]:
         existing = self.load_project_state(project)
@@ -133,6 +452,8 @@ class CycleEngine:
         event_commit: str | None = None,
         event_command_category: str | None = None,
         event_validation_outcome: str | None = None,
+        kernel_owned: bool = False,
+        kernel_projection: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         transition = PORTFOLIO_MACHINE.transition(document["current_state"], target)
         document.update({
@@ -142,10 +463,35 @@ class CycleEngine:
             "last_checkpoint": checkpoint,
             "stop_reason": stop_reason,
             "human_decision_required": human_gate,
-            "state_evidence": state_evidence,
+            "state_evidence": (
+                {
+                    **(state_evidence or {}),
+                    "kernel_transaction_id": (kernel_projection or {}).get("transaction_id"),
+                    "ledger_sequence": (kernel_projection or {}).get("ledger_sequence"),
+                    "ledger_fingerprint": (kernel_projection or {}).get("ledger_fingerprint"),
+                    "projection_fingerprint": (kernel_projection or {}).get("projection_fingerprint"),
+                }
+                if kernel_owned else state_evidence
+            ),
             "updated_at": utc_now(),
         })
-        self.project_store.write(self.project_state_path(project), document)
+        if kernel_owned:
+            self.project_store.write(self.project_state_path(project), document)
+        else:
+            adapter = LegacyTransitionAdapter(
+                controller_root=self.root,
+                repository=project.repository,
+                project_id=project.project_id,
+            )
+            adapter.transition(
+                run_id=run_id,
+                feature_id=feature,
+                milestone=project.active_milestone,
+                previous_state=transition.previous,
+                next_state=transition.current,
+                checkpoint=checkpoint,
+                mutate=lambda: self.project_store.write(self.project_state_path(project), document),
+            )
         self.events.append(run_event(
             run_id=run_id,
             project_id=project.project_id,
@@ -190,6 +536,24 @@ class CycleEngine:
         effective = self.effective_project(project)
         persisted = self.load_project_state(project)
         plan = build_project_plan(effective, self.configuration.conveyor, self.root)
+        evidence_constrained_action = plan.get("proposed_next_action")
+        authoritative = self._authoritative_projection(project)
+        if authoritative is not None:
+            projected_action = authoritative.get("allowed_next_action")
+            if evidence_constrained_action == "validation_failed":
+                # The ledger owns workflow progress, but it cannot authorize work
+                # past a live, unvalidated production commit discovered after the
+                # last terminal event.
+                projected_action = evidence_constrained_action
+            plan.update({
+                "current_state": authoritative["current_state"],
+                "selected_feature": authoritative.get("selected_next_feature")
+                or authoritative.get("current_feature"),
+                "accepted_feature_commit": authoritative.get("accepted_feature_commit"),
+                "proposed_next_action": projected_action,
+                "kernel_projection": authoritative,
+                "state_source": "evidence_ledger_projection",
+            })
         planning_transaction = None
         persisted_evidence = (
             persisted.get("state_evidence") if isinstance(persisted, dict) else None
@@ -490,7 +854,7 @@ class CycleEngine:
                     "last_verified_git_state": self._git_checkpoint(inspector),
                     "updated_at": utc_now(),
                 })
-                self.cycle_store.write(cycle_path, cycle)
+                self._write_cycle_cache(project, cycle_path, cycle, inspector, "durable_integration_finalization")
             for index, target in enumerate(assessment.transition_path[1:], start=1):
                 final = index == len(assessment.transition_path) - 1
                 document = self._transition_project(
@@ -811,14 +1175,71 @@ class CycleEngine:
         target: str,
         inspector: RepositoryInspector,
         checkpoint: str,
+        kernel: WorkflowKernel | None = None,
     ) -> dict[str, Any]:
-        CYCLE_MACHINE.transition(state["current_phase"], target)
+        previous = state["current_phase"]
+        CYCLE_MACHINE.transition(previous, target)
         state["current_phase"] = target
         state["last_successful_checkpoint"] = checkpoint
         state["last_verified_git_state"] = self._git_checkpoint(inspector)
         state["updated_at"] = utc_now()
+        if kernel is not None:
+            kernel.checkpoint(checkpoint, {"previous_phase": previous, "next_phase": target})
+            return state
         self.cycle_store.write(path, state)
         return state
+
+    @staticmethod
+    def _bind_cycle_cache(state: dict[str, Any], kernel: WorkflowKernel) -> None:
+        projection = kernel.projection.rebuild(persist_cache=True)
+        state.update({
+            "kernel_transaction_id": kernel.transaction.transaction_id,
+            "kernel_ledger_sequence": projection["ledger_sequence"],
+            "kernel_ledger_fingerprint": projection["ledger_fingerprint"],
+            "kernel_projection_fingerprint": projection["projection_fingerprint"],
+        })
+        unsigned = dict(state)
+        unsigned.pop("kernel_cache_fingerprint", None)
+        state["kernel_cache_fingerprint"] = fingerprint(unsigned)
+
+    @staticmethod
+    def _bind_terminal_cycle_cache(
+        state: dict[str, Any], transaction_id: str, projection: dict[str, Any]
+    ) -> None:
+        state.update({
+            "kernel_transaction_id": transaction_id,
+            "kernel_ledger_sequence": projection["ledger_sequence"],
+            "kernel_ledger_fingerprint": projection["ledger_fingerprint"],
+            "kernel_projection_fingerprint": projection["projection_fingerprint"],
+        })
+        unsigned = dict(state)
+        unsigned.pop("kernel_cache_fingerprint", None)
+        state["kernel_cache_fingerprint"] = fingerprint(unsigned)
+
+    def _materialize_terminal_cycle_cache(
+        self,
+        path: Path,
+        state: dict[str, Any],
+        transaction_id: str,
+        completion: dict[str, Any],
+    ) -> None:
+        self._bind_terminal_cycle_cache(state, transaction_id, completion["projection"])
+        self.cycle_store.write(path, state)
+
+    def _write_cycle_cache(
+        self,
+        project: Project,
+        path: Path,
+        state: dict[str, Any],
+        inspector: RepositoryInspector,
+        checkpoint: str,
+        kernel: WorkflowKernel | None = None,
+    ) -> None:
+        """Materialize the compatibility cycle cache after a kernel checkpoint."""
+        if kernel is not None:
+            kernel.checkpoint(checkpoint, {"cycle_phase": state.get("current_phase")})
+            return
+        self.cycle_store.write(path, state)
 
     def _launch_lock(self, project: Project, inspector: RepositoryInspector) -> DurableLock:
         directory = self.configuration.owned_path(self.configuration.conveyor["lock_policy"]["controller_launch_lock_directory"])
@@ -831,6 +1252,7 @@ class CycleEngine:
         phase: str,
         *,
         reservation_held: bool = False,
+        on_session_started: Callable[[str], None] | None = None,
     ) -> SessionResult:
         writer = inspect_repository_writer_lock(
             inspector.writer_lock_path(self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]),
@@ -850,16 +1272,40 @@ class CycleEngine:
             matching_planning_lease = (
                 request.action == "queue_reconciliation"
                 and recorded_run == request.run_id
-                and record.get("purpose") == "development-conveyor-planning"
-                and record.get("phase") == "queue_reconciliation"
+                and (
+                    (
+                        record.get("purpose") == "development-conveyor-planning"
+                        and record.get("phase") == "queue_reconciliation"
+                    )
+                    or (
+                        record.get("workflow_type") == "queue_reconciliation"
+                        and record.get("lease_type") == "planning_writer"
+                        and isinstance(record.get("transaction_id"), str)
+                    )
+                )
                 and record.get("project_id") == request.project.project_id
                 and record.get("repository_identity") == inspector.identity()["repository_id"]
-                and record.get("branch") == inspector.current_branch
+                and (record.get("branch") or record.get("starting_branch")) == inspector.current_branch
                 and record.get("starting_head") == inspector.head
-                and Path(str(record.get("repository"))).expanduser().resolve()
-                == request.project.repository.resolve()
+                and (
+                    record.get("repository") is None
+                    or Path(str(record.get("repository"))).expanduser().resolve()
+                    == request.project.repository.resolve()
+                )
             )
-            if not matching_feature_lease and not matching_planning_lease:
+            matching_typed_kernel_lease = (
+                request.transaction_id is not None
+                and record.get("transaction_id") == request.transaction_id
+                and record.get("run_id") == request.run_id
+                and record.get("project_id") == request.project.project_id
+                and record.get("repository_identity") == inspector.identity()["repository_id"]
+                and record.get("starting_branch") == request.starting_branch
+                and record.get("starting_head") == request.starting_commit
+                and record.get("workflow_type") in {
+                    "queue_reconciliation", "feature_execution", "milestone_integration", "milestone_gate"
+                }
+            )
+            if not matching_feature_lease and not matching_planning_lease and not matching_typed_kernel_lease:
                 raise LockError("repository writer lease exists; refusing duplicate production session")
         identity = inspector.identity()
         reservation = None if reservation_held else self._launch_lock(request.project, inspector)
@@ -874,7 +1320,17 @@ class CycleEngine:
         try:
             result: SessionResult
             try:
-                result = self.launcher.launch(request)
+                supports_observer = "on_session_started" in inspect.signature(self.launcher.launch).parameters
+                if request.transaction_id is not None and not supports_observer:
+                    raise SessionError("typed workflow launcher cannot expose early session identity")
+                result = (
+                    self.launcher.launch(request, on_session_started=on_session_started)
+                    if supports_observer else self.launcher.launch(request)
+                )
+                if on_session_started is not None and not supports_observer:
+                    if not result.session_id:
+                        raise SessionError("session launch returned no observable session identity")
+                    on_session_started(result.session_id)
             except SessionError as exc:
                 report_path = self._persist_launch_failure(request, phase, exc)
                 match = re.search(r"classification=([a-z_]+)", str(exc))
@@ -1078,7 +1534,10 @@ class CycleEngine:
             return True
         if result.action != "queue_reconciliation":
             return False
-        if result.result_classification in {"session_execution_failed", "structured_output_invalid"}:
+        if result.result_classification in {
+            "session_execution_failed", "structured_output_invalid",
+            "RETRYABLE_PLANNING_FAILURE", "PLANNING_VALIDATION_FAILED",
+        }:
             return result.structured_result is None or bool(result.structured_result.get("retryable"))
         return False
 
@@ -1115,12 +1574,16 @@ class CycleEngine:
         retry_key: str,
         *,
         reservation_held: bool = False,
+        on_session_started: Callable[[str], None] | None = None,
     ) -> tuple[SessionResult, list[dict[str, Any]], dict[str, Any]]:
         configured = int(self.configuration.conveyor["retries"][retry_key])
         limit = request.project.maximum_retries if request.project.maximum_retries is not None else configured
         budget = RetryBudget(limit)
         attempts: list[dict[str, Any]] = []
-        result = self._launch_session(request, inspector, phase, reservation_held=reservation_held)
+        result = self._launch_session(
+            request, inspector, phase, reservation_held=reservation_held,
+            on_session_started=on_session_started,
+        )
         while self._session_requires_retry(result) and budget.remaining:
             evidence = hashlib.sha256(result.redacted_output[-4000:].encode()).hexdigest()
             structured = result.structured_result or {}
@@ -1165,7 +1628,8 @@ class CycleEngine:
                 repair_hypothesis=hypothesis,
                 remediation_action=remediation,
                 repair_supporting_evidence=supporting,
-            ), inspector, phase, reservation_held=reservation_held)
+            ), inspector, phase, reservation_held=reservation_held,
+                on_session_started=on_session_started)
         still_retryable = self._session_requires_retry(result)
         retry_status = {
             "limit": limit,
@@ -1681,7 +2145,7 @@ class CycleEngine:
         if result.action == "feature_cycle" and feature.get("status") in {"accepted", "integration_pending"}:
             self._writer_lease(project, inspector).release(run_id=str(state["conveyor_run_id"]))
             state["writer_lock_identity"] = None
-            self.cycle_store.write(cycle_path, state)
+            self._write_cycle_cache(project, cycle_path, state, inspector, "writer_lease_released")
             if state["current_phase"] == "integration_pending":
                 self._advance_cycle(
                     cycle_path, state, "integrating", inspector, "integration_session_launch"
@@ -1695,7 +2159,7 @@ class CycleEngine:
                 feature=str(state["current_feature"]),
             ), inspector, "integrating", "integration_repairs", reservation_held=reservation_held)
             state["integration_attempts"].extend(integration_repairs)
-            self.cycle_store.write(cycle_path, state)
+            self._write_cycle_cache(project, cycle_path, state, inspector, "integration_repairs_recorded")
             return self._reconcile_feature_evidence(
                 project,
                 inspector,
@@ -1752,6 +2216,39 @@ class CycleEngine:
                 "compatibility_validation_command": compatibility.get("validation_command"),
                 "resolved": False,
             }
+            identity = inspector.identity()
+            phase_root = self.root / "state/projects" / project.project_id
+            compatibility_ledger = EvidenceLedger(
+                phase_root / "evidence-ledger.jsonl", project_id=project.project_id,
+                repository_identity=identity["repository_id"],
+                repository_path_fingerprint=identity["path_fingerprint"],
+            )
+            compatibility_adapter = FeaturePreparationAdapter(
+                allowed_paths=(), commit_subject="factory: compatibility gate",
+                next_state="feature_preparing",
+            )
+            compatibility_kernel = WorkflowKernel(
+                project=project, ledger=compatibility_ledger,
+                projection=ProjectionEngine(
+                    compatibility_ledger, phase_root / "projection-cache.json"
+                ),
+                lease=WorkflowWriterLease(inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                )),
+            )
+            compatibility_transaction = compatibility_kernel.begin(
+                workflow_type=WorkflowType.FEATURE_PREPARATION,
+                milestone=project.active_milestone,
+                feature_id=project_state.get("current_feature"), run_id=run_id,
+                policy=compatibility_adapter.policy,
+            )
+            compatibility_kernel.acquire_lease()
+            compatibility_kernel.capture_snapshot()
+            blocked_projection = compatibility_kernel.block(
+                state=TransactionState.HUMAN_DECISION_REQUIRED,
+                classification="HUMAN_DECISION_REQUIRED",
+                next_state="human_decision_required", human_gate=gate,
+            )
             self._transition_project(
                 project,
                 project_state,
@@ -1762,6 +2259,11 @@ class CycleEngine:
                 stop_reason=str(compatibility.get("diagnostic")),
                 human_gate=gate,
                 state_evidence={"compatibility_preflight": compatibility},
+                kernel_owned=True,
+                kernel_projection={
+                    "transaction_id": compatibility_transaction.transaction_id,
+                    **blocked_projection,
+                },
             )
             raise SessionError(
                 f"classification={compatibility.get('classification')}; remediation={compatibility.get('remediation')}; "
@@ -1770,6 +2272,7 @@ class CycleEngine:
         reservation = None if reservation_held else self._launch_lock(project, inspector)
         feature_writer_acquired = False
         session_attempted = False
+        phase_kernels: list[tuple[WorkflowKernel, Any]] = []
         if reservation is not None:
             reservation.acquire(make_lock_record(
                 project_id=project.project_id,
@@ -1799,7 +2302,6 @@ class CycleEngine:
                 raise RecoveryError(
                     "feature preflight requires the clean configured milestone HEAD and no writer lease"
                 )
-            inspector.ensure_runtime_ignored()
             queue = FeatureQueue.from_location(project.repository, project.queue_location)
             selection = queue.select_next(project.active_milestone or "")
             if selection is None:
@@ -1813,77 +2315,519 @@ class CycleEngine:
             )
             state["superseded_cycle_archive"] = superseded_archive
             self._validate_cycle_launch_invariants(project, inspector, state, selection.feature_id)
-            self.cycle_store.write(cycle_path, state)
-            self._advance_cycle(cycle_path, state, "preflight", inspector, "preflight_verified")
-            self._advance_cycle(cycle_path, state, "feature_selected", inspector, selection.reason)
-            self._advance_cycle(
-                cycle_path,
-                state,
-                "branch_preparing",
-                inspector,
-                "feature_branch_preparation_started",
+            identity = inspector.identity()
+            phase_root = self.root / "state/projects" / project.project_id
+            phase_ledger = EvidenceLedger(
+                phase_root / "evidence-ledger.jsonl",
+                project_id=project.project_id,
+                repository_identity=identity["repository_id"],
+                repository_path_fingerprint=identity["path_fingerprint"],
             )
-            branch_evidence = self._prepare_feature_branch(project, inspector, state)
-            state["session_completion_evidence"] = {"prelaunch_branch": branch_evidence}
-            writer_record = self._writer_lease(project, inspector).acquire_or_resume(
-                feature=selection.feature_id,
-                branch=str(state["feature_branch"]),
+            preparation = FeaturePreparationAdapter(
+                allowed_paths=(),
+                commit_subject=f"factory: prepare {selection.feature_id}",
+                next_state="feature_preparing",
+            )
+            preparation_kernel = WorkflowKernel(
+                project=project,
+                ledger=phase_ledger,
+                projection=ProjectionEngine(phase_ledger, phase_root / "projection-cache.json"),
+                lease=WorkflowWriterLease(inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                )),
+            )
+            phase_kernels.append((preparation_kernel, preparation))
+            preparation_transaction = preparation_kernel.begin(
+                workflow_type=WorkflowType.FEATURE_PREPARATION,
+                milestone=project.active_milestone,
+                feature_id=selection.feature_id,
                 run_id=run_id,
+                policy=preparation.policy,
             )
-            feature_writer_acquired = True
-            state["writer_lock_identity"] = writer_record
-            self._verify_feature_branch_runtime(
+            preparation_kernel.acquire_lease()
+            preparation_kernel.capture_snapshot()
+            inspector.ensure_runtime_ignored()
+            preparation_kernel.checkpoint("runtime_ignore_verified")
+            self._write_cycle_cache(
+                project, cycle_path, state, inspector, "cycle_initialized", kernel=preparation_kernel
+            )
+            self._advance_cycle(
+                cycle_path, state, "preflight", inspector, "preflight_verified", kernel=preparation_kernel
+            )
+            self._advance_cycle(
+                cycle_path, state, "feature_selected", inspector, selection.reason, kernel=preparation_kernel
+            )
+            self._advance_cycle(
+                cycle_path, state, "branch_preparing", inspector,
+                "feature_branch_preparation_started", kernel=preparation_kernel,
+            )
+            deterministic_session = f"deterministic-feature-preparation:{preparation_transaction.transaction_id}"
+            preparation_kernel.session_launched(deterministic_session)
+            preparation_envelope = SessionResultEnvelope.from_dict({
+                "schema_version": 1,
+                "workflow_type": WorkflowType.FEATURE_PREPARATION.value,
+                "classification": "FEATURE_PREPARED",
+                "project_id": project.project_id,
+                "repository_identity": identity["repository_id"],
+                "transaction_id": preparation_transaction.transaction_id,
+                "run_id": run_id,
+                "session_id": deterministic_session,
+                "starting_branch": preparation_transaction.starting_branch,
+                "starting_commit": preparation_transaction.starting_head,
+                "current_commit": preparation_transaction.starting_head,
+                "feature_id": selection.feature_id,
+                "changed_paths": [],
+                "evidence": {"deterministic_operation": "feature_branch_preparation"},
+                "next_state": "feature_preparing",
+            })
+            if self._route_kernel_result(preparation_kernel, preparation, preparation_envelope) is not None:
+                raise RecoveryError("deterministic feature preparation did not authorize success")
+            preparation_kernel.record_file_mutation_boundary()
+            preparation_kernel.validate(
+                authority=CommandAuthority(), command_results=(),
+                semantic_validator=preparation.semantic_validate,
+            )
+            preparation_kernel.finalize_feature_branch(str(state["feature_branch"]))
+            preparation_completion = preparation_kernel.complete(
+                evidence={"prepared_branch": state["feature_branch"]}
+            )
+            self._materialize_terminal_cycle_cache(
+                cycle_path, state, preparation_transaction.transaction_id,
+                preparation_completion,
+            )
+            branch_evidence = self._verify_feature_branch_runtime(
                 project, inspector, state, require_starting_head=True
             )
-            self._advance_cycle(
-                cycle_path,
-                state,
-                "branch_preparing",
-                inspector,
-                "feature_branch_and_writer_lease_verified",
+            state["session_completion_evidence"] = {"prelaunch_branch": branch_evidence}
+            tracked_paths = tuple(sorted(path for path in inspector.git(["ls-files", "-z"]).stdout.split("\0") if path))
+            denied_feature_paths = tuple(sorted({
+                project.queue_location,
+                project.autonomy_contract_location,
+                project.validation_source,
+                ".factory/approved-content.yaml",
+                ".factory/conveyor-state.json",
+                ".factory/locks/writer.json",
+            }))
+            denied_feature_prefixes = (".factory", "factory-integration")
+            feature_allowed_paths = tuple(
+                path for path in tracked_paths
+                if path not in denied_feature_paths
+                and not any(
+                    path == prefix or path.startswith(prefix + "/")
+                    for prefix in denied_feature_prefixes
+                )
             )
-            self._transition_project(
-                project,
-                project_state,
-                "feature_running",
+            top_level_prefixes = tuple(sorted(
+                item.name for item in project.repository.iterdir()
+                if item.is_dir()
+                and item.name not in {".git", *denied_feature_prefixes}
+            ))
+            feature_adapter = FeatureExecutionAdapter(
+                allowed_paths=feature_allowed_paths,
+                allowed_prefixes=top_level_prefixes,
+                denied_paths=denied_feature_paths,
+                denied_prefixes=denied_feature_prefixes,
+                allow_untracked=True,
+                commit_subject=f"{selection.feature_id}: {selection.title}",
+                next_state="feature_accepted",
+            )
+            feature_kernel = WorkflowKernel(
+                project=project, ledger=phase_ledger,
+                projection=ProjectionEngine(phase_ledger, phase_root / "projection-cache.json"),
+                lease=WorkflowWriterLease(inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                )),
+            )
+            phase_kernels.append((feature_kernel, feature_adapter))
+            feature_transaction = feature_kernel.begin(
+                workflow_type=WorkflowType.FEATURE_EXECUTION,
+                milestone=project.active_milestone,
+                feature_id=selection.feature_id,
                 run_id=run_id,
-                checkpoint="feature_session_launch",
-                feature=selection.feature_id,
-                state_evidence={
-                    "compatibility_preflight": compatibility,
-                    "feature_starting_commit": state["feature_starting_commit"],
-                    "milestone_pre_integration_commit": state["milestone_pre_integration_commit"],
-                    "queue_fingerprint": state["queue_fingerprint"],
-                    "dependency_evidence": state["dependency_evidence"],
-                    "superseded_cycle_archive": superseded_archive,
-                },
+                policy=feature_adapter.policy,
             )
-            session_attempted = True
-            result, repairs, retry_status = self._launch_with_retries(SessionRequest(
-                action="feature_cycle", project=project, run_id=run_id, mode=mode, feature=selection.feature_id
-            ), inspector, "feature_in_progress", "implementation_repairs", reservation_held=True)
+            feature_kernel.acquire_lease()
+            feature_kernel.capture_snapshot()
+            request = SessionRequest(
+                action="feature_cycle", project=project, run_id=run_id, mode=mode,
+                feature=selection.feature_id,
+                transaction_id=feature_transaction.transaction_id,
+                repository_identity=identity["repository_id"],
+                starting_branch=feature_transaction.starting_branch,
+                starting_commit=feature_transaction.starting_head,
+                allowed_paths=feature_allowed_paths,
+            )
+            result, repairs, retry_status = self._launch_with_retries(
+                request, inspector, "feature_in_progress", "implementation_repairs",
+                reservation_held=True, on_session_started=feature_kernel.session_launched,
+            )
+            state["feature_session_id"] = result.session_id
+            state["session_id"] = result.session_id
             state["validation_attempts"].extend(repairs)
-            self.cycle_store.write(cycle_path, state)
-            evidence = self._reconcile_feature_evidence(
-                project,
-                inspector,
-                cycle_path,
-                state,
-                result,
-                retry_status=retry_status,
-                reservation_held=True,
+            if result.transaction_envelope is None:
+                message = self._session_failure_message(project, run_id, result, "feature_in_progress")
+                gate = {
+                    "reason": "repository session cannot continue safely",
+                    "project": project.project_id, "run_id": run_id,
+                    "feature": selection.feature_id,
+                    "classification": result.failure_classification or result.result_classification,
+                    "retryable": bool(result.retryable and not retry_status["exhausted"]),
+                    "attempts_consumed": retry_status["attempts_consumed"],
+                    "attempts_remaining": retry_status["attempts_remaining"],
+                    "retry_exhausted": retry_status["exhausted"],
+                    "safe_continuation_command": f"scripts/conveyor resume --project {project.project_id}",
+                    "resolved": False,
+                }
+                state.update({
+                    "current_phase": "human_decision_required",
+                    "last_successful_checkpoint": "session_terminal_failure",
+                    "last_verified_git_state": self._git_checkpoint(inspector),
+                    "failure_classification": gate["classification"],
+                    "retry_exhausted": retry_status["exhausted"],
+                    "next_safe_action": gate["safe_continuation_command"],
+                    "stop_reason": message, "human_decision_required": gate,
+                    "updated_at": utc_now(),
+                })
+                terminal_projection = feature_kernel.block(
+                    state=TransactionState.HUMAN_DECISION_REQUIRED,
+                    classification="HUMAN_DECISION_REQUIRED",
+                    next_state="human_decision_required", human_gate=gate,
+                )
+                self._bind_terminal_cycle_cache(
+                    state, feature_transaction.transaction_id, terminal_projection
+                )
+                self.cycle_store.write(cycle_path, state)
+                self._transition_project(
+                    project, project_state, "human_decision_required", run_id=run_id,
+                    checkpoint="session_terminal_failure", feature=selection.feature_id,
+                    stop_reason=message, human_gate=gate, kernel_owned=True,
+                    kernel_projection={
+                        "transaction_id": feature_transaction.transaction_id,
+                        **terminal_projection,
+                    },
+                )
+                raise SessionError(message)
+            feature_envelope = SessionResultEnvelope.from_dict(result.transaction_envelope)
+            feature_blocked = self._route_kernel_result(feature_kernel, feature_adapter, feature_envelope)
+            if feature_blocked is not None:
+                self._transition_project(
+                    project, project_state, feature_envelope.next_state, run_id=run_id,
+                    checkpoint="kernel_feature_terminal", feature=selection.feature_id,
+                    stop_reason=feature_envelope.classification,
+                    human_gate=feature_envelope.evidence.get("human_decision"),
+                    kernel_owned=True,
+                    kernel_projection={"transaction_id": feature_transaction.transaction_id, **feature_blocked},
+                )
+                return {"outcome": feature_envelope.next_state, "classification": feature_envelope.classification}
+            feature_authority, feature_commands = self._kernel_required_commands(project)
+            feature_kernel.record_file_mutation_boundary()
+            feature_kernel.validate(
+                authority=feature_authority, command_results=feature_commands,
+                semantic_validator=feature_adapter.semantic_validate,
             )
-            if evidence.get("outcome") == "human_decision_required":
-                return evidence
-            self._transition_project(
-                project,
-                project_state,
-                "feature_accepted",
-                run_id=run_id,
-                checkpoint="feature_integrated",
+            accepted = feature_kernel.finalize()
+            self._advance_cycle(
+                cycle_path, state, "feature_in_progress", inspector, "kernel_feature_commit",
+                kernel=feature_kernel,
+            )
+            self._advance_cycle(
+                cycle_path, state, "feature_review", inspector, "kernel_feature_validated",
+                kernel=feature_kernel,
+            )
+            self._advance_cycle(
+                cycle_path, state, "feature_accepted", inspector, "kernel_feature_accepted",
+                kernel=feature_kernel,
+            )
+            self._advance_cycle(
+                cycle_path, state, "integration_pending", inspector, "kernel_integration_pending",
+                kernel=feature_kernel,
+            )
+            state["accepted_feature_commit"] = accepted
+            feature_completion = feature_kernel.complete(
+                evidence={"accepted_feature_commit": accepted, "integration_status": "pending"}
+            )
+            self._materialize_terminal_cycle_cache(
+                cycle_path, state, feature_transaction.transaction_id, feature_completion
+            )
+
+            acceptance_adapter = FeatureAcceptanceAdapter(
+                allowed_paths=(), commit_subject=f"factory: accept {selection.feature_id}",
+                next_state="integration_ready",
+            )
+            acceptance_kernel = WorkflowKernel(
+                project=project, ledger=phase_ledger,
+                projection=ProjectionEngine(phase_ledger, phase_root / "projection-cache.json"),
+                lease=WorkflowWriterLease(inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                )),
+            )
+            phase_kernels.append((acceptance_kernel, acceptance_adapter))
+            acceptance_transaction = acceptance_kernel.begin(
+                workflow_type=WorkflowType.FEATURE_ACCEPTANCE,
+                milestone=project.active_milestone, feature_id=selection.feature_id,
+                run_id=run_id, policy=acceptance_adapter.policy,
+            )
+            acceptance_kernel.acquire_lease(); acceptance_kernel.capture_snapshot()
+            acceptance_session = f"deterministic-feature-acceptance:{acceptance_transaction.transaction_id}"
+            acceptance_kernel.session_launched(acceptance_session)
+            acceptance_envelope = SessionResultEnvelope.from_dict({
+                "schema_version": 1, "workflow_type": "feature_acceptance",
+                "classification": "FEATURE_ACCEPTED", "project_id": project.project_id,
+                "repository_identity": identity["repository_id"],
+                "transaction_id": acceptance_transaction.transaction_id, "run_id": run_id,
+                "session_id": acceptance_session,
+                "starting_branch": acceptance_transaction.starting_branch,
+                "starting_commit": acceptance_transaction.starting_head,
+                "current_commit": acceptance_transaction.starting_head,
+                "feature_id": selection.feature_id, "changed_paths": [],
+                "evidence": {"accepted_feature_commit": accepted},
+                "next_state": "integration_ready",
+            })
+            if self._route_kernel_result(
+                acceptance_kernel, acceptance_adapter, acceptance_envelope
+            ) is not None:
+                raise RecoveryError("deterministic feature acceptance did not authorize success")
+            acceptance_kernel.record_file_mutation_boundary()
+            acceptance_kernel.validate(
+                authority=CommandAuthority(), command_results=(),
+                semantic_validator=acceptance_adapter.semantic_validate,
+            )
+            acceptance_kernel.finalize()
+            self._advance_cycle(
+                cycle_path, state, "integration_ready", inspector,
+                "kernel_feature_acceptance", kernel=acceptance_kernel,
+            )
+            acceptance_completion = acceptance_kernel.complete(evidence={
+                "accepted_feature_commit": accepted, "integration_status": "pending",
+            })
+            self._materialize_terminal_cycle_cache(
+                cycle_path, state, acceptance_transaction.transaction_id,
+                acceptance_completion,
+            )
+
+            accepted_paths = tuple(sorted(inspector.git([
+                "diff-tree", "--no-commit-id", "--name-only", "-r", str(accepted)
+            ]).stdout.splitlines()))
+            integration_adapter = MilestoneIntegrationAdapter(
+                allowed_paths=accepted_paths, commit_subject=f"factory: integrate {selection.feature_id}",
+                next_state="feature_integrated",
+            )
+            integration_kernel = WorkflowKernel(
+                project=project, ledger=phase_ledger,
+                projection=ProjectionEngine(phase_ledger, phase_root / "projection-cache.json"),
+                lease=WorkflowWriterLease(inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                )),
+            )
+            phase_kernels.append((integration_kernel, integration_adapter))
+            integration_transaction = integration_kernel.begin_for_branch(
+                workflow_type=WorkflowType.MILESTONE_INTEGRATION,
+                target_branch=str(project.milestone_branch),
+                milestone=project.active_milestone, feature_id=selection.feature_id,
+                run_id=run_id, policy=integration_adapter.policy,
+            )
+            integration_kernel.acquire_lease()
+            integration_kernel.prepare_starting_branch()
+            integration_kernel.capture_snapshot()
+            integration_request = SessionRequest(
+                action="milestone_integration", project=project, run_id=run_id, mode=mode,
                 feature=selection.feature_id,
+                transaction_id=integration_transaction.transaction_id,
+                repository_identity=identity["repository_id"],
+                starting_branch=integration_transaction.starting_branch,
+                starting_commit=integration_transaction.starting_head,
+                allowed_paths=accepted_paths,
             )
+            integration_result, integration_repairs, _ = self._launch_with_retries(
+                integration_request, inspector, "integrating", "integration_repairs",
+                reservation_held=True, on_session_started=integration_kernel.session_launched,
+            )
+            state["integration_session_id"] = integration_result.session_id
+            if integration_result.transaction_envelope is None:
+                message = self._session_failure_message(
+                    project, run_id, integration_result, "integrating"
+                )
+                gate = {
+                    "reason": "milestone integration session cannot continue safely",
+                    "project": project.project_id, "run_id": run_id,
+                    "feature": selection.feature_id,
+                    "classification": integration_result.failure_classification or integration_result.result_classification,
+                    "accepted_feature_commit": accepted,
+                    "integration_session_id": integration_result.session_id,
+                    "retryable": False,
+                    "safe_continuation_command": f"scripts/conveyor doctor --project {project.project_id}",
+                    "resolved": False,
+                }
+                state.update({
+                    "current_phase": "human_decision_required",
+                    "last_successful_checkpoint": "integration_session_terminal_failure",
+                    "last_verified_git_state": self._git_checkpoint(inspector),
+                    "failure_classification": gate["classification"], "retry_exhausted": True,
+                    "next_safe_action": gate["safe_continuation_command"],
+                    "stop_reason": message, "human_decision_required": gate,
+                    "integration_gate": gate, "integration_status": "blocked",
+                    "updated_at": utc_now(),
+                })
+                terminal_projection = integration_kernel.block(
+                    state=TransactionState.HUMAN_DECISION_REQUIRED,
+                    classification="HUMAN_DECISION_REQUIRED",
+                    next_state="human_decision_required", human_gate=gate,
+                )
+                self._bind_terminal_cycle_cache(
+                    state, integration_transaction.transaction_id, terminal_projection
+                )
+                self.cycle_store.write(cycle_path, state)
+                self._transition_project(
+                    project, project_state, "human_decision_required", run_id=run_id,
+                    checkpoint="integration_session_terminal_failure",
+                    feature=selection.feature_id, stop_reason=message, human_gate=gate,
+                    kernel_owned=True,
+                    kernel_projection={
+                        "transaction_id": integration_transaction.transaction_id,
+                        **terminal_projection,
+                    },
+                )
+                raise SessionError(message)
+            integration_envelope = SessionResultEnvelope.from_dict(integration_result.transaction_envelope)
+            integration_blocked = self._route_kernel_result(
+                integration_kernel, integration_adapter, integration_envelope
+            )
+            if integration_blocked is not None:
+                self._transition_project(
+                    project, project_state, integration_envelope.next_state, run_id=run_id,
+                    checkpoint="kernel_integration_terminal", feature=selection.feature_id,
+                    stop_reason=integration_envelope.classification,
+                    human_gate=integration_envelope.evidence.get("human_decision"),
+                    kernel_owned=True,
+                    kernel_projection={"transaction_id": integration_transaction.transaction_id, **integration_blocked},
+                )
+                return {"outcome": integration_envelope.next_state, "classification": integration_envelope.classification}
+            prepared_paths = integration_kernel.prepare_integration_changes(str(accepted))
+            if prepared_paths != accepted_paths:
+                raise RecoveryError("prepared integration paths differ from accepted commit")
+            integration_authority, integration_commands = self._kernel_required_commands(project)
+            integration_kernel.record_file_mutation_boundary()
+            integration_kernel.validate(
+                authority=integration_authority, command_results=integration_commands,
+                semantic_validator=integration_adapter.semantic_validate,
+            )
+            integrated = integration_kernel.finalize()
+            self._advance_cycle(
+                cycle_path, state, "integrating", inspector, "kernel_integrated",
+                kernel=integration_kernel,
+            )
+            self._advance_cycle(
+                cycle_path, state, "integration_validation", inspector,
+                "kernel_integration_validated", kernel=integration_kernel,
+            )
+            self._advance_cycle(
+                cycle_path, state, "feature_integrated", inspector, "kernel_feature_integrated",
+                kernel=integration_kernel,
+            )
+            state["milestone_post_integration_commit"] = integrated
+            integration_completion = integration_kernel.complete(evidence={
+                "accepted_feature_commit": accepted,
+                "integrated_commit": integrated,
+                "integration_status": "passed",
+            })
+            self._materialize_terminal_cycle_cache(
+                cycle_path, state, integration_transaction.transaction_id,
+                integration_completion,
+            )
+
+            queue_path = resolve_queue_path(project.repository, project.queue_location)
+            post_adapter = QueueReconciliationAdapter(
+                allowed_paths=(project.queue_location,),
+                commit_subject=f"factory: record {selection.feature_id} integration",
+                next_state="milestone_gate",
+            )
+            post_kernel = WorkflowKernel(
+                project=project, ledger=phase_ledger,
+                projection=ProjectionEngine(phase_ledger, phase_root / "projection-cache.json"),
+                lease=WorkflowWriterLease(inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                )),
+            )
+            phase_kernels.append((post_kernel, post_adapter))
+            post_transaction = post_kernel.begin(
+                workflow_type=WorkflowType.QUEUE_RECONCILIATION,
+                milestone=project.active_milestone, feature_id=selection.feature_id,
+                run_id=run_id, policy=post_adapter.policy,
+            )
+            post_kernel.acquire_lease()
+            post_kernel.capture_snapshot()
+            post_session = f"deterministic-post-integration:{post_transaction.transaction_id}"
+            post_kernel.session_launched(post_session)
+            queue_document = json.loads(queue_path.read_text(encoding="utf-8"))
+            queue_feature = next(item for item in queue_document["features"] if item["id"] == selection.feature_id)
+            queue_feature.update({
+                "status": "integrated", "accepted_commit": accepted,
+                "integrated_commit": integrated, "integration_status": "passed",
+            })
+            resolved_milestone = FeatureQueue.from_location(
+                project.repository, project.queue_location
+            ).milestone(project.active_milestone or "")
+            if resolved_milestone is None:
+                raise QueueError("configured milestone disappeared during integration finalization")
+            queue_milestone = next(
+                item for item in queue_document["milestones"]
+                if item["id"] == resolved_milestone["id"]
+            )
+            if selection.feature_id not in queue_milestone["integrated_features"]:
+                queue_milestone["integrated_features"].append(selection.feature_id)
+            queue_milestone["last_validated_commit"] = integrated
+            queue_path.write_text(json.dumps(queue_document, indent=2) + "\n", encoding="utf-8")
+            summary_after = FeatureQueue.from_location(project.repository, project.queue_location).summary(project.active_milestone or "")
+            post_classification = "MILESTONE_COMPLETE" if summary_after["milestone_complete"] else "RECONCILED_READY_WORK"
+            post_next = "milestone_gate" if summary_after["milestone_complete"] else "feature_ready"
+            post_envelope = SessionResultEnvelope.from_dict({
+                "schema_version": 1, "workflow_type": "queue_reconciliation",
+                "classification": post_classification, "project_id": project.project_id,
+                "repository_identity": identity["repository_id"],
+                "transaction_id": post_transaction.transaction_id, "run_id": run_id,
+                "session_id": post_session, "starting_branch": post_transaction.starting_branch,
+                "starting_commit": post_transaction.starting_head, "current_commit": post_transaction.starting_head,
+                "feature_id": selection.feature_id, "changed_paths": [project.queue_location],
+                "evidence": {"integrated_commit": integrated}, "next_state": post_next,
+            })
+            if self._route_kernel_result(post_kernel, post_adapter, post_envelope) is not None:
+                raise RecoveryError("deterministic post-integration reconciliation did not authorize success")
+            post_kernel.record_file_mutation_boundary()
+            post_kernel.validate(
+                authority=CommandAuthority(), command_results=(),
+                semantic_validator=post_adapter.semantic_validate,
+            )
+            post_kernel.finalize()
+            post_completion = post_kernel.complete(evidence={"planning_status": "passed"})
+            self._materialize_terminal_cycle_cache(
+                cycle_path, state, post_transaction.transaction_id, post_completion
+            )
+            evidence = {
+                "feature": selection.feature_id, "accepted_commit": accepted,
+                "integrated_commit": integrated, "repair_attempts": repairs + integration_repairs,
+            }
+            project_path = (
+                "feature_running", "feature_accepted", "integration_pending",
+                "integrating", "feature_integrated", post_next,
+            )
+            for projected_state in project_path:
+                self._transition_project(
+                    project, project_state, projected_state, run_id=run_id,
+                    checkpoint=f"kernel_projected_{projected_state}",
+                    feature=selection.feature_id if projected_state != "feature_ready" else None,
+                    kernel_owned=True,
+                    kernel_projection={
+                        "transaction_id": post_transaction.transaction_id,
+                        "ledger_sequence": post_completion["projection"]["ledger_sequence"],
+                        "ledger_fingerprint": post_completion["projection"]["ledger_fingerprint"],
+                        "projection_fingerprint": post_completion["projection"]["projection_fingerprint"],
+                    },
+                )
             return evidence
+        except (ConveyorError, ValueError) as exc:
+            for phase_kernel, phase_adapter in reversed(phase_kernels):
+                self._terminalize_handled_kernel_failure(phase_kernel, phase_adapter, exc)
+            raise
         finally:
             if feature_writer_acquired and not session_attempted:
                 self._writer_lease(project, inspector).release(run_id=run_id)
@@ -1894,11 +2838,9 @@ class CycleEngine:
         self, project: Project, mode: str, run_id: str, project_state: dict[str, Any]
     ) -> dict[str, Any]:
         inspector = RepositoryInspector(project.repository)
-        inspector.ensure_runtime_ignored()
         planning_start = capture_planning_start(project, inspector, run_id)
         report_root = self.configuration.owned_path(self.configuration.conveyor["report_directory"])
         transaction_path = planning_report_path(report_root, run_id)
-        persist_planning_transaction(transaction_path, planning_start)
         reservation = self._launch_lock(project, inspector)
         reservation.acquire(make_lock_record(
             project_id=project.project_id,
@@ -1907,37 +2849,60 @@ class CycleEngine:
             current_feature=None,
             current_phase="queue_reconciliation",
         ))
-        lease = PlanningWriterLease(
-            inspector.writer_lock_path(
-                self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
-            ),
-            project.repository,
+        identity = inspector.identity()
+        state_root = self.root / "state/projects" / project.project_id
+        ledger = EvidenceLedger(
+            state_root / "evidence-ledger.jsonl",
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        projection = ProjectionEngine(ledger, state_root / "projection-cache.json")
+        workflow_lease = WorkflowWriterLease(inspector.writer_lock_path(
+            self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+        ))
+        tracked = inspector.git(["ls-files", "-z"]).stdout.split("\0")
+        allowed_paths = tuple(sorted(path for path in tracked if path and allowed_planning_path(path)))
+        preselected = FeatureQueue.from_location(project.repository, project.queue_location).select_next(
+            project.active_milestone or ""
+        )
+        adapter = QueueReconciliationAdapter(
+            allowed_paths=allowed_paths,
+            allowed_prefixes=tuple(prefix.rstrip("/") for prefix in ALLOWED_PLANNING_PREFIXES),
+            allow_untracked=True,
+            commit_subject=planning_commit_subject(project, preselected.feature_id if preselected else None),
+            next_state="feature_ready",
+        )
+        kernel = WorkflowKernel(
+            project=project, ledger=ledger, projection=projection, lease=workflow_lease,
         )
         try:
-            lease.acquire(
-                repository_identity=planning_start["repository_identity"],
-                project_id=project.project_id,
+            kernel.begin(
+                workflow_type=WorkflowType.QUEUE_RECONCILIATION,
                 milestone=project.active_milestone or "",
                 run_id=run_id,
-                session_id=None,
-                branch=str(planning_start["branch"] or ""),
-                head=planning_start["planning_start_commit"],
-                worktree_fingerprint=planning_start["starting_worktree_fingerprint"],
-                allowed_paths=list(planning_start["allowed_paths"]),
+                feature_id=None,
+                policy=adapter.policy,
             )
-            try:
-                return self._execute_queue_reconciliation_locked(
-                    project,
-                    mode,
-                    run_id,
-                    project_state,
-                    inspector,
-                    planning_start=planning_start,
-                    transaction_path=transaction_path,
-                    lease=lease,
-                )
-            finally:
-                lease.release(run_id=run_id)
+            kernel.acquire_lease()
+            kernel.capture_snapshot()
+            inspector.ensure_runtime_ignored()
+            kernel.checkpoint("runtime_ignore_verified")
+            persist_planning_transaction(transaction_path, planning_start)
+            return self._execute_queue_reconciliation_locked(
+                project,
+                mode,
+                run_id,
+                project_state,
+                inspector,
+                planning_start=planning_start,
+                transaction_path=transaction_path,
+                kernel=kernel,
+                adapter=adapter,
+            )
+        except (ConveyorError, ValueError) as exc:
+            self._terminalize_handled_kernel_failure(kernel, adapter, exc)
+            raise
         finally:
             reservation.release(run_id)
 
@@ -1951,13 +2916,20 @@ class CycleEngine:
         *,
         planning_start: dict[str, Any],
         transaction_path: Path,
-        lease: PlanningWriterLease,
+        kernel: WorkflowKernel,
+        adapter: QueueReconciliationAdapter,
     ) -> dict[str, Any]:
         result, repairs, retry_status = self._launch_with_retries(SessionRequest(
-            action="queue_reconciliation", project=project, run_id=run_id, mode=mode
-        ), inspector, "queue_reconciliation", "queue_reconciliation_repairs", reservation_held=True)
-        if result.session_id:
-            lease.bind_session(run_id=run_id, session_id=result.session_id)
+            action="queue_reconciliation", project=project, run_id=run_id, mode=mode,
+            transaction_id=kernel.transaction.transaction_id,
+            repository_identity=kernel.transaction.repository_identity,
+            starting_branch=kernel.transaction.starting_branch,
+            starting_commit=kernel.transaction.starting_head,
+            allowed_paths=kernel.transaction.allowed_mutation_policy.allowed_paths,
+        ), inspector, "queue_reconciliation", "queue_reconciliation_repairs", reservation_held=True,
+            on_session_started=kernel.session_launched)
+        if not result.session_id:
+            raise SessionError("queue reconciliation returned no exact session identity")
         transaction = {
             **planning_start,
             "status": "planning_changes_pending_validation",
@@ -1965,12 +2937,46 @@ class CycleEngine:
             "session_id": result.session_id,
             "reconciliation_report": result.report_path,
             "result_classification": result.result_classification,
-            "changed_paths": inspector.tracked_changed_paths(),
+            "changed_paths": sorted(set(inspector.tracked_changed_paths()) | set(inspector.untracked_file_hashes())),
             "diff_fingerprint": inspector.planning_diff_fingerprint(),
             "updated_at": utc_now(),
         }
         persist_planning_transaction(transaction_path, transaction)
-        classification = result.result_classification
+        canonical_to_legacy = {
+            "RECONCILED_READY_WORK": "reconciled_ready_work",
+            "RECONCILED_NO_READY_WORK": "reconciled_no_ready_work",
+            "MILESTONE_COMPLETE": "milestone_complete",
+            "HUMAN_DECISION_REQUIRED": "human_decision_required",
+            "PLANNING_VALIDATION_FAILED": "invalid_queue",
+            "RETRYABLE_PLANNING_FAILURE": "session_execution_failed",
+            "TERMINAL_PLANNING_FAILURE": "session_execution_failed",
+        }
+        classification = canonical_to_legacy.get(str(result.result_classification), result.result_classification)
+        queue_result_evidence = (
+            result.structured_result.get("evidence", {})
+            if isinstance(result.structured_result, dict)
+            and result.structured_result.get("workflow_type") == "queue_reconciliation"
+            else (result.structured_result or {})
+        )
+
+        def accept_typed_result(canonical: str, next_state: str) -> None:
+            if kernel.envelope is not None:
+                return
+            if result.transaction_envelope is None:
+                raise SessionError("new queue workflow requires one typed transaction result")
+            envelope = SessionResultEnvelope.from_dict(result.transaction_envelope)
+            if envelope.classification != canonical or envelope.next_state != next_state:
+                raise SessionError("queue typed result disagrees with deterministic terminal mapping")
+            kernel.accept_result(envelope)
+            kernel.record_file_mutation_boundary()
+
+        def projection_evidence(projection: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "transaction_id": kernel.transaction.transaction_id,
+                "ledger_sequence": projection.get("ledger_sequence"),
+                "ledger_fingerprint": projection.get("ledger_fingerprint"),
+                "projection_fingerprint": projection.get("projection_fingerprint"),
+            }
         if result.failure_classification in {
             "cli_upgrade_required", "configuration_incompatible", "cli_missing",
             "cli_version_too_old", "unsupported_model", "unsupported_reasoning_effort",
@@ -1993,6 +2999,12 @@ class CycleEngine:
                 "safe_continuation_command": f"scripts/conveyor doctor --project {project.project_id}",
                 "resolved": False,
             }
+            projected = kernel.block(
+                state=TransactionState.HUMAN_DECISION_REQUIRED,
+                classification="HUMAN_DECISION_REQUIRED",
+                next_state="human_decision_required",
+                human_gate=gate,
+            )
             self._transition_project(
                 project,
                 project_state,
@@ -2002,6 +3014,8 @@ class CycleEngine:
                 stop_reason=str(result.primary_terminal_error or result.failure_classification),
                 human_gate=gate,
                 state_evidence={"compatibility_preflight": compatibility},
+                kernel_owned=True,
+                kernel_projection=projection_evidence(projected),
             )
             persist_planning_transaction(transaction_path, {
                 **transaction,
@@ -2017,9 +3031,16 @@ class CycleEngine:
             }
         if classification in {"session_execution_failed", "structured_output_invalid", None}:
             message = self._session_failure_message(project, run_id, result, project_state["current_state"])
+            projected = kernel.block(
+                state=TransactionState.RETRYABLE_FAILURE,
+                classification="RETRYABLE_PLANNING_FAILURE",
+                next_state="validation_failed",
+            )
             self._transition_project(
                 project, project_state, "validation_failed", run_id=run_id,
                 checkpoint="queue_reconciliation_failed", stop_reason=message,
+                kernel_owned=True,
+                kernel_projection=projection_evidence(projected),
             )
             persist_planning_transaction(transaction_path, {
                 **transaction,
@@ -2032,9 +3053,17 @@ class CycleEngine:
 
         if classification == "invalid_queue":
             message = self._session_failure_message(project, run_id, result, project_state["current_state"])
+            accept_typed_result("PLANNING_VALIDATION_FAILED", "validation_failed")
+            projected = kernel.block(
+                state=TransactionState.TERMINAL_FAILURE,
+                classification="PLANNING_VALIDATION_FAILED",
+                next_state="validation_failed",
+            )
             self._transition_project(
                 project, project_state, "validation_failed", run_id=run_id,
                 checkpoint="invalid_queue", stop_reason=message,
+                kernel_owned=True,
+                kernel_projection=projection_evidence(projected),
             )
             persist_planning_transaction(transaction_path, {
                 **transaction,
@@ -2046,11 +3075,20 @@ class CycleEngine:
             return {"outcome": "invalid_queue", "next_state": "validation_failed", "report": result.report_path}
 
         if classification == "human_decision_required":
-            human = result.structured_result.get("human_decision") if result.structured_result else None
+            human = queue_result_evidence.get("human_decision")
+            accept_typed_result("HUMAN_DECISION_REQUIRED", "human_decision_required")
+            projected = kernel.block(
+                state=TransactionState.HUMAN_DECISION_REQUIRED,
+                classification="HUMAN_DECISION_REQUIRED",
+                next_state="human_decision_required",
+                human_gate=human,
+            )
             self._transition_project(
                 project, project_state, "human_decision_required", run_id=run_id,
                 checkpoint="queue_reconciliation_human_gate", stop_reason="queue reconciliation requires a human decision",
                 human_gate=human,
+                kernel_owned=True,
+                kernel_projection=projection_evidence(projected),
             )
             persist_planning_transaction(transaction_path, {
                 **transaction,
@@ -2062,7 +3100,7 @@ class CycleEngine:
 
         try:
             report = json.loads(Path(str(result.report_path)).read_text(encoding="utf-8"))
-            if inspector.tracked_changed_paths():
+            if inspector.tracked_changed_paths() or inspector.untracked_file_hashes():
                 validation = validate_planning_changes(
                     project,
                     inspector,
@@ -2080,18 +3118,28 @@ class CycleEngine:
                     starting_head=planning_start["planning_start_commit"],
                     expected_session_id=result.session_id,
                 )
-            lease.revalidate(
-                run_id=run_id,
-                session_id=result.session_id,
-                repository_identity=planning_start["repository_identity"],
-                branch=str(planning_start["branch"] or ""),
-                head=planning_start["planning_start_commit"],
+            terminal_classification = PLANNING_CLASSIFICATIONS[str(classification)]
+            accept_typed_result(terminal_classification, {
+                "reconciled_ready_work": "feature_ready",
+                "reconciled_no_ready_work": "paused",
+                "milestone_complete": "milestone_gate",
+                "legitimately_blocked": "paused",
+            }[str(classification)])
+            kernel.validate(
+                authority=CommandAuthority(), command_results=(),
+                semantic_validator=adapter.semantic_validate,
             )
-            committed = (
-                finalize_planning_commit(project, inspector, validation)
-                if validation.get("changed_paths")
-                else validation
-            )
+            planning_commit = kernel.finalize()
+            committed = {
+                **validation,
+                "status": "planning_changes_committed" if validation.get("changed_paths") else "planning_no_changes",
+                "planning_result_commit": planning_commit,
+                "effective_milestone_head": planning_commit,
+                "planning_commit_status": "committed" if validation.get("changed_paths") else "not_required",
+                "repository_clean": True,
+                "selected_feature_starting_commit": planning_commit if validation.get("selected_feature") else None,
+                "committed_at": utc_now(),
+            }
             persist_planning_transaction(transaction_path, committed)
         except (OSError, json.JSONDecodeError, ConveyorError) as exc:
             failure = {
@@ -2103,6 +3151,14 @@ class CycleEngine:
                 "updated_at": utc_now(),
             }
             persist_planning_transaction(transaction_path, failure)
+            projected = kernel.block(
+                state=TransactionState.TERMINAL_FAILURE,
+                classification="PLANNING_VALIDATION_FAILED",
+                next_state="validation_failed",
+            ) if kernel.transaction and kernel.transaction.current_state not in {
+                TransactionState.BLOCKED, TransactionState.HUMAN_DECISION_REQUIRED,
+                TransactionState.RETRYABLE_FAILURE, TransactionState.TERMINAL_FAILURE,
+            } else kernel.projection.rebuild(persist_cache=True)
             self._transition_project(
                 project,
                 project_state,
@@ -2111,6 +3167,8 @@ class CycleEngine:
                 checkpoint="planning_validation_failed",
                 stop_reason=str(exc),
                 state_evidence={"planning_transaction": failure},
+                kernel_owned=True,
+                kernel_projection=projection_evidence(projected),
             )
             return {
                 "outcome": "planning_validation_failed",
@@ -2128,22 +3186,36 @@ class CycleEngine:
                 f"structured reconciliation result {classification!r} contradicts deterministic queue "
                 f"classification {derived!r}; report={result.report_path}"
             )
+            projected = kernel.block(
+                state=TransactionState.TERMINAL_FAILURE,
+                classification="PLANNING_SEMANTIC_CONFLICT",
+                next_state="validation_failed",
+            )
             self._transition_project(
                 project, project_state, "validation_failed", run_id=run_id,
                 checkpoint="structured_result_contradicted", stop_reason=message,
+                kernel_owned=True,
+                kernel_projection=projection_evidence(projected),
             )
             raise SessionError(message)
 
-        validation = result.structured_result.get("queue_validation", {}) if result.structured_result else {}
+        validation = queue_result_evidence.get("queue_validation", {})
         if (
             validation.get("valid") is not True
             or validation.get("milestone_found") != summary["milestone_found"]
             or validation.get("feature_count") != summary["feature_count"]
         ):
             message = f"structured queue-validation evidence disagrees with deterministic parsing; report={result.report_path}"
+            projected = kernel.block(
+                state=TransactionState.TERMINAL_FAILURE,
+                classification="PLANNING_SEMANTIC_CONFLICT",
+                next_state="validation_failed",
+            )
             self._transition_project(
                 project, project_state, "validation_failed", run_id=run_id,
                 checkpoint="structured_queue_validation_contradicted", stop_reason=message,
+                kernel_owned=True,
+                kernel_projection=projection_evidence(projected),
             )
             raise SessionError(message)
 
@@ -2158,6 +3230,14 @@ class CycleEngine:
             "reconciled_no_ready_work": "queue validated successfully; no dependency-ready feature exists",
             "legitimately_blocked": "queue validated successfully; remaining work is legitimately blocked",
         }
+        completed = kernel.complete(
+            classification=committed["terminal_classification"],
+            evidence={
+                "planning_status": "passed",
+                "selected_feature": committed.get("selected_feature"),
+                "planning_result_commit": committed.get("planning_result_commit"),
+            },
+        )
         self._transition_project(
             project, project_state, target, run_id=run_id, checkpoint=classification,
             stop_reason=stop_reasons.get(classification),
@@ -2166,6 +3246,8 @@ class CycleEngine:
             event_commit=committed.get("planning_result_commit"),
             event_command_category="planning_commit",
             event_validation_outcome="passed",
+            kernel_owned=True,
+            kernel_projection=projection_evidence(completed["projection"]),
         )
         return {
             "outcome": classification,
@@ -2187,6 +3269,8 @@ class CycleEngine:
         reservation_held: bool = False,
     ) -> dict[str, Any]:
         inspector = RepositoryInspector(project.repository)
+        kernel: WorkflowKernel | None = None
+        adapter: MilestoneGateAdapter | None = None
         compatibility = self._compatibility_snapshot(project, "milestone_gate")
         if compatibility is not None and compatibility.get("compatible") is not True:
             gate = {
@@ -2201,6 +3285,38 @@ class CycleEngine:
                 "safe_continuation_command": compatibility.get("validation_command"),
                 "resolved": False,
             }
+            identity = inspector.identity()
+            phase_root = self.root / "state/projects" / project.project_id
+            compatibility_ledger = EvidenceLedger(
+                phase_root / "evidence-ledger.jsonl", project_id=project.project_id,
+                repository_identity=identity["repository_id"],
+                repository_path_fingerprint=identity["path_fingerprint"],
+            )
+            compatibility_adapter = MilestoneGateAdapter(
+                allowed_paths=(), commit_subject="factory: milestone compatibility gate",
+                next_state="milestone_ready_for_merge",
+            )
+            compatibility_kernel = WorkflowKernel(
+                project=project, ledger=compatibility_ledger,
+                projection=ProjectionEngine(
+                    compatibility_ledger, phase_root / "projection-cache.json"
+                ),
+                lease=WorkflowWriterLease(inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                )),
+            )
+            compatibility_transaction = compatibility_kernel.begin(
+                workflow_type=WorkflowType.MILESTONE_GATE,
+                milestone=project.active_milestone, feature_id=None, run_id=run_id,
+                policy=compatibility_adapter.policy,
+            )
+            compatibility_kernel.acquire_lease()
+            compatibility_kernel.capture_snapshot()
+            blocked_projection = compatibility_kernel.block(
+                state=TransactionState.HUMAN_DECISION_REQUIRED,
+                classification="HUMAN_DECISION_REQUIRED",
+                next_state="human_decision_required", human_gate=gate,
+            )
             self._transition_project(
                 project,
                 project_state,
@@ -2210,6 +3326,11 @@ class CycleEngine:
                 stop_reason=str(compatibility.get("diagnostic")),
                 human_gate=gate,
                 state_evidence={"compatibility_preflight": compatibility},
+                kernel_owned=True,
+                kernel_projection={
+                    "transaction_id": compatibility_transaction.transaction_id,
+                    **blocked_projection,
+                },
             )
             return {"outcome": "human_decision_required", "human_gate": gate}
         reservation = None if reservation_held else self._launch_lock(project, inspector)
@@ -2233,31 +3354,130 @@ class CycleEngine:
                 or repository.get("head") != repository.get("milestone_branch_head")
             ):
                 raise RecoveryError("milestone gate requires the clean configured milestone HEAD")
-            inspector.ensure_runtime_ignored()
             cycle_path = inspector.cycle_state_path()
             state = self.cycle_store.read(cycle_path)
+            identity = inspector.identity()
+            phase_root = self.root / "state/projects" / project.project_id
+            ledger = EvidenceLedger(
+                phase_root / "evidence-ledger.jsonl", project_id=project.project_id,
+                repository_identity=identity["repository_id"],
+                repository_path_fingerprint=identity["path_fingerprint"],
+            )
+            adapter, tracked_paths = self._milestone_gate_adapter(project, inspector)
+            kernel = WorkflowKernel(
+                project=project, ledger=ledger,
+                projection=ProjectionEngine(ledger, phase_root / "projection-cache.json"),
+                lease=WorkflowWriterLease(inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                )),
+            )
+            transaction = kernel.begin(
+                workflow_type=WorkflowType.MILESTONE_GATE,
+                milestone=project.active_milestone, feature_id=None,
+                run_id=run_id, policy=adapter.policy,
+            )
+            kernel.acquire_lease()
+            kernel.capture_snapshot()
+            pinned_commands = self._configured_kernel_commands(project)
+            pinned_command_fingerprint = fingerprint([list(item) for item in pinned_commands])
+            adapter_bytes = inspector.safe_worktree_file_bytes(".factory/project.yaml")
+            if adapter_bytes is None:
+                raise RecoveryError("factory adapter disappeared before milestone-gate launch")
+            kernel.checkpoint("required_commands_pinned", {
+                "configured_source": ".factory/project.yaml",
+                "configured_source_sha256": hashlib.sha256(adapter_bytes).hexdigest(),
+                "command_fingerprint": pinned_command_fingerprint,
+                "commands": [list(item) for item in pinned_commands],
+            })
+            inspector.ensure_runtime_ignored()
+            kernel.checkpoint("runtime_ignore_verified")
             if state is None or state.get("current_phase") == "completed":
                 state = self._new_cycle_state(project, run_id, inspector, None)
-                self.cycle_store.write(cycle_path, state)
-                self._advance_cycle(cycle_path, state, "preflight", inspector, "milestone_preflight")
-                self._advance_cycle(cycle_path, state, "milestone_gate", inspector, "milestone_gate_launch")
+                self._write_cycle_cache(
+                    project, cycle_path, state, inspector, "milestone_cycle_initialized", kernel=kernel
+                )
+                self._advance_cycle(
+                    cycle_path, state, "preflight", inspector, "milestone_preflight", kernel=kernel
+                )
+                self._advance_cycle(
+                    cycle_path, state, "milestone_gate", inspector, "milestone_gate_launch", kernel=kernel
+                )
             elif state["current_phase"] == "feature_integrated":
-                self._advance_cycle(cycle_path, state, "milestone_gate", inspector, "milestone_gate_launch")
+                self._advance_cycle(
+                    cycle_path, state, "milestone_gate", inspector, "milestone_gate_launch", kernel=kernel
+                )
             elif state["current_phase"] != "milestone_gate":
                 raise ConveyorError(f"cycle phase {state['current_phase']} cannot enter milestone gate")
+            request = SessionRequest(
+                action="milestone_gate", project=project, run_id=run_id, mode=mode,
+                transaction_id=transaction.transaction_id,
+                repository_identity=identity["repository_id"],
+                starting_branch=transaction.starting_branch,
+                starting_commit=transaction.starting_head,
+                allowed_paths=tracked_paths,
+            )
+            result = self._launch_session(
+                request, inspector, "milestone_gate", reservation_held=True,
+                on_session_started=kernel.session_launched,
+            )
+            if result.transaction_envelope is None:
+                raise SessionError(self._session_failure_message(
+                    project, run_id, result, "milestone_gate"
+                ))
+            gate_envelope = SessionResultEnvelope.from_dict(result.transaction_envelope)
+            gate_blocked = self._route_kernel_result(kernel, adapter, gate_envelope)
+            if gate_blocked is not None:
+                self._transition_project(
+                    project, project_state, gate_envelope.next_state, run_id=run_id,
+                    checkpoint="kernel_milestone_gate_terminal",
+                    stop_reason=gate_envelope.classification,
+                    human_gate=gate_envelope.evidence.get("human_decision"),
+                    kernel_owned=True,
+                    kernel_projection={"transaction_id": transaction.transaction_id, **gate_blocked},
+                )
+                return {"outcome": gate_envelope.next_state, "classification": gate_envelope.classification}
+            authority, commands = self._execute_kernel_commands(project, pinned_commands)
+            kernel.record_file_mutation_boundary()
+            kernel.validate(
+                authority=authority, command_results=commands,
+                semantic_validator=adapter.semantic_validate,
+            )
+            gate_commit = kernel.finalize()
+            queue = FeatureQueue.from_location(project.repository, project.queue_location)
+            milestone = queue.milestone(project.active_milestone or "")
+            if milestone is None or milestone.get("status") != "gate_passed" or not queue.milestone_complete(project.active_milestone or ""):
+                raise QueueError("milestone gate result lacks gate_passed queue evidence")
+            self._advance_cycle(
+                cycle_path, state, "completed", inspector, "milestone_gate_passed", kernel=kernel
+            )
+            completed = kernel.complete(evidence={"gate_commit": gate_commit})
+            self._materialize_terminal_cycle_cache(
+                cycle_path, state, transaction.transaction_id, completed
+            )
+            gate = {
+                "decision": "Approve or decline merge of the validated milestone branch into the default branch.",
+                "milestone_branch": project.milestone_branch,
+                "default_branch_merge_performed": False,
+            }
+            if project_state["current_state"] != "milestone_gate":
+                self._transition_project(
+                    project, project_state, "milestone_gate", run_id=run_id,
+                    checkpoint="kernel_milestone_gate", kernel_owned=True,
+                    kernel_projection={"transaction_id": transaction.transaction_id, **completed["projection"]},
+                )
             self._transition_project(
-                project,
-                project_state,
-                "milestone_gate",
-                run_id=run_id,
-                checkpoint="milestone_gate_launch",
+                project, project_state, "milestone_ready_for_merge", run_id=run_id,
+                checkpoint="milestone_gate_passed",
+                stop_reason="human milestone merge approval required", human_gate=gate,
+                state_evidence=self._milestone_state_evidence(project, inspector, gate=True),
+                kernel_owned=True,
+                kernel_projection={"transaction_id": transaction.transaction_id, **completed["projection"]},
             )
-            result = self._launch_session(SessionRequest(
-                action="milestone_gate", project=project, run_id=run_id, mode=mode
-            ), inspector, "milestone_gate", reservation_held=True)
-            return self._finalize_milestone_gate_result(
-                project, run_id, project_state, inspector, state, result
-            )
+            return {"outcome": "milestone_ready_for_merge", "human_gate": gate}
+        except (ConveyorError, ValueError) as exc:
+            if kernel is not None and adapter is not None:
+                self._terminalize_handled_kernel_failure(kernel, adapter, exc)
+            raise
         finally:
             if reservation is not None:
                 reservation.release(run_id)
@@ -2534,7 +3754,7 @@ class CycleEngine:
                 reservation_held=True,
             )
             state["integration_attempts"].extend(repairs)
-            self.cycle_store.write(inspector.cycle_state_path(), state)
+            self._write_cycle_cache(project, inspector.cycle_state_path(), state, inspector, "integration_resume_repairs_recorded")
             evidence = self._reconcile_feature_evidence(
                 project,
                 inspector,
@@ -2563,6 +3783,45 @@ class CycleEngine:
         }
 
     def resume_project(self, project: Project, run_id: str | None = None) -> dict[str, Any]:
+        kernel_recovery = self._kernel_recovery_preflight(project, apply=True)
+        if kernel_recovery is not None:
+            return kernel_recovery
+        projection = self._authoritative_projection(project)
+        if projection is not None:
+            action = projection.get("allowed_next_action")
+            if action == "milestone_integration":
+                return self._execute_projected_integration(
+                    replace(project, current_state=str(projection["current_state"])),
+                    "resume", run_id or str(uuid.uuid4()), projection,
+                )
+            if action == "milestone_gate":
+                inspector = RepositoryInspector(project.repository)
+                cycle = self.cycle_store.read(inspector.cycle_state_path())
+                if isinstance(cycle, dict) and cycle.get("current_phase") == "completed":
+                    return {
+                        "project_id": project.project_id,
+                        "outcome": "already_completed",
+                        "current_state": projection.get("current_state"),
+                        "kernel_projection": projection,
+                    }
+                effective = replace(project, current_state="milestone_gate")
+                project_state = self._project_document(
+                    effective, run_id, inspector.identity()["path_fingerprint"]
+                )
+                project_state["current_state"] = "milestone_gate"
+                return {
+                    "project_id": project.project_id,
+                    **self._execute_milestone_gate(
+                        effective, "resume", run_id or str(uuid.uuid4()), project_state
+                    ),
+                }
+            return {
+                "project_id": project.project_id,
+                "outcome": "no_exact_transaction_to_resume",
+                "current_state": projection.get("current_state"),
+                "next_action": action,
+                "kernel_projection": projection,
+            }
         inspector = RepositoryInspector(project.repository)
         cycle_path = inspector.cycle_state_path()
         state = self.cycle_store.read(cycle_path)
@@ -2570,171 +3829,145 @@ class CycleEngine:
         assessment = assess_recovery(project, state)
         if assessment.outcome != "resume" or state is None:
             return {"project_id": project.project_id, "outcome": assessment.outcome, "human_decision": assessment.human_decision}
-        run_id = run_id or str(state["conveyor_run_id"])
+        return {
+            "project_id": project.project_id,
+            "outcome": "human_decision_required",
+            "reason": (
+                "legacy cycle evidence has no exact kernel transaction; a writable session "
+                "cannot be resumed outside RecoveryPlanner"
+            ),
+            "legacy_resume_blocked": True,
+            "session_launched": False,
+        }
+    def _execute_projected_integration(
+        self, project: Project, mode: str, run_id: str, projection: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Start a fresh exact integration transaction from canonical projection evidence."""
+
+        inspector = RepositoryInspector(project.repository)
+        queue = FeatureQueue.from_location(project.repository, project.queue_location)
+        selection = queue.select_integration(project.active_milestone or "")
+        if selection is None:
+            raise RecoveryError("projected integration has no unique active-milestone candidate")
+        if projection.get("current_feature") not in {None, selection.feature_id}:
+            raise RecoveryError("projected feature contradicts the unique integration candidate")
+        resolution = resolve_feature_commit(
+            feature=selection.feature, queue=queue, repository=inspector,
+            milestone_branch=project.milestone_branch,
+            baseline=project.validated_baseline_commit,
+            registered_commit=project.last_accepted_commit,
+            registered_feature=project.last_accepted_feature,
+        )
+        accepted = resolution.commit if resolution is not None else None
+        projected_accepted = projection.get("accepted_feature_commit")
+        if not isinstance(accepted, str) or (
+            projected_accepted is not None and projected_accepted != accepted
+        ):
+            raise RecoveryError("projected integration lacks one exact accepted commit")
+        milestone_head = inspector.rev_parse(project.milestone_branch or "", check=False)
+        if (
+            not inspector.is_clean
+            or any(inspector.git_operation_state().values())
+            or inspector.current_branch != project.milestone_branch
+            or inspector.head != milestone_head
+        ):
+            raise RecoveryError("projected integration requires the clean exact milestone snapshot")
+
+        identity = inspector.identity()
+        state_root = self.root / "state/projects" / project.project_id
+        ledger = EvidenceLedger(
+            state_root / "evidence-ledger.jsonl", project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        lease = WorkflowWriterLease(inspector.writer_lock_path(
+            self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+        ))
+        accepted_paths = tuple(sorted(inspector.git([
+            "diff-tree", "--no-commit-id", "--name-only", "-r", accepted
+        ]).stdout.splitlines()))
+        if not accepted_paths:
+            raise RecoveryError("accepted integration commit has no changed paths")
+        adapter = MilestoneIntegrationAdapter(
+            allowed_paths=accepted_paths,
+            commit_subject=f"factory: integrate {selection.feature_id}",
+            next_state="feature_integrated",
+        )
+        kernel = WorkflowKernel(
+            project=project, ledger=ledger,
+            projection=ProjectionEngine(ledger, state_root / "projection-cache.json"),
+            lease=lease,
+        )
         reservation = self._launch_lock(project, inspector)
-        reservation_status = reservation.status(run_id)
-        if reservation_status.exists:
-            if not reservation_status.owned_by_run:
-                return {"project_id": project.project_id, "outcome": "human_decision_required", "reason": "launch reservation belongs to another run"}
-            if reservation_status.process_alive is True or reservation_status.ambiguous:
-                return {"project_id": project.project_id, "outcome": "writer_locked", "reason": "launch reservation owner may still be active"}
-            reservation.recover_stale(expected_repository_identity=inspector.identity()["repository_id"])
-        phase = str(assessment.resume_phase)
-        compatibility_remediation = None
-        if phase == "human_decision_required":
-            compatibility_remediation = self._compatibility_remediation_plan(project, state)
-            if not compatibility_remediation or not compatibility_remediation["verified"]:
-                return {
-                    "project_id": project.project_id,
-                    "outcome": "human_decision_required",
-                    "human_decision": state.get("human_decision_required"),
-                    "compatibility_preflight": (
-                        compatibility_remediation or {}
-                    ).get("compatibility"),
-                }
         reservation.acquire(make_lock_record(
             project_id=project.project_id,
-            repository_identity=inspector.identity()["repository_id"],
-            run_id=run_id,
-            current_feature=state.get("current_feature"),
-            current_phase=f"resume:{phase}",
+            repository_identity=identity["repository_id"], run_id=run_id,
+            current_feature=selection.feature_id,
+            current_phase="projected_integration",
         ))
-        outcome: dict[str, Any]
         try:
-            current_cycle_fingerprint = (
-                hashlib.sha256(cycle_path.read_bytes()).hexdigest() if cycle_path.exists() else None
+            transaction = kernel.begin_for_branch(
+                workflow_type=WorkflowType.MILESTONE_INTEGRATION,
+                target_branch=str(project.milestone_branch),
+                milestone=project.active_milestone, feature_id=selection.feature_id,
+                run_id=run_id, policy=adapter.policy,
             )
-            current_assessment = assess_recovery(project, state)
-            writer = inspect_repository_writer_lock(
-                inspector.writer_lock_path(
-                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
-                ),
-                project.repository,
+            kernel.acquire_lease(); kernel.prepare_starting_branch(); kernel.capture_snapshot()
+            request = SessionRequest(
+                action="milestone_integration", project=project, run_id=run_id,
+                mode=mode, feature=selection.feature_id,
+                transaction_id=transaction.transaction_id,
+                repository_identity=identity["repository_id"],
+                starting_branch=transaction.starting_branch,
+                starting_commit=transaction.starting_head,
+                allowed_paths=accepted_paths,
             )
-            if (
-                current_cycle_fingerprint != cycle_fingerprint
-                or current_assessment.outcome != "resume"
-                or current_assessment.resume_phase != assessment.resume_phase
-            ):
-                raise RecoveryError("cycle, Git, or writer-lock evidence changed during resume acquisition")
-            if compatibility_remediation:
-                outcome = self._resume_remediated_action(
-                    project, run_id, inspector, state, compatibility_remediation
-                )
-            elif phase in {"feature_integrated", "next_feature_selection"}:
-                feature, accepted, integrated = self._verify_integrated_feature(project, inspector, state)
-                evidence = {"feature": feature["id"], "accepted_commit": accepted, "integrated_commit": integrated}
-                outcome = self._finish_resumed_feature(
-                    project,
-                    run_id,
-                    inspector,
-                    state,
-                    evidence,
-                    reservation_held=True,
-                )
-            else:
-                if phase == "failed":
-                    checkpoint = str(state.get("last_successful_checkpoint") or "")
-                    if "milestone_gate" in checkpoint:
-                        phase = "milestone_gate"
-                    elif "integration" in checkpoint:
-                        phase = "integration_pending"
-                    else:
-                        phase = "feature_in_progress"
-                    self._advance_cycle(
-                        inspector.cycle_state_path(), state, phase, inspector, "focused_resume_after_failure"
-                    )
-                if phase in {"integration_pending", "integration_ready", "integrating", "integration_validation"}:
-                    action = "milestone_integration"
-                elif phase == "milestone_gate":
-                    action = "milestone_gate"
-                else:
-                    action = "feature_cycle"
-                uncorroborated_continuation = bool(
-                    action == "feature_cycle"
-                    and state.get("feature_session_id")
-                    and state.get("failure_classification") is None
-                    and (
-                        state.get("last_successful_checkpoint") == "feature_branch_recovered"
-                        or state.get("session_completion_classification")
-                        in {
-                            "branch_invariant_violated",
-                            "uncommitted_feature_work",
-                            "incomplete_feature_result",
-                            "session_claimed_completion_without_evidence",
-                        }
-                    )
-                )
-                if action == "feature_cycle":
-                    self._verify_feature_branch_runtime(
-                        project, inspector, state, require_starting_head=False
-                    )
-                    lease_record = self._writer_lease(project, inspector).acquire_or_resume(
-                        feature=str(state.get("current_feature")),
-                        branch=str(state.get("feature_branch")),
-                        run_id=run_id,
-                    )
-                    state["writer_lock_identity"] = lease_record
-                    self._advance_cycle(
-                        cycle_path,
-                        state,
-                        str(state["current_phase"]),
-                        inspector,
-                        "writer_lease_acquired_before_resume",
-                    )
-                elif writer.exists:
-                    raise LockError("non-feature continuation cannot reuse a feature writer lease")
-                if action == "milestone_integration":
-                    inspector.ensure_runtime_ignored()
-                    resume_session_id = state.get("integration_session_id")
-                elif action == "milestone_gate":
-                    resume_session_id = state.get("milestone_gate_session_id") or state.get("session_id")
-                else:
-                    resume_session_id = state.get("feature_session_id") or state.get("session_id")
-                result = self._launch_session(SessionRequest(
-                    action=action,
-                    project=project,
-                    run_id=run_id,
-                    mode="resume",
-                    feature=state.get("current_feature"),
-                    session_id=resume_session_id,
-                    continuation_reason=(
-                        "uncorroborated_completion" if uncorroborated_continuation else None
-                    ),
-                ), inspector, phase, reservation_held=True)
-                if action in {"feature_cycle", "milestone_integration"}:
-                    evidence = self._reconcile_feature_evidence(
-                        project,
-                        inspector,
-                        inspector.cycle_state_path(),
-                        state,
-                        result,
-                        reservation_held=True,
-                    )
-                    outcome = self._finish_resumed_feature(
-                        project,
-                        run_id,
-                        inspector,
-                        state,
-                        evidence,
-                        reservation_held=True,
-                    )
-                else:
-                    project_state = self._project_document(
-                        project, run_id, inspector.identity()["path_fingerprint"]
-                    )
-                    outcome = {
-                        "project_id": project.project_id,
-                        **self._finalize_milestone_gate_result(
-                            project, run_id, project_state, inspector, state, result
-                        ),
-                    }
+            result = self._launch_session(
+                request, inspector, "integrating", reservation_held=True,
+                on_session_started=kernel.session_launched,
+            )
+            if result.transaction_envelope is None:
+                raise SessionError(self._session_failure_message(
+                    project, run_id, result, "integrating", selection.feature_id
+                ))
+            envelope = SessionResultEnvelope.from_dict(result.transaction_envelope)
+            blocked = self._route_kernel_result(kernel, adapter, envelope)
+            if blocked is not None:
+                return {
+                    "project_id": project.project_id,
+                    "outcome": envelope.next_state,
+                    "classification": envelope.classification,
+                    "kernel_projection": blocked,
+                }
+            prepared = kernel.prepare_integration_changes(accepted)
+            if prepared != accepted_paths:
+                raise RecoveryError("prepared integration differs from the accepted commit")
+            authority, commands = self._kernel_required_commands(project)
+            kernel.record_file_mutation_boundary()
+            kernel.validate(
+                authority=authority, command_results=commands,
+                semantic_validator=adapter.semantic_validate,
+            )
+            integrated = kernel.finalize()
+            completion = kernel.complete(evidence={
+                "accepted_feature_commit": accepted,
+                "integrated_commit": integrated,
+                "integration_status": "passed",
+            })
+            return {
+                "project_id": project.project_id,
+                "outcome": "feature_integrated",
+                "feature": selection.feature_id,
+                "accepted_commit": accepted,
+                "integrated_commit": integrated,
+                "kernel_projection": completion["projection"],
+                "next_action": "queue_reconciliation",
+            }
+        except (ConveyorError, ValueError) as exc:
+            self._terminalize_handled_kernel_failure(kernel, adapter, exc)
+            raise
         finally:
             reservation.release(run_id)
-        continue_mode = outcome.pop("_continue_mode", None)
-        if continue_mode:
-            return self.run_project(project, str(continue_mode))
-        return outcome
 
     def recover_planning_transaction(
         self,
@@ -2787,6 +4020,10 @@ class CycleEngine:
                 "milestone_integrator_would_launch": False,
                 "application_source_written": False,
             }
+        if (self.root / "state/projects" / project.project_id / "evidence-ledger.jsonl").exists():
+            raise RecoveryError(
+                "legacy planning recovery is disabled after transactional-ledger cutover; use resume"
+            )
         if (
             existing
             and existing.get("status") == "planning_changes_committing"
@@ -3020,6 +4257,11 @@ class CycleEngine:
 
     def recover_feature_branch(self, project: Project, *, dry_run: bool) -> dict[str, Any]:
         """Recover an exact dirty milestone checkout by creating its persisted feature branch."""
+
+        if (self.root / "state/projects" / project.project_id / "evidence-ledger.jsonl").exists():
+            raise RecoveryError(
+                "legacy feature-branch recovery is disabled after transactional-ledger cutover; use resume"
+            )
 
         inspector = RepositoryInspector(project.repository)
         cycle_path = inspector.cycle_state_path()
@@ -3412,6 +4654,125 @@ class CycleEngine:
             result.update({"run_id": None, "current_state": target, "state_recovered": False})
         return result
 
+    def _ack_reconciled_human_materialization(
+        self, project: Project, *, resolution_id: str
+    ) -> bool:
+        """Acknowledge a replayed terminal side effect only after artifact verification."""
+
+        inspector = RepositoryInspector(project.repository)
+        identity = inspector.identity()
+        state_root = self.root / "state/projects" / project.project_id
+        ledger_path = state_root / "evidence-ledger.jsonl"
+        if not ledger_path.exists():
+            return False
+        ledger = EvidenceLedger(
+            ledger_path, project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        events = ledger.read()
+        transaction_id = next((
+            event["transaction_id"] for event in events
+            if event["event_type"] == "TransactionStarted"
+            and event["workflow_type"] == WorkflowType.HUMAN_DECISION_RESOLUTION.value
+            and event["payload"].get("run_id") == resolution_id
+            and any(
+                candidate["transaction_id"] == event["transaction_id"]
+                and candidate["event_type"] == "TransactionCompleted"
+                for candidate in events
+            )
+        ), None)
+        if transaction_id is None:
+            return False
+        pending = next((
+            event for event in events
+            if event["transaction_id"] == transaction_id
+            and event["event_type"] == "CheckpointRecorded"
+            and event["payload"].get("checkpoint") == "compatibility_materialization_pending"
+        ), None)
+        acknowledged = any(
+            event["transaction_id"] == transaction_id
+            and event["event_type"] == "CheckpointRecorded"
+            and event["payload"].get("checkpoint") == "compatibility_materialization_acknowledged"
+            for event in events
+        )
+        if pending is None or acknowledged:
+            return acknowledged
+        ledger.append(
+            event_type="CheckpointRecorded", transaction_id=transaction_id,
+            workflow_type=WorkflowType.HUMAN_DECISION_RESOLUTION,
+            payload={
+                "checkpoint": "compatibility_materialization_acknowledged",
+                "materialization_id": pending["payload"].get("materialization_id"),
+                "reconciled_after_artifact_verification": True,
+            },
+        )
+        ProjectionEngine(ledger, state_root / "projection-cache.json").rebuild(
+            persist_cache=True
+        )
+        lease = WorkflowWriterLease(inspector.writer_lock_path(
+            self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+        ))
+        kernel = WorkflowKernel(
+            project=project, ledger=ledger,
+            projection=ProjectionEngine(ledger, state_root / "projection-cache.json"),
+            lease=lease,
+        )
+        kernel.restore(transaction_id)
+        kernel.complete()
+        return True
+
+    def _pending_human_materialization_transaction(
+        self, project: Project, *, resolution_id: str
+    ) -> str | None:
+        """Return the exact completed resolution awaiting compatibility replay."""
+
+        inspector = RepositoryInspector(project.repository)
+        identity = inspector.identity()
+        ledger_path = self.root / "state/projects" / project.project_id / "evidence-ledger.jsonl"
+        if not ledger_path.exists():
+            return None
+        ledger = EvidenceLedger(
+            ledger_path, project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        events = ledger.read()
+        matches = []
+        for event in events:
+            transaction_id = event["transaction_id"]
+            if not (
+                event["event_type"] == "TransactionStarted"
+                and event["workflow_type"] == WorkflowType.HUMAN_DECISION_RESOLUTION.value
+                and event["payload"].get("run_id") == resolution_id
+            ):
+                continue
+            transaction_events = [
+                candidate for candidate in events
+                if candidate["transaction_id"] == transaction_id
+            ]
+            completed = any(
+                candidate["event_type"] == "TransactionCompleted"
+                for candidate in transaction_events
+            )
+            pending = any(
+                candidate["event_type"] == "CheckpointRecorded"
+                and candidate["payload"].get("checkpoint")
+                == "compatibility_materialization_pending"
+                for candidate in transaction_events
+            )
+            acknowledged = any(
+                candidate["event_type"] == "CheckpointRecorded"
+                and candidate["payload"].get("checkpoint")
+                == "compatibility_materialization_acknowledged"
+                for candidate in transaction_events
+            )
+            if completed and pending and not acknowledged:
+                matches.append(transaction_id)
+        if len(matches) > 1:
+            raise RecoveryError("multiple pending human-resolution materializations are contradictory")
+        return matches[0] if matches else None
+
     def resolve_human_decision(
         self, project: Project, *, reason: str, dry_run: bool
     ) -> dict[str, Any]:
@@ -3452,6 +4813,13 @@ class CycleEngine:
         fingerprint_reason = reason if not reason_rejected_sensitive else "[REJECTED_SENSITIVE_REASON]"
         fingerprint = resolution_fingerprint(project.project_id, gate, fingerprint_reason)
         resolution_id = f"human-resolution-{fingerprint[:24]}"
+        pending_materialization = self._pending_human_materialization_transaction(
+            project, resolution_id=resolution_id
+        )
+        if not dry_run and pending_materialization is None:
+            recovery = self._kernel_recovery_preflight(project, apply=True)
+            if recovery is not None and recovery.get("outcome") == "human_decision_required":
+                return recovery
         report_root = self.configuration.owned_path(self.configuration.conveyor["report_directory"])
         accepted_report_path = self._report_path(
             report_root, resolution_id, "human-decision-resolution.json"
@@ -3777,6 +5145,10 @@ class CycleEngine:
             artifacts_valid = bool(artifact_checks) and all(
                 item.get("passed") is True for item in artifact_checks
             )
+            if artifacts_valid and not dry_run:
+                self._ack_reconciled_human_materialization(
+                    project, resolution_id=resolution_id
+                )
             report = dict(prior)
             report.update({
                 "outcome": "already_resolved" if artifacts_valid else "resolution_rejected",
@@ -4067,102 +5439,245 @@ class CycleEngine:
                     report,
                     exact_reason="human-resolution state belongs to another repository fingerprint",
                 )
-            report.update({
-                "outcome": "resolution_accepted",
-                "resolution_would_be_accepted": True,
-                "applied": True,
-                "state_would_be_written": True,
-                "state_written": True,
-                "dry_run": False,
-                "rejection_reasons": [],
-                "evidence_validators_executed": [item["validator"] for item in revalidated["checks"]],
-                "evidence_results": revalidated["checks"],
-                "timestamp": utc_now(),
-                "persisted_state": str(gate["approved_next_state"]),
-            })
-            history = document.setdefault("human_decision_history", [])
-            if not isinstance(history, list):
-                raise RecoveryError("persisted human-decision history is malformed")
-            history.append({
-                "gate": dict(gate),
-                "gate_fingerprint": revalidated.get("gate_fingerprint"),
-                "resolution": report,
-            })
-            document = self._transition_project(
-                project,
-                document,
-                str(gate["approved_next_state"]),
-                run_id=resolution_id,
-                checkpoint="explicit_human_decision_resolved",
-                feature=None,
-                stop_reason="Explicit human decision resolved; queue reconciliation is next.",
-                human_gate=None,
-                state_evidence={
-                    "classification": "explicit_human_decision_resolution",
-                    "gate_id": gate.get("gate_id"),
-                    "gate_fingerprint": revalidated.get("gate_fingerprint"),
-                    "resolution_id": resolution_id,
-                    "resolution_fingerprint": fingerprint,
-                    "report_location": str(accepted_report_path),
-                    "audit_log_location": audit_log_location,
-                },
-                event_human_gate={
-                    "gate_id": gate.get("gate_id"),
-                    "gate_fingerprint": revalidated.get("gate_fingerprint"),
-                    "resolution_id": resolution_id,
-                    "resolution_fingerprint": fingerprint,
-                    "actor_classification": "explicit_user_approval",
-                    "report_location": str(accepted_report_path),
-                },
-                event_branch=inspector.current_branch,
-                event_commit=inspector.head,
-                event_command_category="human_decision_resolution",
-                event_validation_outcome="passed",
+            identity = inspector.identity()
+            inspector.ensure_runtime_ignored()
+            state_root = self.root / "state/projects" / project.project_id
+            ledger = EvidenceLedger(
+                state_root / "evidence-ledger.jsonl", project_id=project.project_id,
+                repository_identity=identity["repository_id"],
+                repository_path_fingerprint=identity["path_fingerprint"],
             )
-            if gate.get("classification") == "integration_planning_baseline_approval":
-                cycle_path = inspector.cycle_state_path()
-                cycle = self.cycle_store.read(cycle_path)
-                if cycle is None or cycle.get("human_decision_required", {}).get("gate_id") != gate.get("gate_id"):
-                    raise RecoveryError("resolved integration gate is not bound to the persisted repository cycle")
-                prior_session = cycle.get("integration_session_id")
-                prior_sessions = list(cycle.get("prior_integration_session_ids") or [])
-                if isinstance(prior_session, str) and prior_session not in prior_sessions:
-                    prior_sessions.append(prior_session)
-                planning_baseline = {
-                    "schema_version": 1,
-                    "commit": gate.get("candidate_validated_planning_commit"),
-                    "previous_validated_commit": gate.get("previous_last_validated_commit"),
-                    "evidence_fingerprint": (
-                        revalidated.get("planning_baseline_provenance") or {}
-                    ).get("evidence_fingerprint"),
-                    "reconciliation_run": (gate.get("planning_baseline_evidence") or {}).get("reconciliation_run"),
-                    "validated_at": report["timestamp"],
-                    "approval_resolution_id": resolution_id,
-                    "approval_resolution_fingerprint": fingerprint,
-                }
-                cycle.update({
-                    "validated_planning_baseline": planning_baseline,
-                    "integration_status": "ready",
-                    "integration_gate": None,
-                    "human_decision_required": None,
-                    "failure_classification": None,
-                    "retry_exhausted": False,
-                    "next_safe_action": "milestone_integration",
-                    "stop_reason": None,
-                    "prior_integration_session_ids": prior_sessions,
-                    "integration_session_id": None,
-                    "resume_instructions": f"scripts/conveyor run --project {project.project_id} --mode {project.automation_mode}",
-                })
-                self._advance_cycle(
-                    cycle_path, cycle, "integration_ready", inspector,
-                    "explicit_human_decision_resolved_integration_ready",
+            kernel_resolution_next_state = (
+                "integration_ready"
+                if gate.get("classification") == "integration_planning_baseline_approval"
+                else str(gate["approved_next_state"])
+            )
+            resolution_adapter = HumanDecisionResolutionAdapter(
+                allowed_paths=(), commit_subject="factory: resolve human decision",
+                next_state=kernel_resolution_next_state,
+            )
+            resolution_kernel = WorkflowKernel(
+                project=project, ledger=ledger,
+                projection=ProjectionEngine(ledger, state_root / "projection-cache.json"),
+                lease=WorkflowWriterLease(inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+                )),
+            )
+            ledger_events = ledger.read()
+            replay_transaction_id = next((
+                event["transaction_id"] for event in ledger_events
+                if event["event_type"] == "TransactionStarted"
+                and event["workflow_type"] == WorkflowType.HUMAN_DECISION_RESOLUTION.value
+                and event["payload"].get("run_id") == resolution_id
+                and any(
+                    candidate["transaction_id"] == event["transaction_id"]
+                    and candidate["event_type"] == "TransactionCompleted"
+                    for candidate in ledger_events
                 )
-            atomic_write_json(accepted_report_path, report)
+                and any(
+                    candidate["transaction_id"] == event["transaction_id"]
+                    and candidate["event_type"] == "CheckpointRecorded"
+                    and candidate["payload"].get("checkpoint") == "compatibility_materialization_pending"
+                    for candidate in ledger_events
+                )
+                and not any(
+                    candidate["transaction_id"] == event["transaction_id"]
+                    and candidate["event_type"] == "CheckpointRecorded"
+                    and candidate["payload"].get("checkpoint") == "compatibility_materialization_acknowledged"
+                    for candidate in ledger_events
+                )
+            ), None)
+            if replay_transaction_id is not None:
+                transaction = resolution_kernel.restore(replay_transaction_id)
+            else:
+                transaction = resolution_kernel.begin(
+                    workflow_type=WorkflowType.HUMAN_DECISION_RESOLUTION,
+                    milestone=project.active_milestone, feature_id=None,
+                    run_id=resolution_id, policy=resolution_adapter.policy,
+                    start_evidence={
+                        "resolved_gate_id": str(gate["gate_id"]),
+                        "resolved_gate_fingerprint": gate_fingerprint(gate),
+                    },
+                )
+                resolution_kernel.acquire_lease(); resolution_kernel.capture_snapshot()
+                session_id = f"deterministic-human-resolution:{transaction.transaction_id}"
+                resolution_kernel.session_launched(session_id)
+                envelope = SessionResultEnvelope.from_dict({
+                    "schema_version": 1, "workflow_type": "human_decision_resolution",
+                    "classification": "HUMAN_GATE_RESOLVED", "project_id": project.project_id,
+                    "repository_identity": identity["repository_id"],
+                    "transaction_id": transaction.transaction_id, "run_id": resolution_id,
+                    "session_id": session_id, "starting_branch": transaction.starting_branch,
+                    "starting_commit": transaction.starting_head, "current_commit": transaction.starting_head,
+                    "feature_id": None, "changed_paths": [],
+                    "evidence": {"gate_id": gate.get("gate_id"), "resolution_fingerprint": fingerprint},
+                    "next_state": kernel_resolution_next_state,
+                })
+                resolution_kernel.accept_result(envelope)
+                resolution_kernel.record_file_mutation_boundary()
+                resolution_kernel.validate(
+                    authority=CommandAuthority(), command_results=(),
+                    semantic_validator=resolution_adapter.semantic_validate,
+                )
+                resolution_kernel.finalize()
+                ledger.append(
+                    event_type="HumanGateResolved",
+                    transaction_id=transaction.transaction_id,
+                    workflow_type=WorkflowType.HUMAN_DECISION_RESOLUTION,
+                    payload={
+                        "gate_id": str(gate["gate_id"]),
+                        "gate_fingerprint": gate_fingerprint(gate),
+                        "raised_transaction_id": None,
+                        "resolution_id": resolution_id,
+                        "resolution_fingerprint": fingerprint,
+                    },
+                )
+
+            def persist_after_terminal(kernel_projection: dict[str, Any]) -> None:
+                report.update({
+                    "outcome": "resolution_accepted", "resolution_would_be_accepted": True,
+                    "applied": True, "state_would_be_written": True, "state_written": True,
+                    "dry_run": False, "rejection_reasons": [],
+                    "evidence_validators_executed": [item["validator"] for item in revalidated["checks"]],
+                    "evidence_results": revalidated["checks"],
+                    "persisted_state": str(gate["approved_next_state"]),
+                })
+                history = document.setdefault("human_decision_history", [])
+                if not isinstance(history, list):
+                    raise RecoveryError("persisted human-decision history is malformed")
+                if not any(
+                    isinstance(item, dict)
+                    and isinstance(item.get("resolution"), dict)
+                    and item["resolution"].get("resolution_id") == resolution_id
+                    for item in history
+                ):
+                    history.append({"gate": dict(gate), "gate_fingerprint": revalidated.get("gate_fingerprint"), "resolution": report})
+                if (
+                    document.get("current_state") != str(gate["approved_next_state"])
+                    or document.get("human_decision_required") is not None
+                ):
+                    self._transition_project(
+                        project, document, str(gate["approved_next_state"]), run_id=resolution_id,
+                        checkpoint="explicit_human_decision_resolved", feature=None,
+                        stop_reason="Explicit human decision resolved; queue reconciliation is next.",
+                        human_gate=None,
+                        state_evidence={
+                            "classification": "explicit_human_decision_resolution",
+                            "gate_id": gate.get("gate_id"), "gate_fingerprint": revalidated.get("gate_fingerprint"),
+                            "resolution_id": resolution_id, "resolution_fingerprint": fingerprint,
+                            "report_location": str(accepted_report_path), "audit_log_location": audit_log_location,
+                        },
+                        event_human_gate={
+                            "gate_id": gate.get("gate_id"), "gate_fingerprint": revalidated.get("gate_fingerprint"),
+                            "resolution_id": resolution_id, "resolution_fingerprint": fingerprint,
+                            "actor_classification": "explicit_user_approval", "report_location": str(accepted_report_path),
+                        },
+                        event_branch=inspector.current_branch, event_commit=inspector.head,
+                        event_command_category="human_decision_resolution", event_validation_outcome="passed",
+                        kernel_owned=True,
+                        kernel_projection={"transaction_id": transaction.transaction_id, **kernel_projection},
+                    )
+                if gate.get("classification") == "integration_planning_baseline_approval":
+                    cycle_path = inspector.cycle_state_path()
+                    cycle = self.cycle_store.read(cycle_path)
+                    if cycle is None or cycle.get("human_decision_required", {}).get("gate_id") != gate.get("gate_id"):
+                        raise RecoveryError("resolved integration gate is not bound to the persisted repository cycle")
+                    prior_session = cycle.get("integration_session_id")
+                    prior_sessions = list(cycle.get("prior_integration_session_ids") or [])
+                    if isinstance(prior_session, str) and prior_session not in prior_sessions:
+                        prior_sessions.append(prior_session)
+                    cycle.update({
+                        "validated_planning_baseline": {
+                            "schema_version": 1, "commit": gate.get("candidate_validated_planning_commit"),
+                            "previous_validated_commit": gate.get("previous_last_validated_commit"),
+                            "evidence_fingerprint": (revalidated.get("planning_baseline_provenance") or {}).get("evidence_fingerprint"),
+                            "reconciliation_run": (gate.get("planning_baseline_evidence") or {}).get("reconciliation_run"),
+                            "validated_at": report["timestamp"], "approval_resolution_id": resolution_id,
+                            "approval_resolution_fingerprint": fingerprint,
+                        },
+                        "integration_status": "ready", "integration_gate": None,
+                        "human_decision_required": None, "failure_classification": None,
+                        "retry_exhausted": False, "next_safe_action": "milestone_integration",
+                        "stop_reason": None, "prior_integration_session_ids": prior_sessions,
+                        "integration_session_id": None,
+                        "resume_instructions": f"scripts/conveyor run --project {project.project_id} --mode {project.automation_mode}",
+                    })
+                    if cycle.get("current_phase") != "integration_ready":
+                        self._advance_cycle(cycle_path, cycle, "integration_ready", inspector, "explicit_human_decision_resolved_integration_ready")
+                atomic_write_json(accepted_report_path, report)
+
+            resolution_kernel.complete(
+                evidence={
+                    "human_gate_resolution_id": resolution_id,
+                    "selected_feature": gate.get("feature_id") or gate.get("feature"),
+                    "accepted_feature_commit": gate.get("accepted_feature_commit"),
+                },
+                terminal_callback=persist_after_terminal,
+                materialization={
+                    "kind": "human_decision_resolution",
+                    "resolution_id": resolution_id,
+                    "resolution_fingerprint": fingerprint,
+                    "gate_id": gate.get("gate_id"),
+                    "approved_next_state": str(gate["approved_next_state"]),
+                    "report_location": str(accepted_report_path),
+                },
+            )
             return report
         finally:
             reservation.release(resolution_id)
 
     def run_project(self, project: Project, mode: str, *, dry_run: bool = False) -> dict[str, Any]:
+        kernel_recovery = self._kernel_recovery_preflight(
+            project, apply=(mode == "resume" and not dry_run)
+        )
+        if kernel_recovery is not None:
+            return kernel_recovery
+        authoritative = self._authoritative_projection(project)
+        if authoritative is not None and not dry_run and mode != "audit":
+            if authoritative.get("active_transaction") is not None:
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "human_decision_required",
+                    "reason": "active kernel transaction requires exact recovery",
+                    "kernel_projection": authoritative,
+                }
+            effective = replace(project, current_state=str(authoritative["current_state"]))
+            action = authoritative.get("allowed_next_action")
+            run_id = str(uuid.uuid4())
+            inspector = RepositoryInspector(project.repository)
+            project_state = self._project_document(
+                effective, run_id, inspector.identity()["path_fingerprint"]
+            )
+            project_state["current_state"] = effective.current_state
+            project_state["current_feature"] = authoritative.get("current_feature")
+            if action == "milestone_integration":
+                return self._execute_projected_integration(
+                    effective, mode, run_id, authoritative
+                )
+            if action == "feature_cycle":
+                return {
+                    "project_id": project.project_id,
+                    **self._execute_feature(effective, mode, run_id, project_state),
+                }
+            if action == "queue_reconciliation":
+                return {
+                    "project_id": project.project_id,
+                    **self._execute_queue_reconciliation(
+                        effective, mode, run_id, project_state
+                    ),
+                }
+            if action == "milestone_gate":
+                return {
+                    "project_id": project.project_id,
+                    **self._execute_milestone_gate(
+                        effective, mode, run_id, project_state
+                    ),
+                }
+            return {
+                "project_id": project.project_id,
+                "outcome": action or "verify_consistency",
+                "kernel_projection": authoritative,
+            }
         if mode == "resume":
             plan = self.project_plan(project)
             if dry_run:

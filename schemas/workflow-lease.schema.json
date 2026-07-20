@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "workflow-lease.schema.json",
+  "type": "object",
+  "required": ["schema_version", "lease_id", "lease_type", "repository_identity", "repository_path_fingerprint", "repository_path", "project_id", "transaction_id", "workflow_type", "starting_branch", "starting_head", "run_id", "owner_pid", "owner_process_start", "owner_host", "created_at", "last_heartbeat", "allowed_mutations"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "lease_id": {"type": "string", "minLength": 1},
+    "lease_type": {"type": "string", "enum": ["planning_writer", "feature_writer", "integration_writer", "milestone_gate_writer", "recovery_writer"]},
+    "repository_identity": {"type": "string", "minLength": 64},
+    "repository_path_fingerprint": {"type": "string", "minLength": 64},
+    "repository_path": {"type": "string", "minLength": 1},
+    "repository": {"type": "string", "minLength": 1},
+    "worktree": {"type": "string", "minLength": 1},
+    "branch": {"type": "string", "minLength": 1},
+    "agent_run": {"type": "string", "minLength": 1},
+    "phase": {"type": "string", "minLength": 1},
+    "purpose": {"type": "string", "minLength": 1},
+    "project_id": {"type": "string", "minLength": 1},
+    "transaction_id": {"type": "string", "minLength": 1},
+    "workflow_type": {"type": "string"},
+    "starting_branch": {"type": "string", "minLength": 1},
+    "starting_head": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "owner_pid": {"type": "integer", "minimum": 1},
+    "owner_process_start": {"type": "string", "minLength": 1},
+    "owner_host": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "last_heartbeat": {"type": "string", "minLength": 1},
+    "allowed_mutations": {"type": "object"}
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "command-record.schema.json",
+  "type": "object",
+  "required": ["command", "classification", "configured_source", "exit_status", "effect_on_transaction", "diagnostic"],
+  "properties": {
+    "command": {"type": "array", "items": {"type": "string"}},
+    "classification": {"type": "string", "enum": ["configured_required_validation", "kernel_required_finalization", "workflow_required_evidence", "optional_diagnostic", "status_observation", "unsupported_command"]},
+    "configured_source": {"type": ["string", "null"]},
+    "exit_status": {"type": "integer"},
+    "effect_on_transaction": {"type": "string"},
+    "diagnostic": {"type": ["string", "null"]}
+  },
+  "additionalProperties": false
+}

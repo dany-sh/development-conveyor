@@ -74,6 +74,11 @@
       ]
     },
     "milestone_gate_session_id": {"type": ["string", "null"]},
+    "kernel_transaction_id": {"type": "string"},
+    "kernel_ledger_sequence": {"type": "integer", "minimum": 1},
+    "kernel_ledger_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "kernel_projection_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "kernel_cache_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "created_at": {"type": "string"},
     "updated_at": {"type": "string"}
   }

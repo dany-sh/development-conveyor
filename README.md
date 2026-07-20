@@ -11,6 +11,8 @@ The controller selects dependency-ready work, resumes interrupted cycles, launch
 
 ## Architecture
 
+M1 introduces one transactional kernel for writable phases. Each phase binds a transaction to the exact repository, workflow, branch, starting HEAD, mutation policy, session result, and typed `.factory/locks/writer.json` lease. Canonical hash-chained events live under `state/projects/<project-id>/evidence-ledger.jsonl`; `projection-cache.json` and legacy project/cycle files are rebuildable compatibility state. Use `scripts/conveyor verify-consistency --project PROJECT --json` to inspect exact invariants and `scripts/conveyor migrate-state --project PROJECT --dry-run` before any legacy import.
+
 The standalone repository is authoritative. The global `$development-conveyor` skill and `development-conveyor` agent are thin launchers.
 
 ```text
