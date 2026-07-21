@@ -37,7 +37,7 @@ from .planning import (
 )
 from .logging import EventLogger, JsonStateStore, atomic_write_bytes, atomic_write_json, run_event, utc_now
 from .human_resolution import evaluate_human_resolution, gate_fingerprint, resolution_fingerprint
-from .queue import FeatureQueue, resolve_feature_commit, resolve_queue_path
+from .queue import FeatureQueue, resolve_queue_path
 from .recovery import (
     StartupReconciliation,
     assess_durable_integration_success,
@@ -582,16 +582,14 @@ class CycleEngine:
                     raise ProjectionError(
                         "integration feature identity or branch no longer matches the execution plan"
                     )
-                resolution = resolve_feature_commit(
-                    feature=selection.feature,
-                    queue=queue,
-                    repository=inspector,
-                    milestone_branch=project.milestone_branch,
-                    baseline=project.validated_baseline_commit,
-                    registered_commit=project.last_accepted_commit,
-                    registered_feature=project.last_accepted_feature,
-                )
-                if resolution is None or resolution.commit != executable.accepted_commit:
+                accepted = executable.accepted_commit
+                queue_reference = selection.feature.get("accepted_commit")
+                if (
+                    not isinstance(accepted, str)
+                    or accepted == "SELF"
+                    or inspector.rev_parse(accepted, check=False) != accepted
+                    or queue_reference not in {"SELF", accepted}
+                ):
                     raise ProjectionError(
                         "accepted feature commit no longer matches the execution plan"
                     )
@@ -1702,6 +1700,7 @@ class CycleEngine:
             "redacted_stderr": str(error),
             "redacted_stderr_summary": str(error)[-2000:],
             "session_id": None,
+            "accepted_commit": request.accepted_commit,
             "current_state": current_state,
             "failure_classification": classification,
             "retryable": False,
@@ -1754,6 +1753,7 @@ class CycleEngine:
             "redacted_stderr": result.redacted_stderr,
             "redacted_stderr_summary": (result.redacted_stderr or "")[-2000:],
             "session_id": result.session_id,
+            "accepted_commit": request.accepted_commit,
             "current_state": current_state,
             "failure_classification": result.failure_classification,
             "retryable": result.retryable,
@@ -4196,7 +4196,7 @@ class CycleEngine:
             if action == "milestone_integration":
                 return self._execute_projected_integration(
                     replace(project, current_state=str(projection["current_state"])),
-                    "resume", run_id or str(uuid.uuid4()), projection,
+                    "resume", run_id or str(uuid.uuid4()), executable,
                 )
             if action == "milestone_gate":
                 inspector = RepositoryInspector(project.repository)
@@ -4257,7 +4257,7 @@ class CycleEngine:
             "session_launched": False,
         }
     def _execute_projected_integration(
-        self, project: Project, mode: str, run_id: str, projection: dict[str, Any]
+        self, project: Project, mode: str, run_id: str, execution_plan: ExecutionPlan
     ) -> dict[str, Any]:
         """Start a fresh exact integration transaction from canonical projection evidence."""
 
@@ -4266,8 +4266,7 @@ class CycleEngine:
             raise ProjectionError("projected integration requires an authoritative ledger projection")
         current_projection, executable, _ = context
         if (
-            current_projection.get("projection_fingerprint")
-            != projection.get("projection_fingerprint")
+            executable.to_dict() != execution_plan.to_dict()
             or executable.workflow_type != WorkflowType.MILESTONE_INTEGRATION.value
             or executable.transaction_mode != "fresh"
         ):
@@ -4281,17 +4280,11 @@ class CycleEngine:
             raise RecoveryError("projected integration has no unique active-milestone candidate")
         if projection.get("current_feature") not in {None, selection.feature_id}:
             raise RecoveryError("projected feature contradicts the unique integration candidate")
-        resolution = resolve_feature_commit(
-            feature=selection.feature, queue=queue, repository=inspector,
-            milestone_branch=project.milestone_branch,
-            baseline=project.validated_baseline_commit,
-            registered_commit=project.last_accepted_commit,
-            registered_feature=project.last_accepted_feature,
-        )
-        accepted = resolution.commit if resolution is not None else None
-        projected_accepted = projection.get("accepted_feature_commit")
-        if not isinstance(accepted, str) or (
-            projected_accepted is not None and projected_accepted != accepted
+        accepted = executable.accepted_commit
+        if (
+            not isinstance(accepted, str)
+            or accepted == "SELF"
+            or inspector.rev_parse(accepted, check=False) != accepted
         ):
             raise RecoveryError("projected integration lacks one exact accepted commit")
         milestone_head = inspector.rev_parse(project.milestone_branch or "", check=False)
@@ -4345,6 +4338,9 @@ class CycleEngine:
             if reserved_context is None:
                 raise ProjectionError("authoritative projection disappeared before integration")
             projection, executable = reserved_context
+            accepted = executable.accepted_commit
+            if not isinstance(accepted, str) or accepted == "SELF":
+                raise ProjectionError("reserved integration plan lacks a normalized accepted commit")
             transaction = kernel.begin_for_branch(
                 workflow_type=WorkflowType.MILESTONE_INTEGRATION,
                 target_branch=str(project.milestone_branch),
@@ -4361,6 +4357,7 @@ class CycleEngine:
                 repository_identity=identity["repository_id"],
                 starting_branch=transaction.starting_branch,
                 starting_commit=transaction.starting_head,
+                accepted_commit=accepted,
                 allowed_paths=accepted_paths,
             )
             result = self._launch_session(
@@ -6165,7 +6162,7 @@ class CycleEngine:
             authoritative = reloaded_projection
             if action == "milestone_integration":
                 return self._execute_projected_integration(
-                    effective, mode, run_id, authoritative
+                    effective, mode, run_id, reloaded_executable
                 )
             if action == "feature_cycle":
                 evidence = self._execute_feature(effective, mode, run_id, project_state)

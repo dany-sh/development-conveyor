@@ -21,7 +21,9 @@ from development_conveyor.errors import ProjectionError, TransactionError
 from development_conveyor.migration import LegacyStateMigrator
 from development_conveyor.ledger import EvidenceLedger
 from development_conveyor.projection import ProjectionEngine, cache_agrees, projection_fingerprint
+from development_conveyor.queue import FeatureQueue
 from development_conveyor.repository import RepositoryInspector
+from development_conveyor.sessions import SessionLauncher
 from tests.helpers import (
     REPOSITORY_ROOT,
     SyntheticLauncher,
@@ -290,7 +292,7 @@ class ProjectionAuthorityTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(TransactionError, "planned transaction start"):
                     engine._execute_projected_integration(
-                        project, "milestone", "stale-integration-dispatch", projection
+                        project, "milestone", "stale-integration-dispatch", planned
                     )
             self.assertEqual(ledger_before, ledger_path.read_bytes())
             self.assertEqual(advanced_tree, [git(repository, "rev-parse", "HEAD^{tree}")])
@@ -340,9 +342,100 @@ class ProjectionAuthorityTests(unittest.TestCase):
             self.assertTrue(RepositoryInspector(repository).is_clean)
 
             result = engine._execute_projected_integration(
-                project, "milestone", "feature-checkout-integration", projection
+                project,
+                "milestone",
+                "feature-checkout-integration",
+                engine._execution_plan(project, projection),
             )
             self.assertEqual("feature_integrated", result["outcome"])
+            self.assertFalse((repository / ".factory/locks/writer.json").exists())
+
+    def test_actual_integration_dispatch_uses_plan_commit_when_queue_contains_self(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, project, configuration, engine, accepted, _ = self._integration_fixture(root)
+            inspector = RepositoryInspector(repository)
+            state_root = configuration.root / "state/projects/synthetic"
+            ledger = EvidenceLedger(
+                state_root / "evidence-ledger.jsonl",
+                project_id=project.project_id,
+                repository_identity=inspector.identity()["repository_id"],
+                repository_path_fingerprint=inspector.identity()["path_fingerprint"],
+            )
+            migration_transaction = next(
+                event["transaction_id"] for event in reversed(ledger.read())
+                if event["event_type"] == "ProjectionUpdated"
+            )
+            ledger.append(
+                event_type="ProjectionUpdated",
+                transaction_id=migration_transaction,
+                workflow_type=WorkflowType.RECOVERY,
+                payload={
+                    "current_state": "integration_ready",
+                    "current_feature": "F001",
+                    "projection_facts": {
+                        "selected_feature_starting_commit": inspector.head,
+                    },
+                },
+            )
+            ProjectionEngine(
+                ledger, state_root / "projection-cache.json"
+            ).rebuild(persist_cache=True)
+            git(repository, "switch", "codex/f001-authoritative")
+            queue_path = repository / project.queue_location
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            queue["features"][0].update({
+                "status": "integration_pending",
+                "branch": "codex/f001-authoritative",
+                "integration_base_commit": project.validated_baseline_commit,
+                "accepted_commit": "SELF",
+                "integration_status": "pending",
+            })
+            write_json(queue_path, queue)
+            git(repository, "add", project.queue_location)
+            git(repository, "commit", "-m", "test: preserve SELF queue sentinel")
+
+            projection = engine._authoritative_projection(project)
+            self.assertIsNotNone(projection)
+            execution_plan = engine._execution_plan(project, projection)
+            self.assertEqual(accepted, execution_plan.accepted_commit)
+            self.assertEqual(
+                "SELF",
+                FeatureQueue.from_location(repository, project.queue_location)
+                .feature("F001")["accepted_commit"],
+            )
+
+            class CapturingLauncher(SyntheticLauncher):
+                def __init__(self):
+                    super().__init__()
+                    self.requests = []
+
+                def launch(self, request, on_session_started=None):
+                    self.requests.append(request)
+                    return super().launch(
+                        request, on_session_started=on_session_started
+                    )
+
+            launcher = CapturingLauncher()
+            engine.launcher = launcher
+            result = engine.run_project(project, "resume")
+            self.assertEqual(accepted, result["accepted_commit"])
+            self.assertEqual(accepted, launcher.requests[-1].accepted_commit)
+            prompt = SessionLauncher(
+                REPOSITORY_ROOT, configuration.conveyor
+            )._render_prompt(launcher.requests[-1])
+            self.assertIn(f"Accepted commit: `{accepted}`", prompt)
+            self.assertNotIn("Accepted commit: `SELF`", prompt)
+
+            report = json.loads((
+                configuration.root
+                / f"reports/{launcher.requests[-1].run_id}/milestone_integration.json"
+            ).read_text(encoding="utf-8"))
+            self.assertEqual(accepted, report["accepted_commit"])
+            ledger_text = (
+                configuration.root / "state/projects/synthetic/evidence-ledger.jsonl"
+            ).read_text(encoding="utf-8")
+            self.assertNotIn('\"accepted_commit\":\"SELF\"', ledger_text)
             self.assertFalse((repository / ".factory/locks/writer.json").exists())
 
     def test_execution_plan_disagreement_fails_closed_and_invariant_detects_it(self):

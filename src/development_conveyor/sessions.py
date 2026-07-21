@@ -87,7 +87,12 @@ class SessionRequest:
     repository_identity: str | None = None
     starting_branch: str | None = None
     starting_commit: str | None = None
+    accepted_commit: str | None = None
     allowed_paths: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.action == "milestone_integration" and self.accepted_commit == "SELF":
+            raise SessionError("milestone integration requires a normalized accepted commit")
 
 
 @dataclass(frozen=True)
@@ -616,6 +621,7 @@ class SessionLauncher:
             repository_identity=request.repository_identity or "LEGACY_UNBOUND",
             starting_branch=request.starting_branch or "LEGACY_UNBOUND",
             starting_commit=request.starting_commit or "LEGACY_UNBOUND",
+            accepted_commit=request.accepted_commit or "LEGACY_UNBOUND",
             allowed_paths=json.dumps(list(request.allowed_paths), separators=(",", ":")),
         )
         if request.repair_attempt is not None:
@@ -717,6 +723,7 @@ class SessionLauncher:
             "CONVEYOR_PROJECT_ID": request.project.project_id,
             "CONVEYOR_MODE": request.mode,
             "CONVEYOR_FEATURE": request.feature or "",
+            "CONVEYOR_ACCEPTED_COMMIT": request.accepted_commit or "",
         })
         environment.update(self._trusted_resolution_environment(request))
         process: subprocess.Popen[str] | None = None
