@@ -752,13 +752,38 @@ class ConsistencyChecker:
                         "observer_error_category": "authoritative_planner_unavailable",
                     }
                 else:
+                    observed_projection = status.get("kernel_projection")
+                    if not isinstance(observed_projection, dict):
+                        observed_projection = routing_projection
+                    projection_binding = {
+                        "project_id": observed_projection.get("project_id")
+                        == routing_projection.get("project_id"),
+                        "ledger_sequence": observed_projection.get("ledger_sequence")
+                        == routing_projection.get("ledger_sequence"),
+                        "ledger_fingerprint": observed_projection.get("ledger_fingerprint")
+                        == routing_projection.get("ledger_fingerprint"),
+                    }
+                    try:
+                        observed_executable = ExecutionPlan.from_projection(
+                            observed_projection,
+                            starting_commit=status.get("feature_starting_commit"),
+                            feature_branch=status.get("feature_branch"),
+                            milestone_branch=status.get("milestone_branch"),
+                        )
+                    except ProjectionError:
+                        observed_executable = executable
+                        projection_binding["valid_projection_fingerprint"] = False
+                    else:
+                        projection_binding["valid_projection_fingerprint"] = True
                     agreement, agreement_evidence = execution_plan_projection_agreement(
-                        routing_projection, status, executable
+                        observed_projection, status, observed_executable
                     )
+                    agreement_evidence["checks"].update(projection_binding)
+                    agreement = agreement and all(projection_binding.values())
                     cache_stale = (
-                        compatibility_state != routing_projection.get("current_state")
+                        compatibility_state != observed_projection.get("current_state")
                         or compatibility_projection_fingerprint
-                        != routing_projection.get("projection_fingerprint")
+                        != observed_projection.get("projection_fingerprint")
                     )
                     reported_cache = status.get("compatibility_cache") or {}
                     legacy_observations = status.get("legacy_observations") or {}
@@ -770,7 +795,7 @@ class ConsistencyChecker:
                         and legacy_observations.get("persisted_compatibility_state")
                         == compatibility_state
                         and status.get("persisted_state")
-                        == routing_projection.get("current_state")
+                        == observed_projection.get("current_state")
                     )
                     agreement_evidence["checks"][
                         "compatibility_cache_stale_but_ignored"
@@ -783,26 +808,60 @@ class ConsistencyChecker:
                         "ignored_for_execution": stale_but_ignored,
                     }
                     live_checks: dict[str, bool] = {}
-                    if executable.application_mutation_expected:
+                    if observed_executable.application_mutation_expected:
                         live_checks["planned_milestone_ref"] = bool(
-                            executable.milestone_branch
-                            and executable.starting_commit
+                            observed_executable.milestone_branch
+                            and observed_executable.starting_commit
                             and self.inspector.rev_parse(
-                                executable.milestone_branch, check=False
-                            ) == executable.starting_commit
+                                observed_executable.milestone_branch, check=False
+                            ) == observed_executable.starting_commit
                         )
                     if (
-                        executable.application_mutation_expected
-                        and executable.feature_id is not None
+                        observed_executable.application_mutation_expected
+                        and observed_executable.feature_id is not None
                         and queue is not None
                     ):
-                        planned_feature = queue.feature(executable.feature_id)
-                        live_checks["planned_feature_branch"] = bool(
-                            planned_feature
-                            and planned_feature.get("branch") == executable.feature_branch
+                        planned_feature = queue.feature(observed_executable.feature_id)
+                        recovery = observed_projection.get("failed_integration_recovery")
+                        recovery_checks = (
+                            recovery.get("checks")
+                            if isinstance(recovery, dict) else None
                         )
-                        if executable.workflow_type == WorkflowType.MILESTONE_INTEGRATION.value:
-                            projected_accepted = routing_projection.get(
+                        verified_fresh_recovery = bool(
+                            isinstance(recovery, dict)
+                            and recovery.get("classification")
+                            == "fresh_after_terminal_pre_mutation_failure"
+                            and recovery.get("fresh_transaction") is True
+                            and recovery.get("old_session_resume") is False
+                            and isinstance(recovery_checks, dict)
+                            and recovery_checks
+                            and all(recovery_checks.values())
+                        )
+                        recovered_branch_binding = bool(
+                            verified_fresh_recovery
+                            and observed_executable.feature_branch
+                            and observed_executable.accepted_commit
+                            and self.inspector.rev_parse(
+                                observed_executable.feature_branch, check=False
+                            ) == observed_executable.accepted_commit
+                            and [
+                                branch for branch in self.inspector.local_branches()
+                                if branch != observed_executable.milestone_branch
+                                and self.inspector.rev_parse(branch, check=False)
+                                == observed_executable.accepted_commit
+                            ] == [observed_executable.feature_branch]
+                        )
+                        live_checks["planned_feature_branch"] = bool(
+                            planned_feature and planned_feature.get("branch")
+                            == observed_executable.feature_branch
+                            or planned_feature and not planned_feature.get("branch")
+                            and recovered_branch_binding
+                        )
+                        if (
+                            observed_executable.workflow_type
+                            == WorkflowType.MILESTONE_INTEGRATION.value
+                        ):
+                            projected_accepted = observed_projection.get(
                                 "accepted_feature_commit"
                             )
                             if (
@@ -811,11 +870,11 @@ class ConsistencyChecker:
                                 and isinstance(projected_accepted, str)
                             ):
                                 live_checks["planned_accepted_commit"] = bool(
-                                    executable.accepted_commit == projected_accepted
+                                    observed_executable.accepted_commit == projected_accepted
                                     and self.inspector.ref_exists(projected_accepted)
-                                    and executable.feature_branch
+                                    and observed_executable.feature_branch
                                     and self.inspector.rev_parse(
-                                        executable.feature_branch, check=False
+                                        observed_executable.feature_branch, check=False
                                     )
                                     == projected_accepted
                                 )
@@ -831,7 +890,10 @@ class ConsistencyChecker:
                                 )
                                 live_checks["planned_accepted_commit"] = bool(
                                     resolution
-                                    and resolution.commit == executable.accepted_commit
+                                    and resolution.commit == observed_executable.accepted_commit
+                                    or planned_feature
+                                    and not planned_feature.get("accepted_commit")
+                                    and recovered_branch_binding
                                 )
                     agreement_evidence["checks"].update(live_checks)
                     live_agreement = all(live_checks.values())

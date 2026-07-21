@@ -49,7 +49,14 @@ from .registry import Project
 from .reporting import build_project_plan
 from .repository import RepositoryInspector
 from .retries import RetryBudget
-from .sessions import SessionLauncher, SessionPlan, SessionRequest, SessionResult
+from .sessions import (
+    SessionLauncher,
+    SessionPlan,
+    SessionRequest,
+    SessionResult,
+    milestone_integration_mutation_command,
+    milestone_integration_terminal_schema,
+)
 from .state_machine import CYCLE_MACHINE, PORTFOLIO_MACHINE
 from .legacy_adapter import LegacyTransitionAdapter
 from .contracts import (
@@ -68,7 +75,7 @@ from .kernel import (
     WorkflowKernel,
 )
 from .ledger import EvidenceLedger
-from .projection import ProjectionEngine, cache_agrees
+from .projection import ProjectionEngine, cache_agrees, projection_fingerprint
 from .execution_plan import (
     ExecutionPlan,
     authoritative_status_fields,
@@ -106,6 +113,27 @@ class CycleEngine:
 
     def project_state_path(self, project: Project) -> Path:
         return self.configuration.owned_path(self.configuration.conveyor["state_directory"]) / "projects" / f"{project.project_id}.json"
+
+    @staticmethod
+    def _attach_milestone_integration_contract(
+        plan: dict[str, Any], project: Project
+    ) -> None:
+        if plan.get("proposed_next_action") != "milestone_integration" or not plan.get("selected_feature"):
+            return
+        plan["milestone_integration_contract"] = {
+            "mutation_command": milestone_integration_mutation_command(
+                str(plan["selected_feature"])
+            ),
+            "terminal_marker": "CONVEYOR_TRANSACTION_RESULT=",
+            "terminal_schema": milestone_integration_terminal_schema(),
+            "accepted_commit": plan.get("accepted_feature_commit"),
+            "starting_commit": (
+                (plan.get("execution_plan") or {}).get("starting_commit")
+                or (plan.get("repository_state") or {}).get("milestone_branch_head")
+            ),
+            "expected_branch": project.milestone_branch,
+            "transaction_mode": "fresh",
+        }
 
     def _kernel_recovery_preflight(
         self, project: Project, *, apply: bool
@@ -485,6 +513,7 @@ class CycleEngine:
         projection = self._authoritative_projection(project)
         if projection is None:
             return None
+        projection = self._fresh_failed_integration_projection(project, projection)
         inspector = RepositoryInspector(project.repository)
         identity = inspector.identity()
         state_root = self.root / "state/projects" / project.project_id
@@ -502,6 +531,117 @@ class CycleEngine:
             raise ProjectionError("authoritative projection is not bound to the current ledger head")
         executable = self._execution_plan(project, projection)
         return projection, executable, superseded_legacy_cycles(ledger.read())
+
+    def _fresh_failed_integration_projection(
+        self, project: Project, projection: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Recover one terminal pre-mutation integration as a fresh transaction plan."""
+
+        if projection.get("active_transaction") is not None or projection.get("current_state") != "validation_failed":
+            return projection
+        failed = next(
+            (
+                item for item in reversed(projection.get("transactions", []))
+                if item.get("workflow_type") == WorkflowType.MILESTONE_INTEGRATION.value
+                and item.get("state") == "terminal_failure"
+            ),
+            None,
+        )
+        if not isinstance(failed, dict):
+            return projection
+        run_id = failed.get("run_id")
+        feature_id = failed.get("feature_id")
+        snapshot = failed.get("starting_snapshot")
+        if not isinstance(run_id, str) or not isinstance(feature_id, str) or not isinstance(snapshot, dict):
+            return projection
+        report_path = self._report_path(
+            self.configuration.owned_path(self.configuration.conveyor["report_directory"]),
+            run_id,
+            "milestone_integration.json",
+        )
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return projection
+        inspector = RepositoryInspector(project.repository)
+        queue = FeatureQueue.from_location(project.repository, project.queue_location)
+        feature = queue.feature(feature_id)
+        accepted = report.get("accepted_commit")
+        old_sessions = list(failed.get("session_ids") or [])
+        report_session = report.get("session_id")
+        report_commands = report.get("post_integration_commands") or []
+        terminal_marker_found = bool(
+            report.get("terminal_marker_found") is True
+            or "CONVEYOR_TRANSACTION_RESULT=" in str(report.get("redacted_stdout") or "")
+        )
+        exact_feature_branches = [
+            branch for branch in inspector.local_branches()
+            if branch != project.milestone_branch
+            and inspector.rev_parse(branch, check=False) == accepted
+        ]
+        checks = {
+            "terminal_failure": failed.get("terminal_classification") in {
+                "VALIDATION_FAILED", "TERMINAL_INTEGRATION_FAILURE"
+            },
+            "report_identity": report.get("project_id") == project.project_id
+            and report.get("run_id") == run_id
+            and report.get("action") == "milestone_integration",
+            "report_repository": Path(str(report.get("working_directory") or "")).resolve()
+            == project.repository.resolve(),
+            "session_identity": len(old_sessions) == 1 and report_session == old_sessions[0],
+            "accepted_commit": isinstance(accepted, str)
+            and accepted != "SELF"
+            and inspector.ref_exists(accepted),
+            "exact_feature_branch": len(exact_feature_branches) == 1,
+            "feature_ready": isinstance(feature, dict)
+            and feature.get("status") in {"ready", "accepted", "integration_pending"}
+            and feature.get("milestone") == project.active_milestone,
+            "milestone_start": snapshot.get("branch") == project.milestone_branch
+            and snapshot.get("head") == inspector.head
+            and inspector.current_branch == project.milestone_branch,
+            "repository_clean": inspector.is_clean,
+            "no_git_operation": not any(inspector.git_operation_state().values()),
+            "no_writer_lease": not inspector.writer_lock_path(
+                self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+            ).exists(),
+            "pre_mutation_failure": terminal_marker_found
+            and report.get("structured_output_validation") in {"invalid", "semantic_invalid"}
+            and report.get("result_classification") == "structured_output_invalid"
+            and not any(
+                isinstance(item, dict)
+                and item.get("category") == "required_evidence_finalization"
+                and item.get("exit_code") == 0
+                for item in report_commands
+            ),
+        }
+        if not all(checks.values()):
+            return projection
+        recovered = dict(projection)
+        recovered.update({
+            "current_state": "integration_ready",
+            "current_feature": feature_id,
+            "selected_next_feature": feature_id,
+            "accepted_feature_commit": accepted,
+            "selected_feature_starting_commit": snapshot.get("head"),
+            "feature_branch": exact_feature_branches[0],
+            "milestone_branch": project.milestone_branch,
+            "allowed_next_action": "milestone_integration",
+            "required_lease": "integration_writer",
+            "session_resume_eligible": False,
+            "failed_integration_recovery": {
+                "classification": "fresh_after_terminal_pre_mutation_failure",
+                "failed_transaction_id": failed.get("transaction_id"),
+                "failed_run_id": run_id,
+                "failed_session_id": old_sessions[0],
+                "accepted_commit": accepted,
+                "starting_commit": snapshot.get("head"),
+                "fresh_transaction": True,
+                "old_session_resume": False,
+                "checks": checks,
+            },
+        })
+        recovered["projection_fingerprint"] = projection_fingerprint(recovered)
+        return recovered
 
     def _validate_projected_dispatch(
         self,
@@ -775,6 +915,7 @@ class CycleEngine:
                     "selected_feature_starting_commit": plan.get("feature_starting_commit"),
                 },
             })
+            self._attach_milestone_integration_contract(plan, project)
             return plan
         planning_transaction = None
         persisted_evidence = (
@@ -884,6 +1025,7 @@ class CycleEngine:
             plan["feature_factory_would_launch"] = False
             plan["milestone_integrator_would_launch"] = False
         proposed = plan.get("proposed_next_action")
+        self._attach_milestone_integration_contract(plan, project)
         compatibility_action = {
             "queue_reconciliation": "queue_reconciliation",
             "planning_refinement": "queue_reconciliation",
@@ -1696,6 +1838,10 @@ class CycleEngine:
             "result_classification": classification,
             "structured_output_validation": "not_available",
             "structured_result": None,
+            "terminal_marker_found": False,
+            "parsed_structured_result": None,
+            "structured_output_errors": [str(error)],
+            "failed_semantic_checks": [],
             "redacted_stdout": "",
             "redacted_stderr": str(error),
             "redacted_stderr_summary": str(error)[-2000:],
@@ -1749,6 +1895,10 @@ class CycleEngine:
             ),
             "structured_output_validation": result.structured_output_validation,
             "structured_result": result.structured_result,
+            "terminal_marker_found": result.terminal_marker_found,
+            "parsed_structured_result": result.parsed_structured_result,
+            "structured_output_errors": list(result.structured_output_errors),
+            "failed_semantic_checks": list(result.failed_semantic_checks),
             "redacted_stdout": result.redacted_stdout or result.redacted_output,
             "redacted_stderr": result.redacted_stderr,
             "redacted_stderr_summary": (result.redacted_stderr or "")[-2000:],

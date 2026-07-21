@@ -467,3 +467,29 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `m1_projection_routing_repair`
 - Safety and autonomy contracts unchanged: `true`
+
+### M1 milestone-integration result-contract repair — 2026-07-21
+
+- Root cause: the milestone-integration prompt explicitly required read-only preparation, prohibited the actual cherry-pick and evidence workflow, and instructed the model to emit `INTEGRATED` with the unchanged milestone commit and no changed paths.
+- Prompt contract: the session now receives the exact `integrate-feature.sh` command, transaction/run/session/commit identities, an exact JSON Schema and bound valid example, classification-specific evidence requirements, prohibited false-success combinations, and only focused AGENTS/adapter/queue/spec/status context.
+- Semantic checks: a new integration cannot succeed with an unchanged milestone HEAD or empty changed paths. Success also requires the planned accepted commit or patch-equivalent in milestone history, exact command observation, complete runtime evidence, passing configured validation, integrated queue and milestone evidence, a clean repository, no Git operation, and released workflow evidence.
+- Diagnostics: rejected structured results retain `terminal_marker_found`, `parsed_structured_result`, `structured_output_errors`, and `failed_semantic_checks` in the redacted controller report.
+- Isolation: focused tests use disposable synthetic repositories and no model calls. The real F005 integration is prohibited during this repair; neither registered application repository is intentionally mutated.
+
+### Model execution — 2026-07-21T22:54:33+00:00
+
+- Agent role: `primary-agent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `global_default`
+- Event: `start`
+- Reason code: `milestone_integration_result_contract_repair`
+- Safety and autonomy contracts unchanged: `true`
+
+### M1 milestone-integration result-contract repair validation — 2026-07-21
+
+- Focused tests: `test_projection_authority.py` passed 17/17 in 35.897 seconds, `test_integration_gate_lifecycle.py` passed 4/4 in 12.928 seconds, and `test_milestone_integration_result_contract.py` passed 6/6 in 0.807 seconds (27/27 total). Tests used disposable synthetic repositories and made no model calls.
+- Static and adapter checks: `python3 -m compileall src scripts` passed. `scripts/conveyor validate-config` returned `valid: true` for both registered projects.
+- Live read-only consistency: Case Manager and Interview Companion both returned `CONSISTENT`, with no failed invariants and `application_repository_written: false`. The planner-facing fresh recovery projection is accepted only when its project and immutable ledger identity match, its fingerprint validates, and its feature branch and accepted commit are independently bound to the live repository.
+- Recovery dry-run: Interview Companion plans a fresh F005 milestone-integration transaction from `e07d8803fbe56bbbfb7430aeb19e888f3d7d06a7`, integrates accepted commit `a1f2c8dd47aaa68580cd7dfc3dc6923e04469857` from `codex/F005-persistent-data-store`, does not resume the terminal session, and exposes the exact mutation command and terminal JSON Schema.
+- Scope: no full unittest suite or pytest run; no CLI upgrade, subagent, real F005 integration, application-repository mutation, push, tag, publish, deploy, or release.

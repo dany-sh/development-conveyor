@@ -113,6 +113,18 @@ class ProjectionAuthorityTests(unittest.TestCase):
             self.assertEqual("fresh", plan["execution_plan"]["transaction_mode"])
             self.assertFalse(plan["feature_factory_would_launch"])
             self.assertTrue(plan["milestone_integrator_would_launch"])
+            contract = plan["milestone_integration_contract"]
+            self.assertEqual(
+                "~/.agents/skills/milestone-integrator/scripts/integrate-feature.sh --root . --feature F001",
+                contract["mutation_command"],
+            )
+            self.assertEqual("CONVEYOR_TRANSACTION_RESULT=", contract["terminal_marker"])
+            self.assertEqual(
+                "milestone_integration",
+                contract["terminal_schema"]["properties"]["workflow_type"]["const"],
+            )
+            self.assertEqual(accepted, contract["accepted_commit"])
+            self.assertEqual("fresh", contract["transaction_mode"])
             self.assertEqual("legacy-session", plan["superseded_legacy_cycles"][0]["session_id"])
             self.assertEqual("superseded", plan["superseded_legacy_cycles"][0]["classification"])
             self.assertIsNotNone(plan["legacy_observations"]["legacy_existing_cycle"])
