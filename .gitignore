@@ -5,7 +5,11 @@ __pycache__/
 build/
 dist/
 *.egg-info/
-state/projects/*.json
+/state/projects/*.json
+/state/projects/*/evidence-ledger.jsonl
+/state/projects/*/evidence-ledger.jsonl.head
+/state/projects/*/evidence-ledger.jsonl.lock
+/state/projects/*/projection-cache.json
 state/launch-locks/*.json
 state/sessions/
 reports/*.json

@@ -182,13 +182,44 @@ class HistoricalIntegrationLifecycleTests(unittest.TestCase):
         self.assertEqual((status["feature_status"], status["integration_status"]), ("accepted", "blocked"))
         self.assertFalse(status["ordinary_resume_allowed"])
         self.assertFalse(status["feature_factory_would_launch"])
-        self.assertEqual(status["feature_starting_commit"], self.candidate)
+        live_feature_head = git(self.repository, "rev-parse", "HEAD")
+        self.assertNotEqual(live_feature_head, self.candidate)
+        self.assertEqual(
+            (
+                status["selected_feature"],
+                status["accepted_feature_commit"],
+                status["feature_starting_commit"],
+                status["feature_branch"],
+                status["milestone_branch"],
+                status["next_feature_selection"]["selected_feature_starting_commit"],
+            ),
+            (
+                "F001",
+                self.accepted,
+                self.candidate,
+                self.feature_branch,
+                self.project.milestone_branch,
+                self.candidate,
+            ),
+        )
         self.assertEqual(self.report.read_bytes(), self.report_bytes)
 
         persisted_bytes = (cycle_path.read_bytes(), project_path.read_bytes(), self.report.read_bytes(), exclude.read_bytes())
         replay = self.engine.reconcile_controller_state(self.project, dry_run=False)
-        self.assertTrue(replay["already_persisted"])
-        self.assertEqual(persisted_bytes, (cycle_path.read_bytes(), project_path.read_bytes(), self.report.read_bytes(), exclude.read_bytes()))
+        self.assertEqual(
+            replay["classification"],
+            "projection_compatibility_cache_reconciliation",
+        )
+        self.assertTrue(replay["controller_state_written"])
+        self.assertEqual(
+            persisted_bytes[0], cycle_path.read_bytes()
+        )
+        self.assertEqual(persisted_bytes[2], self.report.read_bytes())
+        self.assertEqual(persisted_bytes[3], exclude.read_bytes())
+        reconciled_bytes = project_path.read_bytes()
+        idempotent = self.engine.reconcile_controller_state(self.project, dry_run=False)
+        self.assertFalse(idempotent["controller_state_written"])
+        self.assertEqual(reconciled_bytes, project_path.read_bytes())
         self.assertEqual(self.launcher.launches, [])
 
     def test_exact_resolution_idempotency_and_integrator_only_routing(self):
@@ -220,7 +251,10 @@ class HistoricalIntegrationLifecycleTests(unittest.TestCase):
         self.assertEqual(plan["proposed_next_action"], "milestone_integration")
         self.assertEqual(plan["selected_feature"], "F001")
         self.assertNotEqual(plan["selected_feature"], "P0-003")
-        self.assertEqual(plan["sessions_that_would_launch"], ["$milestone-integrator (fresh integration session)"])
+        self.assertEqual(
+            plan["sessions_that_would_launch"],
+            ["fresh milestone-integration transaction"],
+        )
         self.assertEqual(self.launcher.compatibility_actions[-1], ("milestone_integration", "synthetic"))
         self.assertEqual(self.launcher.launches, [])
         self.assertEqual(self.report.read_bytes(), self.report_bytes)

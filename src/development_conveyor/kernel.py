@@ -180,6 +180,8 @@ class WorkflowKernel:
         policy: MutationPolicy,
         transaction_id: str | None = None,
         start_evidence: dict[str, Any] | None = None,
+        expected_starting_branch: str | None = None,
+        expected_starting_head: str | None = None,
     ) -> PhaseTransaction:
         if self.transaction is not None:
             raise TransactionError("kernel instance already owns a transaction")
@@ -198,6 +200,14 @@ class WorkflowKernel:
             raise TransactionError("cannot begin a transaction during an active Git operation")
         if policy.require_clean_start and not snapshot.clean:
             raise TransactionError("new transaction requires a clean repository snapshot")
+        if (
+            expected_starting_branch is not None
+            and snapshot.branch != expected_starting_branch
+        ) or (
+            expected_starting_head is not None
+            and snapshot.head != expected_starting_head
+        ):
+            raise TransactionError("repository snapshot differs from the planned transaction start")
         transaction = PhaseTransaction.create(
             workflow_type=workflow_type,
             project_id=self.project.project_id,
@@ -211,6 +221,25 @@ class WorkflowKernel:
         self.transaction = transaction
         self._preacquire_lease(transaction)
         try:
+            leased_snapshot = capture_repository_snapshot(self.project)
+            if (
+                leased_snapshot.repository_identity != transaction.repository_identity
+                or leased_snapshot.repository_path_fingerprint
+                != transaction.repository_path_fingerprint
+                or leased_snapshot.branch != transaction.starting_branch
+                or leased_snapshot.head != transaction.starting_head
+                or leased_snapshot.queue_fingerprint
+                != transaction.starting_queue_fingerprint
+                or leased_snapshot.tracked_diff_fingerprint
+                != transaction.starting_tracked_diff_fingerprint
+                or leased_snapshot.untracked_fingerprint
+                != transaction.starting_untracked_fingerprint
+                or (policy.require_clean_start and not leased_snapshot.clean)
+                or any(leased_snapshot.git_operations.values())
+            ):
+                raise TransactionError(
+                    "repository changed before the planned writer lease was acquired"
+                )
             extra_start = dict(start_evidence or {})
             if set(extra_start) & {
                 "run_id", "milestone", "feature_id", "starting_branch", "starting_head",
@@ -252,6 +281,8 @@ class WorkflowKernel:
         run_id: str,
         policy: MutationPolicy,
         transaction_id: str | None = None,
+        expected_starting_branch: str | None = None,
+        expected_starting_head: str | None = None,
     ) -> PhaseTransaction:
         """Begin against a target ref, then switch to it only under the lease."""
 
@@ -261,6 +292,14 @@ class WorkflowKernel:
         target_head = self.inspector.rev_parse(target_branch, check=False)
         if target_head is None:
             raise TransactionError("target workflow branch does not exist")
+        if (
+            expected_starting_branch is not None
+            and target_branch != expected_starting_branch
+        ) or (
+            expected_starting_head is not None
+            and target_head != expected_starting_head
+        ):
+            raise TransactionError("target branch differs from the planned transaction start")
         if not live.clean or any(live.git_operations.values()):
             raise TransactionError("target-branch workflow requires a clean repository")
         queue_result = self.inspector.git(
@@ -283,6 +322,34 @@ class WorkflowKernel:
         self.transaction = transaction
         self._preacquire_lease(transaction)
         try:
+            leased_live = capture_repository_snapshot(self.project)
+            leased_target_head = self.inspector.rev_parse(target_branch, check=False)
+            leased_queue_result = self.inspector.git(
+                ["show", f"{leased_target_head}:{self.project.queue_location}"],
+                check=False,
+            ) if leased_target_head is not None else None
+            leased_target_queue = (
+                hashlib.sha256(leased_queue_result.stdout.encode("utf-8")).hexdigest()
+                if leased_queue_result is not None
+                and leased_queue_result.returncode == 0
+                else None
+            )
+            if (
+                leased_live.repository_identity != transaction.repository_identity
+                or leased_live.repository_path_fingerprint
+                != transaction.repository_path_fingerprint
+                or leased_target_head != transaction.starting_head
+                or leased_target_queue != transaction.starting_queue_fingerprint
+                or leased_live.tracked_diff_fingerprint
+                != transaction.starting_tracked_diff_fingerprint
+                or leased_live.untracked_fingerprint
+                != transaction.starting_untracked_fingerprint
+                or not leased_live.clean
+                or any(leased_live.git_operations.values())
+            ):
+                raise TransactionError(
+                    "repository changed before the planned branch writer lease was acquired"
+                )
             self.ledger.append(
                 event_type="TransactionStarted", transaction_id=transaction.transaction_id,
                 workflow_type=workflow_type,

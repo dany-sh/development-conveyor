@@ -61,6 +61,13 @@ This table maps every required M1 scenario to executable evidence. The M1-specif
 | 55 | Milestone mode continuation behavior | `test_post_integration_finalization.test_19_milestone_mode_can_later_reconcile_the_queue` |
 | 56 | No default-branch merge | Twenty-cycle and full interruption-matrix tests assert the default ref is unchanged |
 | 57 | No push, tag, release, deployment, or notarization | `ProhibitedActionTests.test_prohibited_git_and_external_operations_are_rejected` observes and rejects push, tag, deploy, publish, release, and notarize categories at the common subprocess authority; `MigrationAndSimulatorTests.test_production_configured_executor_rejects_prohibited_action_before_launch` proves the production configured-command executor rejects before `subprocess.run`; the twenty-cycle simulator independently audits invoked Git argument arrays |
+| 58 | Projection-authoritative planner fields | `ProjectionAuthorityTests.test_valid_projection_overrides_stale_project_and_repository_cycle`, `test_consistency_observes_planner_facing_routing_independently` |
+| 59 | Superseded legacy cycle cannot resume | `ProjectionAuthorityTests.test_projection_dispatch_never_resumes_superseded_session` |
+| 60 | Typed plan and projection agreement | `ProjectionAuthorityTests.test_execution_plan_disagreement_fails_closed_and_invariant_detects_it`, `test_every_projection_action_has_explicit_session_and_mutation_semantics` |
+| 61 | Pre-session active transaction recovery | `ProjectionAuthorityTests.test_active_kernel_transaction_is_recovery_without_legacy_session_resume`, `test_pre_session_ledger_interruptions_are_recovery_without_resume` |
+| 62 | Exact planned snapshot held through typed lease | `ProjectionAuthorityTests.test_feature_dispatch_rejects_post_validation_milestone_advance`, `test_integration_dispatch_rejects_post_validation_milestone_advance` |
+| 63 | Compatibility cache identity and idempotency | `ProjectionAuthorityTests.test_compatibility_cache_reconciliation_is_atomic_idempotent_and_app_read_only`, `test_compatibility_cache_reconciliation_rejects_foreign_identity` |
+| 64 | Controller runtime ignores are narrow and source-safe | `ProjectionAuthorityTests.test_runtime_ignores_are_root_anchored_and_narrow`, `test_migration_and_actual_kernel_execution_keep_controller_source_clean` |
 
 The common subprocess authority exposes a scoped, privacy-safe attempted-command observer that records executable, operation, prohibited category, authority, and working-directory fingerprint before rejection. The deterministic simulator separately records actual Git argument arrays. Negative assertions are therefore derived from observed authority attempts and subprocess operations, not hard-coded success flags.
 

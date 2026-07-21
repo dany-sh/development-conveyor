@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Configuration
-from .errors import ConveyorError, LockError, QueueError, RecoveryError, SessionError
+from .errors import ConveyorError, LockError, ProjectionError, QueueError, RecoveryError, SessionError
 from .locks import (
     DurableLock,
     PlanningWriterLease,
@@ -68,7 +68,12 @@ from .kernel import (
     WorkflowKernel,
 )
 from .ledger import EvidenceLedger
-from .projection import ProjectionEngine
+from .projection import ProjectionEngine, cache_agrees
+from .execution_plan import (
+    ExecutionPlan,
+    authoritative_status_fields,
+    superseded_legacy_cycles,
+)
 from .workflow_lease import WorkflowWriterLease
 from .command_authority import CommandAuthority
 from .workflow_recovery import RecoveryPlanner
@@ -397,14 +402,207 @@ class CycleEngine:
             repository_identity=identity["repository_id"],
             repository_path_fingerprint=identity["path_fingerprint"],
         )
-        return ProjectionEngine(
-            ledger, state_root / "projection-cache.json"
-        ).rebuild(persist_cache=True)
+        engine = ProjectionEngine(ledger, state_root / "projection-cache.json")
+        rebuilt = engine.rebuild(persist_cache=False)
+        cache = engine.load_cache()
+        if cache is None or not cache_agrees(cache, rebuilt):
+            raise ProjectionError(
+                "authoritative execution requires a projection cache bound to the ledger head"
+            )
+        return rebuilt
+
+    def _execution_plan(
+        self, project: Project, projection: dict[str, Any]
+    ) -> ExecutionPlan:
+        inspector = RepositoryInspector(project.repository)
+        active_transaction = next((
+            item for item in projection.get("transactions", [])
+            if item.get("transaction_id") == projection.get("active_transaction")
+        ), None)
+        completed_transactions = [
+            item for item in projection.get("transactions", [])
+            if item.get("state") in {"completed", "superseded", "terminal_failure"}
+        ]
+        authoritative_snapshot = (
+            (active_transaction or {}).get("starting_snapshot")
+            if active_transaction is not None
+            else (
+                (completed_transactions[-1].get("terminal_snapshot") or {})
+                if completed_transactions else {}
+            )
+        ) or {}
+        feature_id = projection.get("current_feature") or projection.get("selected_next_feature")
+        if (
+            projection.get("allowed_next_action") == "milestone_integration"
+            and projection.get("selected_feature_starting_commit") is None
+        ):
+            # Canonical feature execution begins at the milestone base and ends
+            # at the accepted feature commit.  Its starting snapshot therefore
+            # supplies the exact integration target when no migrated projection
+            # fact is present.
+            feature_execution = next((
+                item for item in reversed(projection.get("transactions", []))
+                if item.get("workflow_type") == WorkflowType.FEATURE_EXECUTION.value
+                and item.get("feature_id") == feature_id
+                and isinstance(item.get("starting_snapshot"), dict)
+            ), None)
+            if feature_execution is not None:
+                authoritative_snapshot = feature_execution["starting_snapshot"]
+        feature_branch = None
+        try:
+            queue = FeatureQueue.from_location(project.repository, project.queue_location)
+            feature = queue.feature(str(feature_id)) if feature_id else None
+            feature_branch = (feature or {}).get("branch")
+        except (QueueError, OSError):
+            feature_branch = None
+        if feature_branch is None and feature_id is not None:
+            feature_transaction = next((
+                item for item in reversed(projection.get("transactions", []))
+                if item.get("workflow_type") == WorkflowType.FEATURE_EXECUTION.value
+                and item.get("feature_id") == feature_id
+                and isinstance(item.get("starting_snapshot"), dict)
+            ), None)
+            feature_branch = (
+                (feature_transaction or {}).get("starting_snapshot") or {}
+            ).get("branch")
+        return ExecutionPlan.from_projection(
+            projection,
+            # A live ref is an observation, not authority.  When the projection
+            # does not carry a feature-specific start, bind the next transaction
+            # to the last canonical repository snapshot instead of silently
+            # accepting whatever commit the ref points to now.
+            starting_commit=authoritative_snapshot.get("head"),
+            feature_branch=feature_branch,
+            milestone_branch=(
+                projection.get("milestone_branch")
+                or project.milestone_branch
+            ),
+        )
+
+    def _authoritative_execution_context(
+        self, project: Project
+    ) -> tuple[dict[str, Any], ExecutionPlan, list[dict[str, Any]]] | None:
+        projection = self._authoritative_projection(project)
+        if projection is None:
+            return None
+        inspector = RepositoryInspector(project.repository)
+        identity = inspector.identity()
+        state_root = self.root / "state/projects" / project.project_id
+        ledger = EvidenceLedger(
+            state_root / "evidence-ledger.jsonl",
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        integrity = ledger.verify()
+        if (
+            projection.get("ledger_sequence") != integrity.sequence
+            or projection.get("ledger_fingerprint") != integrity.fingerprint
+        ):
+            raise ProjectionError("authoritative projection is not bound to the current ledger head")
+        executable = self._execution_plan(project, projection)
+        return projection, executable, superseded_legacy_cycles(ledger.read())
+
+    def _validate_projected_dispatch(
+        self,
+        project: Project,
+        *,
+        workflow_type: WorkflowType,
+        expected: ExecutionPlan | None,
+        allow_nonstarting_checkout: bool = False,
+        allow_unmaterialized_integration_queue: bool = False,
+    ) -> tuple[dict[str, Any], ExecutionPlan] | None:
+        """Re-read and bind dispatch while the controller launch reservation is held."""
+
+        context = self._authoritative_execution_context(project)
+        if context is None:
+            if expected is not None:
+                raise ProjectionError("authoritative projection disappeared before dispatch")
+            return None
+        projection, executable, _ = context
+        executable.validate_against(projection)
+        if executable.workflow != workflow_type:
+            raise ProjectionError(
+                "authoritative execution plan no longer permits the requested workflow"
+            )
+        if expected is not None and executable.to_dict() != expected.to_dict():
+            raise ProjectionError("execution plan changed before the reserved dispatch")
+        if workflow_type in {
+            WorkflowType.QUEUE_RECONCILIATION,
+            WorkflowType.FEATURE_EXECUTION,
+            WorkflowType.MILESTONE_INTEGRATION,
+            WorkflowType.MILESTONE_GATE,
+        }:
+            inspector = RepositoryInspector(project.repository)
+            if not executable.milestone_branch or not executable.starting_commit:
+                raise ProjectionError("execution plan lacks an exact milestone starting snapshot")
+            milestone_head = inspector.rev_parse(executable.milestone_branch, check=False)
+            if (
+                executable.milestone_branch != project.milestone_branch
+                or milestone_head != executable.starting_commit
+                or (
+                    not allow_nonstarting_checkout
+                    and workflow_type != WorkflowType.MILESTONE_INTEGRATION
+                    and (
+                        inspector.current_branch != executable.milestone_branch
+                        or inspector.head != executable.starting_commit
+                    )
+                )
+            ):
+                raise ProjectionError(
+                    "repository no longer matches the execution plan starting branch and commit"
+                )
+            queue = FeatureQueue.from_location(project.repository, project.queue_location)
+            if workflow_type == WorkflowType.FEATURE_EXECUTION:
+                selection = queue.select_next(project.active_milestone or "")
+                if (
+                    selection is None
+                    or selection.feature_id != executable.feature_id
+                    or selection.feature.get("branch") != executable.feature_branch
+                ):
+                    raise ProjectionError(
+                        "ready feature identity or branch no longer matches the execution plan"
+                    )
+            elif workflow_type == WorkflowType.MILESTONE_INTEGRATION:
+                selection = queue.select_integration(project.active_milestone or "")
+                if selection is None and allow_unmaterialized_integration_queue:
+                    if (
+                        inspector.current_branch != executable.feature_branch
+                        or inspector.head != executable.accepted_commit
+                    ):
+                        raise ProjectionError(
+                            "accepted feature snapshot no longer matches the integration plan"
+                        )
+                    return projection, executable
+                if (
+                    selection is None
+                    or selection.feature_id != executable.feature_id
+                    or selection.feature.get("branch") != executable.feature_branch
+                ):
+                    raise ProjectionError(
+                        "integration feature identity or branch no longer matches the execution plan"
+                    )
+                resolution = resolve_feature_commit(
+                    feature=selection.feature,
+                    queue=queue,
+                    repository=inspector,
+                    milestone_branch=project.milestone_branch,
+                    baseline=project.validated_baseline_commit,
+                    registered_commit=project.last_accepted_commit,
+                    registered_feature=project.last_accepted_feature,
+                )
+                if resolution is None or resolution.commit != executable.accepted_commit:
+                    raise ProjectionError(
+                        "accepted feature commit no longer matches the execution plan"
+                    )
+        return projection, executable
 
     def _project_document(self, project: Project, run_id: str | None, fingerprint: str) -> dict[str, Any]:
         existing = self.load_project_state(project)
         stamp = utc_now()
         if existing:
+            if existing.get("project_id") != project.project_id:
+                raise RecoveryError("portfolio project state belongs to a different project")
             if existing["repository_fingerprint"] != fingerprint:
                 raise RecoveryError("portfolio project state belongs to a different repository fingerprint")
             existing["run_id"] = run_id
@@ -536,24 +734,50 @@ class CycleEngine:
         effective = self.effective_project(project)
         persisted = self.load_project_state(project)
         plan = build_project_plan(effective, self.configuration.conveyor, self.root)
-        evidence_constrained_action = plan.get("proposed_next_action")
-        authoritative = self._authoritative_projection(project)
-        if authoritative is not None:
-            projected_action = authoritative.get("allowed_next_action")
-            if evidence_constrained_action == "validation_failed":
-                # The ledger owns workflow progress, but it cannot authorize work
-                # past a live, unvalidated production commit discovered after the
-                # last terminal event.
-                projected_action = evidence_constrained_action
+        persisted_evidence = (
+            persisted.get("state_evidence") if isinstance(persisted, dict) else None
+        )
+        authoritative_planning_transaction = (
+            persisted_evidence.get("planning_transaction")
+            if isinstance(persisted_evidence, dict)
+            and isinstance(persisted_evidence.get("planning_transaction"), dict)
+            else None
+        )
+        context = self._authoritative_execution_context(project)
+        if context is not None:
+            authoritative, executable, superseded = context
+            legacy_plan = dict(plan)
+            plan.update(authoritative_status_fields(
+                authoritative,
+                executable,
+                legacy_plan=legacy_plan,
+                persisted_state=(persisted or {}).get("current_state"),
+                superseded_cycles=superseded,
+                persisted_projection_fingerprint=(
+                    ((persisted or {}).get("state_evidence") or {}).get(
+                        "projection_fingerprint"
+                    )
+                ),
+            ))
+            compatibility = self._compatibility_snapshot(
+                project, str(authoritative.get("allowed_next_action") or "verify_consistency")
+            )
+            plan["compatibility_preflight"] = compatibility
             plan.update({
-                "current_state": authoritative["current_state"],
-                "selected_feature": authoritative.get("selected_next_feature")
-                or authoritative.get("current_feature"),
-                "accepted_feature_commit": authoritative.get("accepted_feature_commit"),
-                "proposed_next_action": projected_action,
-                "kernel_projection": authoritative,
-                "state_source": "evidence_ledger_projection",
+                "current_planning_transaction": authoritative_planning_transaction,
+                "current_repository_state": {
+                    "branch": (plan.get("repository_state") or {}).get("branch"),
+                    "head": (plan.get("repository_state") or {}).get("head"),
+                    "clean": (plan.get("repository_state") or {}).get("clean"),
+                    "git_operations": (plan.get("repository_state") or {}).get("git_operations"),
+                    "writer_lease": (plan.get("lock_status") or {}).get("repository_writer"),
+                },
+                "next_feature_selection": {
+                    "selected_feature": plan.get("selected_feature"),
+                    "selected_feature_starting_commit": plan.get("feature_starting_commit"),
+                },
             })
+            return plan
         planning_transaction = None
         persisted_evidence = (
             persisted.get("state_evidence") if isinstance(persisted, dict) else None
@@ -690,6 +914,46 @@ class CycleEngine:
             plan["sessions_that_would_launch"] = []
             plan["compatibility_human_gate"] = compatibility
         return plan
+
+    def _reconcile_projection_compatibility_cache(
+        self,
+        project: Project,
+        projection: dict[str, Any],
+        executable: ExecutionPlan,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically materialize one idempotent, fingerprint-bound legacy cache."""
+
+        path = self.project_state_path(project)
+        existing = self.load_project_state(project)
+        stamp = utc_now()
+        document = self._project_document(
+            replace(project, current_state=str(projection["current_state"])),
+            (existing or {}).get("run_id"),
+            str(projection["repository_path_fingerprint"]),
+        )
+        evidence = {
+            "source": "evidence_ledger_projection",
+            "ledger_sequence": projection["ledger_sequence"],
+            "ledger_fingerprint": projection["ledger_fingerprint"],
+            "projection_fingerprint": projection["projection_fingerprint"],
+            "execution_plan": executable.to_dict(),
+        }
+        desired = {
+            "current_state": projection["current_state"],
+            "current_feature": executable.feature_id,
+            "last_checkpoint": "kernel_projection_reconciled",
+            "stop_reason": None,
+            "human_decision_required": projection.get("human_gate"),
+            "state_evidence": evidence,
+        }
+        if existing is not None and all(
+            existing.get(key) == value for key, value in desired.items()
+        ):
+            return existing, False
+        document.update(desired)
+        document["updated_at"] = stamp
+        self.project_store.write(path, document)
+        return document, True
 
     def _compatibility_snapshot(self, project: Project, action: str) -> dict[str, Any] | None:
         probe = getattr(self.launcher, "compatibility", None)
@@ -2200,10 +2464,40 @@ class CycleEngine:
         reservation_held: bool = False,
     ) -> dict[str, Any]:
         inspector = RepositoryInspector(project.repository)
+        authoritative_context = self._authoritative_execution_context(project)
+        expected_execution_plan: ExecutionPlan | None = None
+        if authoritative_context is not None:
+            projected, executable, _ = authoritative_context
+            if executable.workflow_type != WorkflowType.FEATURE_EXECUTION.value:
+                raise ProjectionError("authoritative execution plan does not permit a feature session")
+            executable.validate_against(projected)
+            expected_execution_plan = executable
         if not inspector.is_clean:
             raise ConveyorError("feature execution requires a clean repository")
         compatibility = self._compatibility_snapshot(project, "feature_cycle")
         if compatibility is not None and compatibility.get("compatible") is not True:
+            if expected_execution_plan is not None:
+                compatibility_reservation = self._launch_lock(project, inspector)
+                compatibility_reservation.acquire(make_lock_record(
+                    project_id=project.project_id,
+                    repository_identity=inspector.identity()["repository_id"],
+                    run_id=run_id,
+                    current_feature=expected_execution_plan.feature_id,
+                    current_phase="feature_compatibility_preflight",
+                ))
+                try:
+                    self._validate_projected_dispatch(
+                        project,
+                        workflow_type=WorkflowType.FEATURE_EXECUTION,
+                        expected=expected_execution_plan,
+                    )
+                finally:
+                    compatibility_reservation.release(run_id)
+                raise SessionError(
+                    f"classification={compatibility.get('classification')}; "
+                    f"remediation={compatibility.get('remediation')}; "
+                    f"continue={compatibility.get('validation_command')}"
+                )
             gate = {
                 "reason": "Codex compatibility preflight blocked the feature session before cycle creation.",
                 "classification": compatibility.get("classification"),
@@ -2282,6 +2576,11 @@ class CycleEngine:
                 current_phase="feature_preflight",
             ))
         try:
+            self._validate_projected_dispatch(
+                project,
+                workflow_type=WorkflowType.FEATURE_EXECUTION,
+                expected=expected_execution_plan,
+            )
             repository = inspector.inspect(
                 baseline=project.validated_baseline_commit,
                 milestone_branch=project.milestone_branch,
@@ -2307,13 +2606,10 @@ class CycleEngine:
             if selection is None:
                 raise QueueError("no dependency-ready feature exists after queue reconciliation")
             cycle_path = inspector.cycle_state_path()
-            superseded_archive = self._archive_superseded_cycle(
-                project_state, cycle_path, run_id
-            ) if cycle_path.exists() else None
             state = self._new_cycle_state(
                 project, run_id, inspector, selection.feature, compatibility=compatibility
             )
-            state["superseded_cycle_archive"] = superseded_archive
+            state["superseded_cycle_archive"] = None
             self._validate_cycle_launch_invariants(project, inspector, state, selection.feature_id)
             identity = inspector.identity()
             phase_root = self.root / "state/projects" / project.project_id
@@ -2343,8 +2639,20 @@ class CycleEngine:
                 feature_id=selection.feature_id,
                 run_id=run_id,
                 policy=preparation.policy,
+                expected_starting_branch=(
+                    expected_execution_plan.milestone_branch
+                    if expected_execution_plan is not None else None
+                ),
+                expected_starting_head=(
+                    expected_execution_plan.starting_commit
+                    if expected_execution_plan is not None else None
+                ),
             )
             preparation_kernel.acquire_lease()
+            state["superseded_cycle_archive"] = (
+                self._archive_superseded_cycle(project_state, cycle_path, run_id)
+                if cycle_path.exists() else None
+            )
             preparation_kernel.capture_snapshot()
             inspector.ensure_runtime_ignored()
             preparation_kernel.checkpoint("runtime_ignore_verified")
@@ -2605,6 +2913,27 @@ class CycleEngine:
                 acceptance_completion,
             )
 
+            integration_context = self._validate_projected_dispatch(
+                project,
+                workflow_type=WorkflowType.MILESTONE_INTEGRATION,
+                expected=None,
+                allow_nonstarting_checkout=True,
+                allow_unmaterialized_integration_queue=True,
+            )
+            if integration_context is None:
+                raise ProjectionError(
+                    "feature acceptance did not produce an authoritative integration plan"
+                )
+            _, integration_execution_plan = integration_context
+            if (
+                integration_execution_plan.transaction_mode != "fresh"
+                or integration_execution_plan.feature_id != selection.feature_id
+                or integration_execution_plan.accepted_commit != accepted
+            ):
+                raise ProjectionError(
+                    "feature acceptance disagrees with the fresh milestone-integration plan"
+                )
+
             accepted_paths = tuple(sorted(inspector.git([
                 "diff-tree", "--no-commit-id", "--name-only", "-r", str(accepted)
             ]).stdout.splitlines()))
@@ -2625,6 +2954,8 @@ class CycleEngine:
                 target_branch=str(project.milestone_branch),
                 milestone=project.active_milestone, feature_id=selection.feature_id,
                 run_id=run_id, policy=integration_adapter.policy,
+                expected_starting_branch=integration_execution_plan.milestone_branch,
+                expected_starting_head=integration_execution_plan.starting_commit,
             )
             integration_kernel.acquire_lease()
             integration_kernel.prepare_starting_branch()
@@ -2835,7 +3166,13 @@ class CycleEngine:
                 reservation.release(run_id)
 
     def _execute_queue_reconciliation(
-        self, project: Project, mode: str, run_id: str, project_state: dict[str, Any]
+        self,
+        project: Project,
+        mode: str,
+        run_id: str,
+        project_state: dict[str, Any],
+        *,
+        expected_execution_plan: ExecutionPlan | None = None,
     ) -> dict[str, Any]:
         inspector = RepositoryInspector(project.repository)
         planning_start = capture_planning_start(project, inspector, run_id)
@@ -2877,12 +3214,25 @@ class CycleEngine:
             project=project, ledger=ledger, projection=projection, lease=workflow_lease,
         )
         try:
+            self._validate_projected_dispatch(
+                project,
+                workflow_type=WorkflowType.QUEUE_RECONCILIATION,
+                expected=expected_execution_plan,
+            )
             kernel.begin(
                 workflow_type=WorkflowType.QUEUE_RECONCILIATION,
                 milestone=project.active_milestone or "",
                 run_id=run_id,
                 feature_id=None,
                 policy=adapter.policy,
+                expected_starting_branch=(
+                    expected_execution_plan.milestone_branch
+                    if expected_execution_plan is not None else None
+                ),
+                expected_starting_head=(
+                    expected_execution_plan.starting_commit
+                    if expected_execution_plan is not None else None
+                ),
             )
             kernel.acquire_lease()
             kernel.capture_snapshot()
@@ -3267,12 +3617,49 @@ class CycleEngine:
         project_state: dict[str, Any],
         *,
         reservation_held: bool = False,
+        expected_execution_plan: ExecutionPlan | None = None,
     ) -> dict[str, Any]:
         inspector = RepositoryInspector(project.repository)
         kernel: WorkflowKernel | None = None
         adapter: MilestoneGateAdapter | None = None
+        initial_context = self._authoritative_execution_context(project)
+        if initial_context is not None:
+            initial_projection, initial_executable, _ = initial_context
+            initial_executable.validate_against(initial_projection)
+            if initial_executable.workflow != WorkflowType.MILESTONE_GATE:
+                raise ProjectionError(
+                    "authoritative execution plan does not permit a milestone-gate session"
+                )
+            if (
+                expected_execution_plan is not None
+                and initial_executable.to_dict() != expected_execution_plan.to_dict()
+            ):
+                raise ProjectionError("milestone-gate execution plan changed before preflight")
+            expected_execution_plan = initial_executable
         compatibility = self._compatibility_snapshot(project, "milestone_gate")
         if compatibility is not None and compatibility.get("compatible") is not True:
+            if expected_execution_plan is not None:
+                compatibility_reservation = self._launch_lock(project, inspector)
+                compatibility_reservation.acquire(make_lock_record(
+                    project_id=project.project_id,
+                    repository_identity=inspector.identity()["repository_id"],
+                    run_id=run_id,
+                    current_feature=expected_execution_plan.feature_id,
+                    current_phase="milestone_gate_compatibility_preflight",
+                ))
+                try:
+                    self._validate_projected_dispatch(
+                        project,
+                        workflow_type=WorkflowType.MILESTONE_GATE,
+                        expected=expected_execution_plan,
+                    )
+                finally:
+                    compatibility_reservation.release(run_id)
+                raise SessionError(
+                    f"classification={compatibility.get('classification')}; "
+                    f"remediation={compatibility.get('remediation')}; "
+                    f"continue={compatibility.get('validation_command')}"
+                )
             gate = {
                 "reason": "Codex compatibility preflight blocked the milestone gate session.",
                 "classification": compatibility.get("classification"),
@@ -3343,6 +3730,11 @@ class CycleEngine:
                 current_phase="milestone_gate_preflight",
             ))
         try:
+            self._validate_projected_dispatch(
+                project,
+                workflow_type=WorkflowType.MILESTONE_GATE,
+                expected=expected_execution_plan,
+            )
             repository = inspector.inspect(
                 baseline=project.validated_baseline_commit,
                 milestone_branch=project.milestone_branch,
@@ -3375,6 +3767,14 @@ class CycleEngine:
                 workflow_type=WorkflowType.MILESTONE_GATE,
                 milestone=project.active_milestone, feature_id=None,
                 run_id=run_id, policy=adapter.policy,
+                expected_starting_branch=(
+                    expected_execution_plan.milestone_branch
+                    if expected_execution_plan is not None else None
+                ),
+                expected_starting_head=(
+                    expected_execution_plan.starting_commit
+                    if expected_execution_plan is not None else None
+                ),
             )
             kernel.acquire_lease()
             kernel.capture_snapshot()
@@ -3450,15 +3850,18 @@ class CycleEngine:
             self._advance_cycle(
                 cycle_path, state, "completed", inspector, "milestone_gate_passed", kernel=kernel
             )
-            completed = kernel.complete(evidence={"gate_commit": gate_commit})
-            self._materialize_terminal_cycle_cache(
-                cycle_path, state, transaction.transaction_id, completed
-            )
             gate = {
                 "decision": "Approve or decline merge of the validated milestone branch into the default branch.",
                 "milestone_branch": project.milestone_branch,
                 "default_branch_merge_performed": False,
             }
+            completed = kernel.complete(evidence={
+                "gate_commit": gate_commit,
+                "human_merge_gate": gate,
+            })
+            self._materialize_terminal_cycle_cache(
+                cycle_path, state, transaction.transaction_id, completed
+            )
             if project_state["current_state"] != "milestone_gate":
                 self._transition_project(
                     project, project_state, "milestone_gate", run_id=run_id,
@@ -3786,8 +4189,9 @@ class CycleEngine:
         kernel_recovery = self._kernel_recovery_preflight(project, apply=True)
         if kernel_recovery is not None:
             return kernel_recovery
-        projection = self._authoritative_projection(project)
-        if projection is not None:
+        context = self._authoritative_execution_context(project)
+        if context is not None:
+            projection, executable, _ = context
             action = projection.get("allowed_next_action")
             if action == "milestone_integration":
                 return self._execute_projected_integration(
@@ -3812,16 +4216,29 @@ class CycleEngine:
                 return {
                     "project_id": project.project_id,
                     **self._execute_milestone_gate(
-                        effective, "resume", run_id or str(uuid.uuid4()), project_state
+                        effective,
+                        "resume",
+                        run_id or str(uuid.uuid4()),
+                        project_state,
+                        expected_execution_plan=executable,
                     ),
                 }
-            return {
-                "project_id": project.project_id,
-                "outcome": "no_exact_transaction_to_resume",
-                "current_state": projection.get("current_state"),
-                "next_action": action,
-                "kernel_projection": projection,
-            }
+            if action in {
+                "queue_reconciliation",
+                "feature_cycle",
+                "human_decision_resolution",
+                "human_merge_approval",
+                "verify_consistency",
+            }:
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "no_exact_transaction_to_resume",
+                    "current_state": projection.get("current_state"),
+                    "next_action": action,
+                    "kernel_projection": projection,
+                    "human_gate": projection.get("human_gate"),
+                }
+            raise ProjectionError(f"unsupported authoritative resume action: {action}")
         inspector = RepositoryInspector(project.repository)
         cycle_path = inspector.cycle_state_path()
         state = self.cycle_store.read(cycle_path)
@@ -3844,6 +4261,19 @@ class CycleEngine:
     ) -> dict[str, Any]:
         """Start a fresh exact integration transaction from canonical projection evidence."""
 
+        context = self._authoritative_execution_context(project)
+        if context is None:
+            raise ProjectionError("projected integration requires an authoritative ledger projection")
+        current_projection, executable, _ = context
+        if (
+            current_projection.get("projection_fingerprint")
+            != projection.get("projection_fingerprint")
+            or executable.workflow_type != WorkflowType.MILESTONE_INTEGRATION.value
+            or executable.transaction_mode != "fresh"
+        ):
+            raise ProjectionError("integration dispatch disagrees with the reloaded execution plan")
+        executable.validate_against(current_projection)
+        projection = current_projection
         inspector = RepositoryInspector(project.repository)
         queue = FeatureQueue.from_location(project.repository, project.queue_location)
         selection = queue.select_integration(project.active_milestone or "")
@@ -3868,10 +4298,11 @@ class CycleEngine:
         if (
             not inspector.is_clean
             or any(inspector.git_operation_state().values())
-            or inspector.current_branch != project.milestone_branch
-            or inspector.head != milestone_head
+            or milestone_head != executable.starting_commit
         ):
-            raise RecoveryError("projected integration requires the clean exact milestone snapshot")
+            raise RecoveryError(
+                "projected integration requires a clean worktree and exact milestone target"
+            )
 
         identity = inspector.identity()
         state_root = self.root / "state/projects" / project.project_id
@@ -3906,11 +4337,21 @@ class CycleEngine:
             current_phase="projected_integration",
         ))
         try:
+            reserved_context = self._validate_projected_dispatch(
+                project,
+                workflow_type=WorkflowType.MILESTONE_INTEGRATION,
+                expected=executable,
+            )
+            if reserved_context is None:
+                raise ProjectionError("authoritative projection disappeared before integration")
+            projection, executable = reserved_context
             transaction = kernel.begin_for_branch(
                 workflow_type=WorkflowType.MILESTONE_INTEGRATION,
                 target_branch=str(project.milestone_branch),
                 milestone=project.active_milestone, feature_id=selection.feature_id,
                 run_id=run_id, policy=adapter.policy,
+                expected_starting_branch=executable.milestone_branch,
+                expected_starting_head=executable.starting_commit,
             )
             kernel.acquire_lease(); kernel.prepare_starting_branch(); kernel.capture_snapshot()
             request = SessionRequest(
@@ -4468,6 +4909,65 @@ class CycleEngine:
 
     def reconcile_controller_state(self, project: Project, *, dry_run: bool) -> dict[str, Any]:
         """Reconcile only Conveyor-owned state from read-only queue and Git evidence."""
+
+        context = self._authoritative_execution_context(project)
+        if context is not None:
+            projection, executable, superseded = context
+            existing = self.load_project_state(project)
+            stale = (existing or {}).get("current_state") != projection.get("current_state") or (
+                (existing or {}).get("state_evidence") or {}
+            ).get("projection_fingerprint") != projection.get("projection_fingerprint")
+            result = {
+                "project_id": project.project_id,
+                "dry_run": dry_run,
+                "classification": "projection_compatibility_cache_reconciliation",
+                "current_state": projection["current_state"],
+                "proposed_state": projection["current_state"],
+                "next_action": projection["allowed_next_action"],
+                "execution_plan": executable.to_dict(),
+                "superseded_legacy_cycles": superseded,
+                "compatibility_cache_stale": stale,
+                "would_persist_controller_state": stale and not dry_run,
+                "controller_state_written": False,
+                "application_repository_written": False,
+                "application_tracked_files_written": False,
+                "git_refs_written": False,
+                "session_launch_performed": False,
+            }
+            if dry_run:
+                return result
+            inspector = RepositoryInspector(project.repository)
+            reservation = self._launch_lock(project, inspector)
+            run_id = f"compatibility-{uuid.uuid4()}"
+            reservation.acquire(make_lock_record(
+                project_id=project.project_id,
+                repository_identity=inspector.identity()["repository_id"],
+                run_id=run_id,
+                current_feature=executable.feature_id,
+                current_phase="projection_compatibility_cache_reconciliation",
+            ))
+            try:
+                reloaded = self._authoritative_execution_context(project)
+                if reloaded is None:
+                    raise ProjectionError("authoritative projection disappeared during reconciliation")
+                current_projection, current_executable, _ = reloaded
+                if (
+                    current_projection.get("projection_fingerprint")
+                    != projection.get("projection_fingerprint")
+                    or current_executable.to_dict() != executable.to_dict()
+                ):
+                    raise ProjectionError("projection changed during compatibility reconciliation")
+                document, written = self._reconcile_projection_compatibility_cache(
+                    project, current_projection, current_executable
+                )
+                result.update({
+                    "controller_state_written": written,
+                    "compatibility_cache_stale": False,
+                    "current_state": document["current_state"],
+                })
+                return result
+            finally:
+                reservation.release(run_id)
 
         effective = self.effective_project(project)
         persisted = self.load_project_state(project)
@@ -5632,8 +6132,9 @@ class CycleEngine:
         )
         if kernel_recovery is not None:
             return kernel_recovery
-        authoritative = self._authoritative_projection(project)
-        if authoritative is not None and not dry_run and mode != "audit":
+        context = self._authoritative_execution_context(project)
+        if context is not None and not dry_run and mode != "audit":
+            authoritative, executable, _ = context
             if authoritative.get("active_transaction") is not None:
                 return {
                     "project_id": project.project_id,
@@ -5650,34 +6151,67 @@ class CycleEngine:
             )
             project_state["current_state"] = effective.current_state
             project_state["current_feature"] = authoritative.get("current_feature")
+            reloaded = self._authoritative_execution_context(project)
+            if reloaded is None:
+                raise ProjectionError("authoritative projection disappeared before dispatch")
+            reloaded_projection, reloaded_executable, _ = reloaded
+            if (
+                reloaded_projection.get("projection_fingerprint")
+                != authoritative.get("projection_fingerprint")
+                or reloaded_executable.to_dict() != executable.to_dict()
+            ):
+                raise ProjectionError("execution plan changed before dispatch")
+            executable.validate_against(reloaded_projection)
+            authoritative = reloaded_projection
             if action == "milestone_integration":
                 return self._execute_projected_integration(
                     effective, mode, run_id, authoritative
                 )
             if action == "feature_cycle":
+                evidence = self._execute_feature(effective, mode, run_id, project_state)
                 return {
                     "project_id": project.project_id,
-                    **self._execute_feature(effective, mode, run_id, project_state),
+                    "outcome": evidence.get("outcome") or (
+                        "one_feature_integrated" if mode == "one_feature" else "feature_integrated"
+                    ),
+                    **evidence,
                 }
             if action == "queue_reconciliation":
                 return {
                     "project_id": project.project_id,
                     **self._execute_queue_reconciliation(
-                        effective, mode, run_id, project_state
+                        effective,
+                        mode,
+                        run_id,
+                        project_state,
+                        expected_execution_plan=executable,
                     ),
                 }
             if action == "milestone_gate":
                 return {
                     "project_id": project.project_id,
                     **self._execute_milestone_gate(
-                        effective, mode, run_id, project_state
+                        effective,
+                        mode,
+                        run_id,
+                        project_state,
+                        expected_execution_plan=executable,
                     ),
                 }
-            return {
-                "project_id": project.project_id,
-                "outcome": action or "verify_consistency",
-                "kernel_projection": authoritative,
-            }
+            if action in {
+                "human_decision_resolution",
+                "human_merge_approval",
+                "verify_consistency",
+            }:
+                return {
+                    "project_id": project.project_id,
+                    "outcome": action,
+                    "kernel_projection": authoritative,
+                    "human_gate": authoritative.get("human_gate"),
+                    "session_launch_performed": False,
+                    "application_repository_written": False,
+                }
+            raise ProjectionError(f"unsupported authoritative dispatch action: {action}")
         if mode == "resume":
             plan = self.project_plan(project)
             if dry_run:

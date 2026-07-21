@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .contracts import ConsistencyClassification, WorkflowType, fingerprint
 from .errors import CorruptEvidenceError, ProjectionError, QueueError
@@ -13,12 +13,16 @@ from .ledger import EvidenceLedger, TERMINAL_EVENT_TYPES
 from .locks import inspect_repository_writer_lock
 from .migration import LegacyStateMigrator
 from .projection import ProjectionEngine, cache_agrees, build_projection_observations
-from .queue import FeatureQueue
+from .queue import FeatureQueue, resolve_feature_commit
 from .registry import Project
 from .repository import RepositoryInspector
 from .snapshots import capture_repository_snapshot
 from .workflow_lease import WorkflowLeaseRecord
 from .errors import AmbiguousLockError
+from .execution_plan import (
+    ExecutionPlan,
+    execution_plan_projection_agreement,
+)
 
 
 SEVERITY_ORDER = {
@@ -49,9 +53,16 @@ class InvariantResult:
 
 
 class ConsistencyChecker:
-    def __init__(self, *, controller_root: Path, project: Project):
+    def __init__(
+        self,
+        *,
+        controller_root: Path,
+        project: Project,
+        planner_observer: Callable[[], dict[str, Any]] | None = None,
+    ):
         self.controller_root = controller_root.expanduser().resolve()
         self.project = project
+        self.planner_observer = planner_observer
         self.inspector = RepositoryInspector(project.repository)
         identity = self.inspector.identity()
         project_root = self.controller_root / "state/projects" / project.project_id
@@ -693,6 +704,164 @@ class ConsistencyChecker:
                 ConsistencyClassification.RECOVERABLE_INCONSISTENCY,
                 evidence={"cache_exists": bool(cache_path and cache_path.exists())},
                 diagnostic="projection cache has not been built",
+            )
+
+        routing_projection = cache_projection or ledger_projection
+        if routing_projection is not None:
+            projected_feature = (
+                routing_projection.get("current_feature")
+                or routing_projection.get("selected_next_feature")
+            )
+            queue_feature = (
+                queue.feature(str(projected_feature))
+                if queue is not None and projected_feature else None
+            )
+            executable = ExecutionPlan.from_projection(
+                routing_projection,
+                starting_commit=self.inspector.rev_parse(
+                    self.project.milestone_branch or "", check=False
+                ),
+                feature_branch=(queue_feature or {}).get("branch"),
+                milestone_branch=self.project.milestone_branch,
+            )
+            compatibility_path = (
+                self.controller_root / "state/projects" / f"{self.project.project_id}.json"
+            )
+            compatibility_state = None
+            compatibility_projection_fingerprint = None
+            if compatibility_path.is_file():
+                try:
+                    compatibility_value = json.loads(compatibility_path.read_text(encoding="utf-8"))
+                    if isinstance(compatibility_value, dict):
+                        compatibility_state = compatibility_value.get("current_state")
+                        compatibility_projection_fingerprint = (
+                            (compatibility_value.get("state_evidence") or {}).get(
+                                "projection_fingerprint"
+                            )
+                        )
+                except (OSError, json.JSONDecodeError):
+                    compatibility_state = None
+            if self.planner_observer is not None:
+                observation_source = "planner_observer"
+                try:
+                    status = self.planner_observer()
+                except (CorruptEvidenceError, OSError, ProjectionError, QueueError):
+                    agreement = False
+                    agreement_evidence = {
+                        "checks": {"planner_observation_succeeded": False},
+                        "observer_error_category": "authoritative_planner_unavailable",
+                    }
+                else:
+                    agreement, agreement_evidence = execution_plan_projection_agreement(
+                        routing_projection, status, executable
+                    )
+                    cache_stale = (
+                        compatibility_state != routing_projection.get("current_state")
+                        or compatibility_projection_fingerprint
+                        != routing_projection.get("projection_fingerprint")
+                    )
+                    reported_cache = status.get("compatibility_cache") or {}
+                    legacy_observations = status.get("legacy_observations") or {}
+                    stale_but_ignored = (
+                        reported_cache.get("observed_state") == compatibility_state
+                        and reported_cache.get("observed_projection_fingerprint")
+                        == compatibility_projection_fingerprint
+                        and reported_cache.get("stale") == cache_stale
+                        and legacy_observations.get("persisted_compatibility_state")
+                        == compatibility_state
+                        and status.get("persisted_state")
+                        == routing_projection.get("current_state")
+                    )
+                    agreement_evidence["checks"][
+                        "compatibility_cache_stale_but_ignored"
+                    ] = stale_but_ignored
+                    agreement = agreement and stale_but_ignored
+                    agreement_evidence["compatibility_cache"] = {
+                        "actual_state": compatibility_state,
+                        "actual_projection_fingerprint": compatibility_projection_fingerprint,
+                        "stale": cache_stale,
+                        "ignored_for_execution": stale_but_ignored,
+                    }
+                    live_checks: dict[str, bool] = {}
+                    if executable.application_mutation_expected:
+                        live_checks["planned_milestone_ref"] = bool(
+                            executable.milestone_branch
+                            and executable.starting_commit
+                            and self.inspector.rev_parse(
+                                executable.milestone_branch, check=False
+                            ) == executable.starting_commit
+                        )
+                    if (
+                        executable.application_mutation_expected
+                        and executable.feature_id is not None
+                        and queue is not None
+                    ):
+                        planned_feature = queue.feature(executable.feature_id)
+                        live_checks["planned_feature_branch"] = bool(
+                            planned_feature
+                            and planned_feature.get("branch") == executable.feature_branch
+                        )
+                        if executable.workflow_type == WorkflowType.MILESTONE_INTEGRATION.value:
+                            projected_accepted = routing_projection.get(
+                                "accepted_feature_commit"
+                            )
+                            if (
+                                planned_feature
+                                and planned_feature.get("accepted_commit") == "SELF"
+                                and isinstance(projected_accepted, str)
+                            ):
+                                live_checks["planned_accepted_commit"] = bool(
+                                    executable.accepted_commit == projected_accepted
+                                    and self.inspector.ref_exists(projected_accepted)
+                                    and executable.feature_branch
+                                    and self.inspector.rev_parse(
+                                        executable.feature_branch, check=False
+                                    )
+                                    == projected_accepted
+                                )
+                            else:
+                                resolution = resolve_feature_commit(
+                                    feature=planned_feature or {},
+                                    queue=queue,
+                                    repository=self.inspector,
+                                    milestone_branch=self.project.milestone_branch,
+                                    baseline=self.project.validated_baseline_commit,
+                                    registered_commit=self.project.last_accepted_commit,
+                                    registered_feature=self.project.last_accepted_feature,
+                                )
+                                live_checks["planned_accepted_commit"] = bool(
+                                    resolution
+                                    and resolution.commit == executable.accepted_commit
+                                )
+                    agreement_evidence["checks"].update(live_checks)
+                    live_agreement = all(live_checks.values())
+                    agreement_evidence["live_repository_binding"] = live_checks
+                    agreement = agreement and live_agreement
+            else:
+                observation_source = "planner_observer_unavailable"
+                agreement = False
+                agreement_evidence = {
+                    "checks": {"planner_observer_available": False},
+                    "compatibility_cache": {
+                        "actual_state": compatibility_state,
+                        "actual_projection_fingerprint": compatibility_projection_fingerprint,
+                    },
+                }
+            agreement_evidence["observation_source"] = observation_source
+            add(
+                "execution_plan_projection_agreement",
+                agreement,
+                ConsistencyClassification.RECOVERABLE_INCONSISTENCY,
+                evidence=agreement_evidence,
+                diagnostic="status or executable routing disagrees with the kernel projection",
+            )
+        else:
+            add(
+                "execution_plan_projection_agreement",
+                not ledger_exists,
+                ConsistencyClassification.RECOVERABLE_INCONSISTENCY,
+                evidence={"ledger_exists": ledger_exists},
+                diagnostic="no authoritative projection is available for executable routing",
             )
 
         failed = [item for item in results if not item.passed]

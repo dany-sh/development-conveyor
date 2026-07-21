@@ -431,7 +431,10 @@ class PlanningTransactionTests(unittest.TestCase):
             self.assertTrue(status["current_repository_state"]["clean"])
             self.assertEqual(status["next_feature_selection"]["selected_feature"], "P0-003")
             self.assertEqual(status["proposed_next_action"], "feature_cycle")
-            self.assertEqual(status["sessions_that_would_launch"], ["$feature-factory"])
+            self.assertEqual(
+                status["sessions_that_would_launch"],
+                ["fresh feature transaction"],
+            )
             self.assertFalse(status["milestone_integrator_would_launch"])
 
     def test_16_recovery_never_launches_selected_feature(self):

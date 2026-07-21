@@ -339,9 +339,14 @@ class StartupReconciliationTests(unittest.TestCase):
             self._persist_state(engine, project, "milestone_gate")
             first = engine.reconcile_controller_state(project, dry_run=False)
             second = engine.reconcile_controller_state(project, dry_run=False)
+            third = engine.reconcile_controller_state(project, dry_run=False)
             self.assertTrue(first["state_recovered"])
-            self.assertFalse(second["state_recovered"])
-            self.assertEqual(second["state_consistency"], "state_consistent")
+            self.assertTrue(second["controller_state_written"])
+            self.assertFalse(third["controller_state_written"])
+            self.assertEqual(
+                third["classification"],
+                "projection_compatibility_cache_reconciliation",
+            )
             self.assertEqual(second["current_state"], "feature_ready")
 
     def test_resume_command_repairs_stale_state_without_launching_feature(self):
@@ -451,11 +456,13 @@ class StartupReconciliationTests(unittest.TestCase):
             document.update({"current_state": "feature_running", "current_feature": "F001"})
             engine.project_store.write(engine.project_state_path(project), document)
             plan = engine.project_plan(project)
-            self.assertEqual(plan["stale_cycle_evidence"]["classification"], "completed_cycle_evidence")
+            self.assertIsNone(plan["existing_active_cycle"])
+            self.assertIsNone(plan["stale_cycle_evidence"])
             self.assertEqual(
-                plan["repair_transition_path"],
-                ["feature_running", "feature_accepted", "queue_reconciliation", "milestone_gate"],
+                plan["legacy_observations"]["legacy_stale_cycle_evidence"]["classification"],
+                "completed_cycle_evidence",
             )
+            self.assertEqual(plan["current_state"], "milestone_gate")
             self.assertEqual(git(repository, "branch", "--show-current"), project.milestone_branch)
 
     def test_resumed_milestone_gate_launches_exactly_once(self):

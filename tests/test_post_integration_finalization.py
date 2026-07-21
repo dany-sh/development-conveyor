@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from development_conveyor.cycle_engine import CycleEngine
+from development_conveyor.errors import ProjectionError
 from development_conveyor.queue import FeatureQueue
 from development_conveyor.recovery import assess_durable_integration_success
 from development_conveyor.reporting import build_project_plan
@@ -493,7 +494,7 @@ class PostIntegrationFinalizationTests(unittest.TestCase):
             plan = fixture.engine.run_project(fixture.project, "milestone", dry_run=True)
             self.assertEqual(plan["current_state"], "queue_reconciliation")
             self.assertEqual(plan["proposed_next_action"], "queue_reconciliation")
-            self.assertIn("product-architect (planning-only)", plan["sessions_that_would_launch"])
+            self.assertIn("fresh queue-reconciliation transaction", plan["sessions_that_would_launch"])
 
     def test_20_recovery_does_not_duplicate_integration(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -536,7 +537,8 @@ class PostIntegrationFinalizationTests(unittest.TestCase):
             before = cycle_path.read_bytes()
             second = fixture.engine.run_project(fixture.project, "resume", dry_run=True)
             third = fixture.engine.run_project(fixture.project, "resume", dry_run=True)
-            self.assertFalse(second["would_persist_state_repair"])
+            self.assertTrue(second["would_persist_state_repair"])
+            self.assertTrue(third["would_persist_state_repair"])
             self.assertEqual(second["repair_transition_path"], third["repair_transition_path"])
             self.assertEqual(before, cycle_path.read_bytes())
 
@@ -635,7 +637,17 @@ class PostIntegrationFinalizationTests(unittest.TestCase):
             git(fixture.repository, "commit", "-m", "docs: misleading planning label")
             rejected = fixture.engine.run_project(fixture.project, "milestone", dry_run=True)
             self.assertFalse(rejected["durable_integration_success"]["success"])
-            self.assertEqual(rejected["proposed_next_action"], "validation_failed")
+            self.assertEqual(rejected["proposed_next_action"], "queue_reconciliation")
+            self.assertNotEqual(
+                rejected["executable_plan"]["starting_commit"],
+                git(fixture.repository, "rev-parse", "HEAD"),
+            )
+            with self.assertRaisesRegex(
+                ProjectionError,
+                "repository no longer matches the execution plan starting branch and commit",
+            ):
+                fixture.engine.run_project(fixture.project, "milestone")
+            self.assertEqual(fixture.launcher.actions, [])
 
     def test_30_report_reads_reject_traversal_symlink_and_non_regular_paths(self):
         with tempfile.TemporaryDirectory() as temporary:

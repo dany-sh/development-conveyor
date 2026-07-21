@@ -36,6 +36,7 @@ NEXT_ACTION = {
     "milestone_gate": "milestone_gate",
     "human_decision_required": "human_decision_resolution",
     "milestone_complete": "human_merge_approval",
+    "milestone_ready_for_merge": "human_merge_approval",
 }
 
 
@@ -136,6 +137,10 @@ class ProjectionEngine:
             transaction["last_sequence"] = event["sequence"]
             kind = event["event_type"]
             if kind == "TransactionStarted":
+                if not payload.get("legacy_import") and not payload.get("migration_batch"):
+                    # Imported projection facts bootstrap routing only until the
+                    # first canonical transaction takes authority.
+                    projection_facts = {}
                 transaction.update({
                     "state": "lease_pending",
                     "feature_id": payload.get("feature_id"),
@@ -210,6 +215,7 @@ class ProjectionEngine:
                     feature_commits[transaction["feature_id"]] = payload["accepted_feature_commit"]
                 integration_status = payload.get("integration_status", integration_status)
                 planning_status = payload.get("planning_status", planning_status)
+                human_gate = payload.get("human_merge_gate", human_gate)
                 if workflow == "milestone_integration":
                     integrated_feature = payload.get("feature_id") or transaction.get("feature_id")
                     if integrated_feature:
@@ -249,6 +255,7 @@ class ProjectionEngine:
         session_resume_eligible = bool(
             active_transaction
             and transactions[active_transaction]["state"] in {"active", "result_pending"}
+            and transactions[active_transaction]["session_ids"]
             and not current_accepted_commit
         )
         repository_consistency = "not_observed"

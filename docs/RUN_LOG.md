@@ -447,3 +447,23 @@ This log records model configuration and deterministic deployment evidence. It n
 - Transparency: earlier in the run, ordinary read-only `git status` refreshed `.git/index` stat-cache bytes relative to the user's starting snapshot. No tracked content, refs, staging semantics, worktree status, or application behavior changed.
 - Content audit: the deterministic profile-aware audit initially flagged a token-shaped redaction fixture. The fixture was replaced with a non-credential Authorization-header placeholder while preserving the test's purpose; the focused unittest and pytest checks passed, and the final audit reported no secret, sensitive-data, binary, destructive-operation, or other hard gate.
 - Final adversarial acceptance: `0 Critical`, `0 High`, and `0 Medium` findings remain. No commit, milestone integration, default-branch merge, push, force-push, tag, publication, deployment, release, or application production-code mutation was performed.
+
+### Model execution — 2026-07-21T19:32:08+00:00
+
+- Agent role: `adversarial-reviewer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `xhigh`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_projection_routing_adversarial_review`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-21T19:34:45+00:00
+
+- Agent role: `feature-worker`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_projection_routing_repair`
+- Safety and autonomy contracts unchanged: `true`

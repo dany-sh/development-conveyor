@@ -796,6 +796,58 @@ if dirty:
                 else:
                     self.assertEqual(project.validated_baseline_commit, inspector.head)
 
+    def test_dirty_start_rejects_post_validation_prestart_drift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, project = synthetic_repository(root / "app")
+            exclude = repository / ".git/info/exclude"
+            exclude.write_text(
+                exclude.read_text(encoding="utf-8")
+                + "\n.factory/locks/writer.json\n",
+                encoding="utf-8",
+            )
+            (repository / "app.txt").write_text("allowed dirty baseline\n", encoding="utf-8")
+            identity = RepositoryInspector(repository).identity()
+            ledger = EvidenceLedger(
+                root / "controller/ledger.jsonl",
+                project_id="synthetic",
+                repository_identity=identity["repository_id"],
+                repository_path_fingerprint=identity["path_fingerprint"],
+            )
+            lease = WorkflowWriterLease(repository / ".factory/locks/writer.json")
+            kernel = WorkflowKernel(
+                project=project,
+                ledger=ledger,
+                projection=ProjectionEngine(ledger),
+                lease=lease,
+            )
+            acquire = kernel._preacquire_lease
+
+            def acquire_then_drift(transaction):
+                acquire(transaction)
+                (repository / "app.txt").write_text(
+                    "drift after validation before transaction start\n", encoding="utf-8"
+                )
+
+            kernel._preacquire_lease = acquire_then_drift
+            with self.assertRaisesRegex(
+                TransactionError,
+                "repository changed before the planned writer lease was acquired",
+            ):
+                kernel.begin(
+                    workflow_type=WorkflowType.FEATURE_EXECUTION,
+                    milestone="M0",
+                    feature_id="F001",
+                    run_id="dirty-start-drift",
+                    policy=MutationPolicy(
+                        ("app.txt",),
+                        require_clean_start=False,
+                        commit_subject="F001: dirty start",
+                    ),
+                )
+            self.assertEqual([], ledger.read())
+            self.assertIsNone(lease.read())
+
     def test_dirty_recovery_rejects_drift_after_observation_snapshot(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); repository, project = synthetic_repository(root / "app")
@@ -1579,7 +1631,15 @@ if dirty:
         with tempfile.TemporaryDirectory() as temporary:
             simulator = DeterministicLifecycleSimulator(Path(temporary))
             simulator.run(cycles=1)
-            checker = ConsistencyChecker(controller_root=simulator.controller, project=simulator.project)
+            observer_engine = CycleEngine(
+                controller_configuration(Path(temporary), simulator.project),
+                launcher=object(),
+            )
+            checker = ConsistencyChecker(
+                controller_root=simulator.controller,
+                project=simulator.project,
+                planner_observer=lambda: observer_engine.project_plan(simulator.project),
+            )
             self.assertEqual("CONSISTENT", checker.check()["classification"])
 
             cache = simulator.controller / "state/projects/synthetic/projection-cache.json"
@@ -2079,7 +2139,7 @@ kernel.acquire_lease(); kernel.capture_snapshot()
         ).check()
         self.assertEqual("RECOVERABLE_INCONSISTENCY", consistency["classification"])
         self.assertEqual(
-            ["ledger_integrity"],
+            ["execution_plan_projection_agreement"],
             [item["invariant"] for item in consistency["failed_invariants"]],
         )
         queue_agreement = next(

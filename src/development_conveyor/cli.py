@@ -229,9 +229,11 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
         }
 
     if args.command == "verify-consistency":
+        project = registry.get(args.project)
         return ConsistencyChecker(
             controller_root=controller_root,
-            project=registry.get(args.project),
+            project=project,
+            planner_observer=lambda: engine.project_plan(project),
         ).check()
 
     if args.command == "migrate-state":
