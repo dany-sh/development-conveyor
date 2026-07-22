@@ -7,7 +7,7 @@
   "report_directory": "reports",
   "log_directory": "logs",
   "codex": {
-    "executable": "codex",
+    "executable": "/Users/dany/.codex/packages/standalone/releases/0.145.0-aarch64-apple-darwin/bin/codex",
     "session_timeout_seconds": 7200,
     "capture_json_events": true,
     "resume_sessions": true
