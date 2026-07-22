@@ -25,6 +25,7 @@ from .execution_plan import (
     execution_plan_projection_agreement,
     integrated_feature_execution_checks,
 )
+from .feature_branches import canonical_feature_branch
 
 
 SEVERITY_ORDER = {
@@ -736,12 +737,16 @@ class ConsistencyChecker:
                 queue.feature(str(projected_feature))
                 if queue is not None and projected_feature else None
             )
+            canonical_queue_branch = (
+                canonical_feature_branch(self.project, queue_feature)
+                if isinstance(queue_feature, dict) else None
+            )
             executable = ExecutionPlan.from_projection(
                 routing_projection,
                 starting_commit=self.inspector.rev_parse(
                     self.project.milestone_branch or "", check=False
                 ),
-                feature_branch=(queue_feature or {}).get("branch"),
+                feature_branch=canonical_queue_branch,
                 milestone_branch=self.project.milestone_branch,
             )
             terminal_plan_checks = (
@@ -939,11 +944,33 @@ class ConsistencyChecker:
                                 == observed_executable.accepted_commit
                             ] == [observed_executable.feature_branch]
                         )
+                        canonical_planned_branch = (
+                            canonical_feature_branch(self.project, planned_feature)
+                            if isinstance(planned_feature, dict) else None
+                        )
+                        fresh_absent_branch = bool(
+                            observed_executable.workflow_type
+                            == WorkflowType.FEATURE_EXECUTION.value
+                            and observed_executable.transaction_mode == "fresh"
+                            and canonical_planned_branch == observed_executable.feature_branch
+                            and canonical_planned_branch
+                            and not self.inspector.ref_exists(canonical_planned_branch)
+                            and self.inspector.current_branch == observed_executable.milestone_branch
+                            and self.inspector.head == observed_executable.starting_commit
+                        )
                         live_checks["planned_feature_branch"] = bool(
-                            planned_feature and planned_feature.get("branch")
-                            == observed_executable.feature_branch
-                            or planned_feature and not planned_feature.get("branch")
-                            and recovered_branch_binding
+                            canonical_planned_branch == observed_executable.feature_branch
+                            and (fresh_absent_branch or recovered_branch_binding or bool(
+                                canonical_planned_branch
+                                and self.inspector.ref_exists(canonical_planned_branch)
+                            ))
+                        )
+                        live_checks["planned_feature_branch_state"] = fresh_absent_branch or bool(
+                            canonical_planned_branch and self.inspector.ref_exists(canonical_planned_branch)
+                        )
+                        agreement_evidence["planned_feature_branch_state"] = (
+                            "planned_branch_absent_and_ready_for_creation"
+                            if fresh_absent_branch else "planned_branch_present"
                         )
                         if (
                             observed_executable.workflow_type

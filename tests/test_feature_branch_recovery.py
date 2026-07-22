@@ -48,6 +48,16 @@ class FeatureBranchRecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(RecoveryError, "allowed codex/"):
                 engine._expected_feature_branch(project, {"id": "F003", "title": "Safe", "branch": "bad branch"})
 
+    def test_unrelated_explicit_feature_branch_is_rejected_before_preparation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, project = synthetic_repository(Path(temporary))
+            engine = CycleEngine(controller_configuration(Path(temporary), project), SuccessfulNoEvidenceLauncher())
+            with self.assertRaisesRegex(RecoveryError, "does not identify the selected feature"):
+                engine._expected_feature_branch(
+                    project,
+                    {"id": "F003", "title": "Safe", "branch": "codex/F004-other-feature"},
+                )
+
     def test_fresh_branch_preparation_uses_the_exact_starting_commit(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository, project = synthetic_repository(Path(temporary))
@@ -60,6 +70,36 @@ class FeatureBranchRecoveryTests(unittest.TestCase):
             self.assertEqual(git(repository, "rev-parse", "HEAD"), state["feature_starting_commit"])
             self.assertEqual(git(repository, "rev-parse", project.milestone_branch), state["milestone_pre_integration_commit"])
 
+    def test_wrong_existing_branch_commit_is_blocked_before_preparation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            engine = CycleEngine(controller_configuration(Path(temporary), project), SuccessfulNoEvidenceLauncher())
+            inspector = RepositoryInspector(repository)
+            state = engine._new_cycle_state(project, "fresh-run", inspector, {
+                "id": "F003", "title": "Single-Window Application Shell", "branch": None,
+            })
+            git(repository, "switch", "-c", state["feature_branch"])
+            (repository / "app.txt").write_text("divergent\n", encoding="utf-8")
+            git(repository, "add", "app.txt")
+            git(repository, "commit", "-m", "F003: divergent branch")
+            git(repository, "switch", project.milestone_branch)
+            with self.assertRaisesRegex(RecoveryError, "does not point to the verified starting commit"):
+                engine._validate_feature_branch_preparation_state(project, inspector, state)
+
+    def test_changed_milestone_head_is_blocked_before_preparation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            engine = CycleEngine(controller_configuration(Path(temporary), project), SuccessfulNoEvidenceLauncher())
+            inspector = RepositoryInspector(repository)
+            state = engine._new_cycle_state(project, "fresh-run", inspector, {
+                "id": "F003", "title": "Single-Window Application Shell", "branch": None,
+            })
+            (repository / "app.txt").write_text("moved milestone\n", encoding="utf-8")
+            git(repository, "add", "app.txt")
+            git(repository, "commit", "-m", "test: move milestone")
+            with self.assertRaisesRegex(RecoveryError, "milestone branch changed"):
+                engine._validate_feature_branch_preparation_state(project, inspector, state)
+
     def test_fresh_dry_plan_never_creates_the_derived_branch(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository, project = synthetic_repository(Path(temporary))
@@ -67,6 +107,25 @@ class FeatureBranchRecoveryTests(unittest.TestCase):
             before = git(repository, "show-ref", "--heads")
             engine.project_plan(project)
             self.assertEqual(git(repository, "show-ref", "--heads"), before)
+
+    def test_model_launch_occurs_only_after_branch_preparation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, project = synthetic_repository(root)
+            observed: dict[str, str] = {}
+
+            def observe_prepared_branch(_request):
+                observed["branch"] = git(repository, "branch", "--show-current")
+                observed["head"] = git(repository, "rev-parse", "HEAD")
+
+            engine = CycleEngine(
+                controller_configuration(root, project),
+                SuccessfulNoEvidenceLauncher(observe_prepared_branch),
+            )
+            with self.assertRaises(SessionError):
+                engine.run_project(project, "one_feature")
+            self.assertEqual("codex/f001-synthetic-feature", observed["branch"])
+            self.assertEqual(git(repository, "rev-parse", project.milestone_branch), observed["head"])
 
     def _interrupted_cycle(self, root: Path, *, three_files: bool = False):
         repository, project = synthetic_repository(root)

@@ -104,6 +104,7 @@ from .command_authority import CommandAuthority
 from .workflow_recovery import RecoveryPlanner
 from .validation import SafetyPolicy
 from .cost_policy import build_run_plan
+from .feature_branches import canonical_feature_branch
 
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 DETERMINISTIC_COMPATIBILITY_FAILURES = {
@@ -942,14 +943,24 @@ class CycleEngine:
             queue = FeatureQueue.from_location(project.repository, project.queue_location)
             if workflow_type == WorkflowType.FEATURE_EXECUTION:
                 selection = queue.select_next(project.active_milestone or "")
+                planned_branch = (
+                    canonical_feature_branch(project, selection.feature)
+                    if selection is not None else None
+                )
                 if (
                     selection is None
                     or selection.feature_id != executable.feature_id
-                    or selection.feature.get("branch") != executable.feature_branch
+                    or planned_branch != executable.feature_branch
                 ):
                     raise ProjectionError(
                         "ready feature identity or branch no longer matches the execution plan"
                     )
+                self._validate_feature_branch_preparation_state(project, inspector, {
+                    "feature_branch": executable.feature_branch,
+                    "feature_starting_commit": executable.starting_commit,
+                    "milestone_branch": executable.milestone_branch,
+                    "milestone_pre_integration_commit": executable.starting_commit,
+                })
             elif workflow_type == WorkflowType.MILESTONE_INTEGRATION:
                 selection = queue.select_integration(project.active_milestone or "")
                 recovery = projection.get("failed_integration_recovery")
@@ -1675,33 +1686,7 @@ class CycleEngine:
 
     @staticmethod
     def _expected_feature_branch(project: Project, feature: dict[str, Any]) -> str:
-        recorded = feature.get("branch")
-        if isinstance(recorded, str) and recorded:
-            branch = recorded
-        else:
-            try:
-                adapter = json.loads((project.repository / project.validation_source).read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise RecoveryError(f"cannot derive feature branch from repository adapter: {exc}") from exc
-            pattern = (adapter.get("git") or {}).get("feature_branch_pattern")
-            feature_id = feature.get("id")
-            title = feature.get("name") or feature.get("title")
-            if not isinstance(pattern, str) or not isinstance(feature_id, str) or not isinstance(title, str):
-                raise RecoveryError("feature branch is absent and adapter branch metadata is incomplete")
-            slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
-            if not re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", feature_id) or not slug:
-                raise RecoveryError("feature ID or title cannot produce a safe feature branch")
-            try:
-                branch = pattern.format(feature_id=feature_id, feature_id_lower=feature_id.lower(), slug=slug)
-            except (KeyError, ValueError) as exc:
-                raise RecoveryError(f"feature branch pattern is unsupported: {pattern}") from exc
-        if not isinstance(branch, str) or not branch.startswith("codex/") or any(char.isspace() for char in branch):
-            raise RecoveryError("feature branch must use the allowed codex/ prefix and contain no whitespace")
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch) or ".." in branch or branch.endswith("/"):
-            raise RecoveryError("feature branch contains invalid ref characters")
-        if not branch:
-            raise RecoveryError("derived feature branch is empty")
-        return branch
+        return canonical_feature_branch(project, feature)
 
     def _archive_superseded_cycle(
         self,
@@ -1846,9 +1831,7 @@ class CycleEngine:
     ) -> dict[str, Any]:
         branch = str(state["feature_branch"])
         starting = str(state["feature_starting_commit"])
-        milestone_head = inspector.rev_parse(str(state["milestone_branch"]), check=False)
-        if milestone_head != state.get("milestone_pre_integration_commit") or milestone_head != starting:
-            raise RecoveryError("milestone branch changed before feature branch preparation")
+        self._validate_feature_branch_preparation_state(project, inspector, state)
         branch_head = inspector.rev_parse(branch, check=False)
         if branch_head is None:
             inspector.switch_feature_branch(branch, starting_commit=starting)
@@ -1865,6 +1848,37 @@ class CycleEngine:
         )
         state["feature_worktree"] = str(project.repository.resolve())
         return evidence
+
+    @staticmethod
+    def _validate_feature_branch_preparation_state(
+        project: Project, inspector: RepositoryInspector, state: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Validate a fresh branch before a lease, transaction, or model launch."""
+
+        branch = state.get("feature_branch")
+        starting = state.get("feature_starting_commit")
+        milestone = state.get("milestone_branch")
+        milestone_start = state.get("milestone_pre_integration_commit")
+        if not all(isinstance(item, str) and item for item in (branch, starting, milestone, milestone_start)):
+            raise RecoveryError("feature branch preparation evidence is incomplete")
+        milestone_head = inspector.rev_parse(milestone, check=False)
+        if milestone_head != milestone_start or milestone_head != starting:
+            raise RecoveryError("milestone branch changed before feature branch preparation")
+        branch_head = inspector.rev_parse(branch, check=False)
+        worktree = inspector.branch_worktree(branch) if branch_head else None
+        if branch_head is not None and branch_head != starting:
+            raise RecoveryError("existing feature branch does not point to the verified starting commit")
+        if worktree not in {None, project.repository.resolve()}:
+            raise RecoveryError("feature branch already belongs to another worktree")
+        return {
+            "branch": branch,
+            "branch_head": branch_head,
+            "branch_state": (
+                "planned_branch_absent_and_ready_for_creation"
+                if branch_head is None else "planned_branch_exists_at_starting_commit"
+            ),
+            "milestone_head": milestone_head,
+        }
 
     @staticmethod
     def _git_checkpoint(inspector: RepositoryInspector) -> dict[str, Any]:
