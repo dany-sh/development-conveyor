@@ -28,7 +28,13 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
-def synthetic_repository(root: Path, feature_status: str = "ready") -> tuple[Path, Project]:
+def synthetic_repository(
+    root: Path,
+    feature_status: str = "ready",
+    *,
+    controller_project_id: str = "synthetic",
+    adapter_project_id: str | None = None,
+) -> tuple[Path, Project]:
     repository = root / "synthetic-app"
     repository.mkdir(parents=True)
     git(repository, "init", "-b", "main")
@@ -41,7 +47,10 @@ def synthetic_repository(root: Path, feature_status: str = "ready") -> tuple[Pat
     (repository / "docs/AUTONOMY_CONTRACT.md").write_text("# Autonomy\n\nContinue through M0.\n", encoding="utf-8")
     adapter = {
         "schema_version": 1,
-        "project": {"id": "synthetic", "name": "Synthetic"},
+        "project": {
+            "id": controller_project_id if adapter_project_id is None else adapter_project_id,
+            "name": "Synthetic",
+        },
         "project_profile": {"usage": "personal_private"},
         "content_policy": {"secrets": "block", "generated_artifacts": "ignore"},
         "factory": {"feature_queue": "docs/FEATURE_QUEUE.yaml"},
@@ -84,7 +93,7 @@ def synthetic_repository(root: Path, feature_status: str = "ready") -> tuple[Pat
     git(repository, "branch", "codex/m0-foundation")
     git(repository, "switch", "codex/m0-foundation")
     project = Project(
-        project_id="synthetic",
+        project_id=controller_project_id,
         repository=repository,
         enabled=True,
         priority=100,

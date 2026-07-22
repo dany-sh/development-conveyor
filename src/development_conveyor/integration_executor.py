@@ -22,7 +22,8 @@ from .validation import SafetyPolicy
 from .workflow_lease import WorkflowWriterLease
 
 
-PLAN_SCHEMA_VERSION = 1
+PLAN_SCHEMA_VERSION = 2
+LEGACY_PLAN_SCHEMA_VERSION = 1
 RESULT_SCHEMA_VERSION = 1
 RUNTIME_PATTERN = "/.factory/runtime/milestone-integration/"
 RUNTIME_DESCENDANTS = (
@@ -37,6 +38,8 @@ LEASE_IDENTITY_FIELDS = (
     "repository_path_fingerprint",
     "repository_path",
     "project_id",
+    "controller_project_id",
+    "adapter_project_id",
     "transaction_id",
     "workflow_type",
     "milestone",
@@ -52,11 +55,17 @@ LEASE_IDENTITY_FIELDS = (
     "owner_host",
     "allowed_mutations",
 )
+LEGACY_LEASE_IDENTITY_FIELDS = tuple(
+    field
+    for field in LEASE_IDENTITY_FIELDS
+    if field not in {"controller_project_id", "adapter_project_id"}
+)
 PLAN_REQUIRED_FIELDS = {
     "schema_version",
     "plan_fingerprint",
     "created_at",
     "project_id",
+    "controller_project_id",
     "adapter_project_id",
     "repository",
     "repository_identity",
@@ -82,6 +91,7 @@ PLAN_REQUIRED_FIELDS = {
     "validation_commands",
     "metadata_paths",
 }
+LEGACY_PLAN_REQUIRED_FIELDS = PLAN_REQUIRED_FIELDS - {"controller_project_id"}
 
 
 def _canonical(value: Any) -> bytes:
@@ -192,12 +202,31 @@ def _commands_from_adapter(adapter: dict[str, Any]) -> list[dict[str, Any]]:
     return values
 
 
-def _adapter_project_id(adapter: dict[str, Any]) -> str:
+def _adapter_project_id(adapter: dict[str, Any], *, source: str) -> str:
     project = adapter.get("project")
     value = project.get("id") if isinstance(project, dict) else None
     if not isinstance(value, str) or not value:
-        raise IntegrationPlanError("accepted adapter project.id is missing")
+        raise IntegrationPlanError(f"{source} adapter project.id is missing")
     return value
+
+
+def _controller_project_id(plan: dict[str, Any]) -> str:
+    value = plan.get("controller_project_id")
+    if isinstance(value, str) and value:
+        return value
+    project_id = plan.get("project_id")
+    adapter_project_id = plan.get("adapter_project_id")
+    if (
+        plan.get("schema_version") == LEGACY_PLAN_SCHEMA_VERSION
+        and isinstance(project_id, str)
+        and project_id
+        and project_id == adapter_project_id
+    ):
+        return project_id
+    raise IntegrationPlanError(
+        "legacy integration plan may default controller_project_id only when "
+        "project_id exactly equals adapter_project_id"
+    )
 
 
 def _metadata_paths(adapter: dict[str, Any], queue_path: str) -> list[str]:
@@ -216,7 +245,7 @@ def _metadata_paths(adapter: dict[str, Any], queue_path: str) -> list[str]:
 def inspect_two_refs(
     *,
     repository: Path,
-    project_id: str,
+    controller_project_id: str,
     feature_id: str,
     feature_branch: str,
     accepted_commit: str,
@@ -244,10 +273,30 @@ def inspect_two_refs(
 
     accepted_queue, accepted_queue_bytes = _json_at(root, accepted_commit, queue_path)
     accepted_adapter, _ = _json_at(root, accepted_commit, ".factory/project.yaml")
-    adapter_project_id = _adapter_project_id(accepted_adapter)
-    if adapter_project_id != project_id:
+    accepted_adapter_project_id = _adapter_project_id(
+        accepted_adapter, source="accepted-commit"
+    )
+    live_adapter_bytes = inspector.safe_worktree_file_bytes(".factory/project.yaml")
+    try:
+        live_adapter = json.loads(live_adapter_bytes)
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise IntegrationPlanError("live adapter is unreadable or malformed") from exc
+    if not isinstance(live_adapter, dict):
+        raise IntegrationPlanError("live adapter must be an object")
+    live_adapter_project_id = _adapter_project_id(live_adapter, source="live")
+    milestone_adapter, _ = _json_at(
+        root, pre_integration_head, ".factory/project.yaml"
+    )
+    milestone_adapter_project_id = _adapter_project_id(
+        milestone_adapter, source="live milestone"
+    )
+    if live_adapter_project_id != milestone_adapter_project_id:
         raise IntegrationPlanError(
-            "accepted adapter project identity does not match the controller project"
+            "live worktree adapter project identity does not match the live milestone ref"
+        )
+    if accepted_adapter_project_id != live_adapter_project_id:
+        raise IntegrationPlanError(
+            "accepted-commit adapter project identity does not match the live milestone repository"
         )
     live_queue, _ = _json_at(root, pre_integration_head, queue_path)
     accepted_feature = _one(accepted_queue, "features", feature_id)
@@ -332,20 +381,21 @@ def inspect_two_refs(
     return {
         "repository_identity": identity["repository_id"],
         "repository_path_fingerprint": identity["path_fingerprint"],
-        "adapter_project_id": adapter_project_id,
+        "controller_project_id": controller_project_id,
+        "adapter_project_id": live_adapter_project_id,
         "accepted_queue_fingerprint": _sha256(accepted_queue_bytes),
         "accepted_changed_paths": list(changed_paths),
         "validation_commands": _commands_from_adapter(accepted_adapter),
         "metadata_paths": _metadata_paths(accepted_adapter, queue_path),
         "dependencies": list(dependencies),
-        "project_id": project_id,
+        "project_id": controller_project_id,
     }
 
 
 def build_integration_plan(
     *,
     repository: Path,
-    project_id: str,
+    controller_project_id: str,
     transaction_id: str,
     run_id: str,
     feature_id: str,
@@ -361,18 +411,16 @@ def build_integration_plan(
     controller_ledger_path: Path,
     lease_identity: dict[str, Any],
     runtime_exclusion: dict[str, Any],
+    verified_evidence: dict[str, Any],
 ) -> dict[str, Any]:
-    evidence = inspect_two_refs(
-        repository=repository,
-        project_id=project_id,
-        feature_id=feature_id,
-        feature_branch=feature_branch,
-        accepted_commit=accepted_commit,
-        milestone_id=milestone_id,
-        milestone_branch=milestone_branch,
-        pre_integration_head=pre_integration_head,
-        queue_path=queue_path,
-    )
+    evidence = json.loads(json.dumps(verified_evidence, sort_keys=True))
+    if evidence.get("controller_project_id") != controller_project_id:
+        raise IntegrationPlanError(
+            "verified integration evidence changed controller project identity"
+        )
+    adapter_project_id = evidence.get("adapter_project_id")
+    if not isinstance(adapter_project_id, str) or not adapter_project_id:
+        raise IntegrationPlanError("verified integration evidence lacks adapter project identity")
     lease_subset = json.loads(
         json.dumps(
             {field: lease_identity.get(field) for field in LEASE_IDENTITY_FIELDS},
@@ -384,8 +432,9 @@ def build_integration_plan(
     plan = {
         "schema_version": PLAN_SCHEMA_VERSION,
         "created_at": utc_now(),
-        "project_id": project_id,
-        "adapter_project_id": evidence["adapter_project_id"],
+        "project_id": controller_project_id,
+        "controller_project_id": controller_project_id,
+        "adapter_project_id": adapter_project_id,
         "repository": str(repository.expanduser().resolve()),
         "repository_identity": evidence["repository_identity"],
         "repository_path_fingerprint": evidence["repository_path_fingerprint"],
@@ -416,19 +465,31 @@ def build_integration_plan(
 
 
 def validate_plan_document(plan: dict[str, Any]) -> None:
-    if set(plan) != PLAN_REQUIRED_FIELDS:
-        missing = sorted(PLAN_REQUIRED_FIELDS - set(plan))
-        extras = sorted(set(plan) - PLAN_REQUIRED_FIELDS)
+    schema_version = plan.get("schema_version")
+    required_fields = (
+        PLAN_REQUIRED_FIELDS
+        if schema_version == PLAN_SCHEMA_VERSION
+        else LEGACY_PLAN_REQUIRED_FIELDS
+        if schema_version == LEGACY_PLAN_SCHEMA_VERSION
+        else None
+    )
+    if required_fields is None:
+        raise IntegrationPlanError("unsupported integration plan schema version")
+    if set(plan) != required_fields:
+        missing = sorted(required_fields - set(plan))
+        extras = sorted(set(plan) - required_fields)
         raise IntegrationPlanError(
             f"integration plan fields disagree; missing={missing!r} extras={extras!r}"
         )
-    if plan.get("schema_version") != PLAN_SCHEMA_VERSION:
-        raise IntegrationPlanError("unsupported integration plan schema version")
+    controller_project_id = _controller_project_id(plan)
+    if plan.get("project_id") != controller_project_id:
+        raise IntegrationPlanError(
+            "integration plan project_id compatibility alias must equal controller_project_id"
+        )
     for field in (
         "plan_fingerprint",
         "created_at",
         "project_id",
-        "adapter_project_id",
         "repository",
         "repository_identity",
         "repository_path_fingerprint",
@@ -449,6 +510,10 @@ def validate_plan_document(plan: dict[str, Any]) -> None:
     ):
         if not isinstance(plan.get(field), str) or not plan[field]:
             raise IntegrationPlanError(f"integration plan {field} must be a non-empty string")
+    for field in ("controller_project_id", "adapter_project_id"):
+        value = controller_project_id if field == "controller_project_id" else plan.get(field)
+        if not isinstance(value, str) or not value:
+            raise IntegrationPlanError(f"integration plan {field} must be a non-empty string")
     if type(plan.get("ledger_sequence")) is not int or plan["ledger_sequence"] < 0:
         raise IntegrationPlanError("integration plan ledger_sequence must be non-negative")
     if plan["accepted_metadata_ref"] != plan["accepted_commit"]:
@@ -466,8 +531,18 @@ def validate_plan_document(plan: dict[str, Any]) -> None:
             raise IntegrationPlanError("integration plan mutation paths must be strings")
         _safe_relative(path, "integration mutation path")
     lease = plan.get("lease_identity")
-    if not isinstance(lease, dict) or set(lease) != set(LEASE_IDENTITY_FIELDS):
+    expected_lease_fields = (
+        set(LEASE_IDENTITY_FIELDS)
+        if schema_version == PLAN_SCHEMA_VERSION
+        else set(LEGACY_LEASE_IDENTITY_FIELDS)
+    )
+    if not isinstance(lease, dict) or set(lease) != expected_lease_fields:
         raise IntegrationPlanError("integration plan lease identity is incomplete")
+    lease_controller_project_id = lease.get("controller_project_id")
+    lease_adapter_project_id = lease.get("adapter_project_id")
+    if schema_version == LEGACY_PLAN_SCHEMA_VERSION:
+        lease_controller_project_id = controller_project_id
+        lease_adapter_project_id = controller_project_id
     lease_checks = {
         "lease_type": lease.get("lease_type") == "integration_writer",
         "workflow_type": lease.get("workflow_type") == "milestone_integration",
@@ -477,7 +552,9 @@ def validate_plan_document(plan: dict[str, Any]) -> None:
         == plan["repository_path_fingerprint"],
         "repository_path": Path(str(lease.get("repository_path"))).resolve()
         == Path(plan["repository"]).resolve(),
-        "project_id": lease.get("project_id") == plan["project_id"],
+        "project_id": lease.get("project_id") == controller_project_id,
+        "controller_project_id": lease_controller_project_id == controller_project_id,
+        "adapter_project_id": lease_adapter_project_id == plan["adapter_project_id"],
         "transaction_id": lease.get("transaction_id") == plan["transaction_id"],
         "run_id": lease.get("run_id") == plan["run_id"],
         "feature_id": lease.get("feature_id") == plan["feature_id"],
@@ -620,9 +697,15 @@ def _verify_ledger_binding(plan: dict[str, Any]) -> None:
     if not lines:
         raise IntegrationPlanError("controller ledger is empty after transaction start")
     try:
-        tail = json.loads(lines[-1])
+        events = [json.loads(line) for line in lines]
     except json.JSONDecodeError as exc:
-        raise IntegrationPlanError("controller ledger tail is malformed") from exc
+        raise IntegrationPlanError("controller ledger is malformed") from exc
+    controller_project_id = _controller_project_id(plan)
+    if any(event.get("project_id") != controller_project_id for event in events):
+        raise IntegrationPlanError(
+            "integration plan controller project identity does not match the controller ledger"
+        )
+    tail = events[-1]
     if tail.get("sequence") != plan["ledger_sequence"] or tail.get("fingerprint") != plan[
         "ledger_fingerprint"
     ]:
@@ -750,7 +833,9 @@ def _write_runtime(
         "updated_at": utc_now(),
         "plan_fingerprint": plan["plan_fingerprint"],
         "runtime_identity": {
-            "project_id": plan["project_id"],
+            "project_id": _controller_project_id(plan),
+            "controller_project_id": _controller_project_id(plan),
+            "adapter_project_id": plan["adapter_project_id"],
             "repository_identity": plan["repository_identity"],
             "repository_path_fingerprint": plan["repository_path_fingerprint"],
             "transaction_id": plan["transaction_id"],
@@ -1057,7 +1142,7 @@ def _result_base(plan: dict[str, Any], classification: str) -> dict[str, Any]:
         "schema_version": RESULT_SCHEMA_VERSION,
         "classification": classification,
         "plan_fingerprint": plan["plan_fingerprint"],
-        "project_id": plan["project_id"],
+        "project_id": _controller_project_id(plan),
         "repository_identity": plan["repository_identity"],
         "repository_path_fingerprint": plan["repository_path_fingerprint"],
         "transaction_id": plan["transaction_id"],
@@ -1095,7 +1180,7 @@ def execute_integration_plan(path: Path) -> dict[str, Any]:
         raise IntegrationPlanError(str(exc)) from exc
     evidence = inspect_two_refs(
         repository=root,
-        project_id=plan["project_id"],
+        controller_project_id=_controller_project_id(plan),
         feature_id=plan["feature_id"],
         feature_branch=plan["feature_branch"],
         accepted_commit=plan["accepted_commit"],
@@ -1105,6 +1190,8 @@ def execute_integration_plan(path: Path) -> dict[str, Any]:
         queue_path=plan["queue_path"],
     )
     exact_checks = {
+        "controller_project_id": evidence["controller_project_id"]
+        == _controller_project_id(plan),
         "accepted_queue_fingerprint": evidence["accepted_queue_fingerprint"]
         == plan["accepted_queue_fingerprint"],
         "accepted_changed_paths": evidence["accepted_changed_paths"]
@@ -1164,7 +1251,7 @@ def execute_integration_plan(path: Path) -> dict[str, Any]:
             "runtime": runtime,
             "human_gate": {
                 "gate_id": (
-                    f"{plan['project_id']}-{plan['feature_id']}-"
+                    f"{_controller_project_id(plan)}-{plan['feature_id']}-"
                     f"semantic-conflict-{plan['plan_fingerprint'][:12]}"
                 ),
                 "classification": "semantic_integration_conflict",
@@ -1281,7 +1368,7 @@ def validate_integration_result(
     identity = {
         "schema_version": result.get("schema_version") == RESULT_SCHEMA_VERSION,
         "plan_fingerprint": result.get("plan_fingerprint") == plan["plan_fingerprint"],
-        "project_id": result.get("project_id") == plan["project_id"],
+        "project_id": result.get("project_id") == _controller_project_id(plan),
         "repository_identity": result.get("repository_identity")
         == plan["repository_identity"],
         "repository_path_fingerprint": result.get("repository_path_fingerprint")

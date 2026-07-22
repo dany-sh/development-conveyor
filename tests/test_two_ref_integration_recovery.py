@@ -35,8 +35,15 @@ class TwoRefIntegrationRecoveryTests(unittest.TestCase):
     def _fixture(
         self, root: Path, *, snapshot_valid: bool = True,
         accepted_topology: str = "direct",
+        controller_project_id: str = "synthetic",
+        adapter_project_id: str | None = None,
+        accepted_adapter_project_id: str | None = None,
     ):
-        repository, project = synthetic_repository(root)
+        repository, project = synthetic_repository(
+            root,
+            controller_project_id=controller_project_id,
+            adapter_project_id=adapter_project_id,
+        )
         milestone_start = git(repository, "rev-parse", "codex/m0-foundation")
         feature_branch = "codex/F001-two-ref-recovery"
         git(repository, "switch", "-c", feature_branch, milestone_start)
@@ -59,7 +66,14 @@ class TwoRefIntegrationRecoveryTests(unittest.TestCase):
             },
         })
         write_json(queue_path, queue)
+        if accepted_adapter_project_id is not None:
+            adapter_path = repository / ".factory/project.yaml"
+            adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
+            adapter["project"]["id"] = accepted_adapter_project_id
+            write_json(adapter_path, adapter)
         git(repository, "add", "app.txt", project.queue_location)
+        if accepted_adapter_project_id is not None:
+            git(repository, "add", ".factory/project.yaml")
         git(repository, "commit", "-m", "F001: accepted two-ref behavior")
         accepted = git(repository, "rev-parse", "HEAD")
         if accepted_topology == "multi_commit":
@@ -87,7 +101,7 @@ class TwoRefIntegrationRecoveryTests(unittest.TestCase):
         configuration = controller_configuration(root, project)
         inspector = RepositoryInspector(repository)
         inspector.ensure_runtime_ignored()
-        state_root = configuration.root / "state/projects/synthetic"
+        state_root = configuration.root / "state/projects" / project.project_id
         ledger = EvidenceLedger(
             state_root / "evidence-ledger.jsonl",
             project_id=project.project_id,

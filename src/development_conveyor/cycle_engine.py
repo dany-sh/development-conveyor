@@ -13,7 +13,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Configuration
-from .errors import ConveyorError, LockError, ProjectionError, QueueError, RecoveryError, SessionError
+from .errors import (
+    ConveyorError,
+    IntegrationPlanError,
+    LockError,
+    ProjectionError,
+    QueueError,
+    RecoveryError,
+    SessionError,
+)
 from .locks import (
     DurableLock,
     PlanningWriterLease,
@@ -4462,7 +4470,7 @@ class CycleEngine:
         ))
         two_ref = inspect_two_refs(
             repository=project.repository,
-            project_id=project.project_id,
+            controller_project_id=project.project_id,
             feature_id=feature_id,
             feature_branch=str(executable.feature_branch),
             accepted_commit=accepted,
@@ -4505,6 +4513,38 @@ class CycleEngine:
             accepted = executable.accepted_commit
             if not isinstance(accepted, str) or accepted == "SELF":
                 raise ProjectionError("reserved integration plan lacks a normalized accepted commit")
+            reserved_two_ref = inspect_two_refs(
+                repository=project.repository,
+                controller_project_id=project.project_id,
+                feature_id=feature_id,
+                feature_branch=str(executable.feature_branch),
+                accepted_commit=accepted,
+                milestone_id=str(project.active_milestone),
+                milestone_branch=str(project.milestone_branch),
+                pre_integration_head=str(executable.starting_commit),
+                queue_path=project.queue_location,
+            )
+            reserved_identity_checks = {
+                "controller_project_id": reserved_two_ref.get("controller_project_id")
+                == two_ref.get("controller_project_id"),
+                "adapter_project_id": reserved_two_ref.get("adapter_project_id")
+                == two_ref.get("adapter_project_id"),
+                "repository_identity": reserved_two_ref.get("repository_identity")
+                == two_ref.get("repository_identity"),
+                "repository_path_fingerprint": reserved_two_ref.get(
+                    "repository_path_fingerprint"
+                )
+                == two_ref.get("repository_path_fingerprint"),
+            }
+            changed_identities = [
+                field for field, matches in reserved_identity_checks.items() if not matches
+            ]
+            if changed_identities:
+                raise IntegrationPlanError(
+                    "reserved integration identity changed before TransactionStarted: "
+                    + ", ".join(changed_identities)
+                )
+            two_ref = reserved_two_ref
             gitignore = project.repository / ".gitignore"
             gitignore_before = gitignore.read_bytes() if gitignore.exists() else None
             exclusion = inspector.ensure_milestone_integration_runtime_ignored()
@@ -4526,7 +4566,8 @@ class CycleEngine:
             lease_record = lease.bind_controller_plan(
                 transaction_id=transaction.transaction_id,
                 repository_identity=identity["repository_id"],
-                project_id=project.project_id,
+                controller_project_id=project.project_id,
+                adapter_project_id=str(two_ref["adapter_project_id"]),
                 feature_branch=str(executable.feature_branch),
                 accepted_commit=accepted,
             )
@@ -4534,7 +4575,7 @@ class CycleEngine:
                 raise LockError("controller integration lease disappeared before plan creation")
             plan = build_integration_plan(
                 repository=project.repository,
-                project_id=project.project_id,
+                controller_project_id=project.project_id,
                 transaction_id=transaction.transaction_id,
                 run_id=run_id,
                 feature_id=feature_id,
@@ -4550,6 +4591,7 @@ class CycleEngine:
                 controller_ledger_path=ledger.path,
                 lease_identity=lease_record.to_dict(),
                 runtime_exclusion=exclusion,
+                verified_evidence=two_ref,
             )
             plan_path = persist_integration_plan(
                 state_root

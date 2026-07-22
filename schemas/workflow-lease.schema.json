@@ -17,6 +17,8 @@
     "phase": {"type": "string", "minLength": 1},
     "purpose": {"type": "string", "minLength": 1},
     "project_id": {"type": "string", "minLength": 1},
+    "controller_project_id": {"type": ["string", "null"], "minLength": 1},
+    "adapter_project_id": {"type": ["string", "null"], "minLength": 1},
     "transaction_id": {"type": "string", "minLength": 1},
     "workflow_type": {"type": "string"},
     "starting_branch": {"type": "string", "minLength": 1},

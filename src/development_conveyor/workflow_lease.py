@@ -44,6 +44,8 @@ class WorkflowLeaseRecord:
     repository_path_fingerprint: str
     repository_path: str
     project_id: str
+    controller_project_id: str | None
+    adapter_project_id: str | None
     transaction_id: str
     workflow_type: WorkflowType
     milestone: str | None
@@ -95,6 +97,8 @@ class WorkflowLeaseRecord:
                 repository_path_fingerprint=value["repository_path_fingerprint"],
                 repository_path=value.get("repository_path") or value.get("repository") or value.get("worktree"),
                 project_id=value["project_id"],
+                controller_project_id=value.get("controller_project_id"),
+                adapter_project_id=value.get("adapter_project_id"),
                 transaction_id=value["transaction_id"],
                 workflow_type=WorkflowType(value["workflow_type"]),
                 milestone=value.get("milestone"),
@@ -254,6 +258,8 @@ class WorkflowWriterLease:
             repository_path_fingerprint=repository_path_fingerprint,
             repository_path=str(self.path.parents[2].resolve()),
             project_id=project_id,
+            controller_project_id=None,
+            adapter_project_id=None,
             transaction_id=transaction_id,
             workflow_type=workflow_type,
             milestone=milestone,
@@ -381,6 +387,8 @@ class WorkflowWriterLease:
             "repository_path_fingerprint",
             "repository_path",
             "project_id",
+            "controller_project_id",
+            "adapter_project_id",
             "transaction_id",
             "workflow_type",
             "milestone",
@@ -396,6 +404,18 @@ class WorkflowWriterLease:
             "owner_host",
             "allowed_mutations",
         )
+        legacy_identity = (
+            "controller_project_id" not in expected_identity
+            and "adapter_project_id" not in expected_identity
+            and actual.get("controller_project_id") is None
+            and actual.get("adapter_project_id") is None
+        )
+        if legacy_identity:
+            identity_fields = tuple(
+                field
+                for field in identity_fields
+                if field not in {"controller_project_id", "adapter_project_id"}
+            )
         missing = [field for field in identity_fields if field not in expected_identity]
         if missing:
             raise LockError(
@@ -426,7 +446,8 @@ class WorkflowWriterLease:
         *,
         transaction_id: str,
         repository_identity: str,
-        project_id: str,
+        controller_project_id: str,
+        adapter_project_id: str,
         feature_branch: str,
         accepted_commit: str,
     ) -> WorkflowLeaseRecord:
@@ -436,16 +457,24 @@ class WorkflowWriterLease:
             transaction_id=transaction_id,
             workflow_type=WorkflowType.MILESTONE_INTEGRATION,
             repository_identity=repository_identity,
-            project_id=project_id,
+            project_id=controller_project_id,
             session_id=None,
         )
+        if not controller_project_id or not adapter_project_id:
+            raise LockError("controller integration project identity binding is incomplete")
         if not feature_branch or not accepted_commit:
             raise LockError("controller integration ref binding is incomplete")
+        if record.controller_project_id not in {None, controller_project_id}:
+            raise LockError("controller integration controller-project binding changed")
+        if record.adapter_project_id not in {None, adapter_project_id}:
+            raise LockError("controller integration adapter-project binding changed")
         if record.feature_branch not in {None, feature_branch}:
             raise LockError("controller integration feature-branch binding changed")
         if record.accepted_commit not in {None, accepted_commit}:
             raise LockError("controller integration accepted-commit binding changed")
         value = record.to_dict()
+        value["controller_project_id"] = controller_project_id
+        value["adapter_project_id"] = adapter_project_id
         value["feature_branch"] = feature_branch
         value["accepted_commit"] = accepted_commit
         value["last_heartbeat"] = utc_now()

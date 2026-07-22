@@ -15,6 +15,8 @@ from development_conveyor.integration_executor import (
     RUNTIME_DESCENDANTS,
     RUNTIME_PATTERN,
     load_integration_plan,
+    persist_integration_plan,
+    validate_plan_document,
 )
 from development_conveyor.repository import RepositoryInspector
 from development_conveyor.workflow_lease import WorkflowWriterLease
@@ -26,8 +28,16 @@ del TwoRefIntegrationRecoveryTests
 
 
 class DeterministicIntegrationHandoffTests(unittest.TestCase):
-    def _fixture(self, root: Path):
-        return _fixture_builder._fixture(root)
+    def _fixture(self, root: Path, **kwargs):
+        return _fixture_builder._fixture(root, **kwargs)
+
+    @staticmethod
+    def _git_identity(repository: Path) -> tuple[str, str, str]:
+        return (
+            git(repository, "rev-parse", "HEAD"),
+            git(repository, "rev-parse", "HEAD^{tree}"),
+            git(repository, "status", "--porcelain=v1", "-uall"),
+        )
 
     def test_exact_plan_bypasses_live_ready_queue_and_adopts_one_controller_lease(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -84,6 +94,259 @@ class DeterministicIntegrationHandoffTests(unittest.TestCase):
             self.assertEqual(set(LEASE_IDENTITY_FIELDS), set(plan["lease_identity"]))
             self.assertEqual(milestone_start, plan["pre_integration_head"])
             self.assertFalse(Path(captured["path"]).is_relative_to(repository))
+
+    def test_distinct_controller_and_adapter_ids_are_serialized_and_lease_bound(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                _, project, _, engine, launcher, _, _, _, _, _,
+            ) = self._fixture(
+                Path(temporary),
+                controller_project_id="interview-companion",
+                adapter_project_id="live-interview-companion",
+            )
+            captured: dict[str, object] = {}
+            real_execute = cycle_engine_module.execute_integration_plan
+
+            def execute_spy(path: Path):
+                captured["plan"] = load_integration_plan(Path(path))
+                return real_execute(Path(path))
+
+            with mock.patch.object(
+                cycle_engine_module, "execute_integration_plan", side_effect=execute_spy
+            ):
+                result = engine.run_project(project, "milestone")
+
+            self.assertEqual("feature_integrated", result["outcome"])
+            self.assertEqual([], launcher.requests)
+            plan = captured["plan"]
+            self.assertEqual(2, plan["schema_version"])
+            self.assertEqual("interview-companion", plan["controller_project_id"])
+            self.assertEqual("live-interview-companion", plan["adapter_project_id"])
+            self.assertEqual("interview-companion", plan["project_id"])
+            self.assertEqual(
+                "interview-companion",
+                plan["lease_identity"]["controller_project_id"],
+            )
+            self.assertEqual(
+                "live-interview-companion",
+                plan["lease_identity"]["adapter_project_id"],
+            )
+
+    def test_mismatched_accepted_adapter_fails_before_transaction_started(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project, _, engine, launcher, ledger, _, _, _, _ = self._fixture(
+                Path(temporary),
+                controller_project_id="interview-companion",
+                adapter_project_id="live-interview-companion",
+                accepted_adapter_project_id="wrong-application-adapter",
+            )
+            ledger_before = ledger.path.read_bytes()
+            repository_before = self._git_identity(repository)
+
+            with self.assertRaisesRegex(
+                IntegrationPlanError,
+                "accepted-commit adapter project identity does not match",
+            ):
+                engine.run_project(project, "milestone")
+
+            self.assertEqual(ledger_before, ledger.path.read_bytes())
+            self.assertEqual(repository_before, self._git_identity(repository))
+            self.assertEqual([], launcher.requests)
+            self.assertFalse((repository / ".factory/locks/writer.json").exists())
+
+    def test_missing_live_or_accepted_adapter_id_fails_before_transaction(self):
+        cases = (
+            {
+                "adapter_project_id": "",
+                "accepted_adapter_project_id": "live-interview-companion",
+                "message": "live adapter project.id is missing",
+            },
+            {
+                "adapter_project_id": "live-interview-companion",
+                "accepted_adapter_project_id": "",
+                "message": "accepted-commit adapter project.id is missing",
+            },
+        )
+        for case in cases:
+            with self.subTest(message=case["message"]), tempfile.TemporaryDirectory() as temporary:
+                repository, project, _, engine, launcher, ledger, _, _, _, _ = self._fixture(
+                    Path(temporary),
+                    controller_project_id="interview-companion",
+                    adapter_project_id=case["adapter_project_id"],
+                    accepted_adapter_project_id=case["accepted_adapter_project_id"],
+                )
+                ledger_before = ledger.path.read_bytes()
+                repository_before = self._git_identity(repository)
+                with self.assertRaisesRegex(IntegrationPlanError, case["message"]):
+                    engine.run_project(project, "milestone")
+                self.assertEqual(ledger_before, ledger.path.read_bytes())
+                self.assertEqual(repository_before, self._git_identity(repository))
+                self.assertEqual([], launcher.requests)
+                self.assertFalse((repository / ".factory/locks/writer.json").exists())
+
+    def test_reserved_identity_change_fails_before_transaction_started(self):
+        for field in ("controller_project_id", "adapter_project_id"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                repository, project, _, engine, launcher, ledger, _, _, _, _ = self._fixture(
+                    Path(temporary),
+                    controller_project_id="interview-companion",
+                    adapter_project_id="live-interview-companion",
+                )
+                executable = engine._authoritative_execution_context(project)[1]
+                ledger_before = ledger.path.read_bytes()
+                repository_before = self._git_identity(repository)
+                real_inspect = cycle_engine_module.inspect_two_refs
+                calls = 0
+
+                def changing_inspection(**kwargs):
+                    nonlocal calls
+                    calls += 1
+                    evidence = real_inspect(**kwargs)
+                    if calls == 2:
+                        evidence[field] = f"changed-{field}"
+                    return evidence
+
+                with mock.patch.object(
+                    cycle_engine_module,
+                    "inspect_two_refs",
+                    side_effect=changing_inspection,
+                ):
+                    with self.assertRaisesRegex(
+                        IntegrationPlanError, "identity changed before TransactionStarted"
+                    ):
+                        engine._execute_projected_integration(
+                            project, "milestone", f"changed-{field}", executable
+                        )
+                self.assertEqual(2, calls)
+                self.assertEqual(ledger_before, ledger.path.read_bytes())
+                self.assertEqual(repository_before, self._git_identity(repository))
+                self.assertEqual([], launcher.requests)
+                self.assertFalse((repository / ".factory/locks/writer.json").exists())
+
+    def test_mismatched_controller_ledger_id_fails_before_application_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, _, _, _, launcher, ledger, _, _, _, _ = self._fixture(
+                Path(temporary)
+            )
+            integrity = ledger.verify()
+            ledger_before = ledger.path.read_bytes()
+            repository_before = self._git_identity(repository)
+            plan = {
+                "schema_version": 2,
+                "project_id": "different-controller-project",
+                "controller_project_id": "different-controller-project",
+                "adapter_project_id": "synthetic",
+                "controller_ledger_path": str(ledger.path),
+                "ledger_sequence": integrity.sequence,
+                "ledger_fingerprint": integrity.fingerprint,
+            }
+
+            with self.assertRaisesRegex(
+                IntegrationPlanError,
+                "controller project identity does not match the controller ledger",
+            ):
+                executor_module._verify_ledger_binding(plan)
+
+            self.assertEqual(ledger_before, ledger.path.read_bytes())
+            self.assertEqual(repository_before, self._git_identity(repository))
+            self.assertEqual([], launcher.requests)
+            self.assertFalse((repository / ".factory/locks/writer.json").exists())
+
+    def test_real_id_topology_reaches_transaction_boundary_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project, _, engine, launcher, ledger, _, _, _, _ = self._fixture(
+                Path(temporary),
+                controller_project_id="interview-companion",
+                adapter_project_id="live-interview-companion",
+            )
+            executable = engine._authoritative_execution_context(project)[1]
+            ledger_before = ledger.path.read_bytes()
+            repository_before = self._git_identity(repository)
+
+            with mock.patch.object(
+                cycle_engine_module.WorkflowKernel,
+                "begin_for_branch",
+                side_effect=RuntimeError("transaction boundary reached"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "transaction boundary reached"):
+                    engine._execute_projected_integration(
+                        project, "milestone", "real-topology-boundary", executable
+                    )
+
+            self.assertEqual(ledger_before, ledger.path.read_bytes())
+            self.assertEqual(repository_before, self._git_identity(repository))
+            self.assertEqual([], launcher.requests)
+            self.assertFalse((repository / ".factory/locks/writer.json").exists())
+
+    def test_legacy_plan_default_requires_identical_controller_and_adapter_ids(self):
+        plan = {
+            "schema_version": 1,
+            "plan_fingerprint": "placeholder",
+            "created_at": "2026-07-21T00:00:00Z",
+            "project_id": "same-project",
+            "adapter_project_id": "same-project",
+            "repository": "/tmp/synthetic-repository",
+            "repository_identity": "a" * 64,
+            "repository_path_fingerprint": "b" * 64,
+            "transaction_id": "transaction",
+            "run_id": "run",
+            "feature_id": "F001",
+            "feature_branch": "codex/f001",
+            "accepted_commit": "c" * 40,
+            "accepted_metadata_ref": "c" * 40,
+            "accepted_queue_fingerprint": "d" * 64,
+            "accepted_changed_paths": ["app.txt"],
+            "milestone_id": "M0",
+            "milestone_branch": "codex/m0",
+            "pre_integration_head": "e" * 40,
+            "queue_path": "docs/FEATURE_QUEUE.yaml",
+            "projection_fingerprint": "f" * 64,
+            "ledger_sequence": 1,
+            "ledger_fingerprint": "1" * 64,
+            "controller_ledger_path": "/tmp/evidence-ledger.jsonl",
+            "lease_identity": {},
+            "runtime_exclusion": {},
+            "validation_commands": [],
+            "metadata_paths": [],
+        }
+        for field in executor_module.LEGACY_LEASE_IDENTITY_FIELDS:
+            plan["lease_identity"][field] = None
+        plan["lease_identity"].update({
+            "lease_type": "integration_writer",
+            "workflow_type": "milestone_integration",
+            "repository_identity": plan["repository_identity"],
+            "repository_path_fingerprint": plan["repository_path_fingerprint"],
+            "repository_path": plan["repository"],
+            "project_id": plan["project_id"],
+            "transaction_id": plan["transaction_id"],
+            "run_id": plan["run_id"],
+            "feature_id": plan["feature_id"],
+            "feature_branch": plan["feature_branch"],
+            "accepted_commit": plan["accepted_commit"],
+            "milestone": plan["milestone_id"],
+            "starting_branch": plan["milestone_branch"],
+            "starting_head": plan["pre_integration_head"],
+            "session_id": None,
+            "allowed_mutations": {
+                "allowed_paths": ["app.txt"],
+                "allowed_prefixes": [],
+                "allow_untracked": False,
+            },
+        })
+        plan["runtime_exclusion"] = {
+            "pattern": RUNTIME_PATTERN,
+            "repository_identity": plan["repository_identity"],
+            "repository_path_fingerprint": plan["repository_path_fingerprint"],
+            "verified_descendants": list(RUNTIME_DESCENDANTS),
+        }
+        plan["plan_fingerprint"] = executor_module._plan_fingerprint(plan)
+        validate_plan_document(plan)
+        plan["adapter_project_id"] = "arbitrary-alias"
+        plan["plan_fingerprint"] = executor_module._plan_fingerprint(plan)
+        with self.assertRaisesRegex(
+            IntegrationPlanError, "may default controller_project_id only when"
+        ):
+            validate_plan_document(plan)
 
     def test_common_git_runtime_exclusion_is_exact_idempotent_and_local(self):
         with tempfile.TemporaryDirectory() as temporary:
