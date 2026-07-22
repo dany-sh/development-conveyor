@@ -678,3 +678,13 @@ This log records model configuration and deterministic deployment evidence. It n
 - Successful recovery: zero-model transaction `a41c79c4-a3b3-45ab-923c-5a0bacdc6cfa` occupies sequences 100-112 and has no `SessionLaunched` event. It used a fresh `feature_writer` lease, preserved the non-metadata implementation fingerprint, created exactly one direct-child commit `543615bd0cd70e8cd56d70e4a508c076954e6cb9`, terminalized `FEATURE_ACCEPTED`, released the lease, refreshed the compatibility cycle cache, and projected `integration_pending`. The original transaction fingerprints remain unchanged and milestone integration did not run.
 - Application gates: `WorkspaceRoutingTests` passed 9 selected tests including its AppStore overlap, `AppStoreWorkspaceRoutingTests` passed 4, `SessionLifecycleTests` passed 8, `swift build` passed, all 112 tests passed, `swift build -c release` passed, `./script/build_and_run.sh --verify` passed, and the native Accessibility smoke passed all seven destinations with one resizable standard window. The profile-aware audit scanned 242 files with no hard gate; inventory, documentation/ADR, and diff checks passed.
 - Controller gates: 105 focused tests passed across `test_cost_policy`, `test_feature_result_recovery`, `test_projection_authority`, `test_cli_compatibility_repair`, `test_post_integration_finalization`, and `test_milestone_integration_result_contract`. Relevant Python compilation, Swift script typecheck, `scripts/conveyor validate-config`, and `git diff --check` passed. The complete controller suite, real `resume`, subagents, push, tag, publication, deployment, release, and milestone integration were not run.
+
+### Model execution — 2026-07-22T22:18:39+00:00
+
+- Agent role: `standalone_controller_recovery`
+- Effective model: `gpt-5.6-terra`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `user_directed_parent_only_cache_recovery`
+- Safety and autonomy contracts unchanged: `true`
