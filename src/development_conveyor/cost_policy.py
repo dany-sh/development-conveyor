@@ -65,7 +65,28 @@ def select_model(*, task: str, risk: str = "low", ambiguity: bool = False,
 
 
 def verification_plan(changed_paths: list[str], *, risk: str = "low",
-                      application_runtime_changed: bool = False) -> dict[str, Any]:
+                      application_runtime_changed: bool = False,
+                      feature_id: str | None = None) -> dict[str, Any]:
+    if feature_id == "F003":
+        focused_tests = [
+            "Tests/LiveInterviewCompanionTests/CoreTests.swift",
+            "Tests/LiveInterviewCompanionTests/SessionLifecycleTests.swift",
+            "Tests/LiveInterviewCompanionTests/SessionRunOrchestratorTests.swift",
+        ]
+        focused_commands = [["swift", "build"], ["git", "diff", "--check"]]
+        final_gates = [
+            ["swift", "build"], ["swift", "test"], ["swift", "build", "-c", "release"],
+            ["./script/build_and_run.sh", "--verify"],
+            ["deterministic", "queue/inventory", "validation"],
+            ["accessibility", "single-window", "smoke"],
+            ["documentation", "architecture/ADR", "validation"], ["git", "diff", "--check"],
+        ]
+        return {
+            "tier": "focused_application_feature", "tests": focused_tests,
+            "commands": focused_commands, "builds": [["swift", "build"]],
+            "final_acceptance_gates": final_gates,
+            "skipped": ["controller full suite: controller implementation is not being changed by the application feature", "application full build/test during dry-run: dry-runs perform no validation commands"],
+        }
     paths = set(changed_paths)
     docs_only = bool(paths) and all(path.startswith("docs/") or path.endswith(".md") for path in paths)
     config_only = bool(paths) and all(path.startswith("config/") for path in paths)
@@ -202,24 +223,70 @@ def _queue_reconciliation_context_pack(project: Any) -> dict[str, Any]:
     }
 
 
+def _application_feature_context_pack(project: Any, feature: dict[str, Any], tests: list[str]) -> dict[str, Any]:
+    """Build the bounded application-side context for a fresh feature session."""
+    repository = project.repository
+    feature_id = str(feature.get("id") or "")
+    paths = [project.queue_location, "docs/CURRENT_STATUS.md", str(feature.get("spec") or "")]
+    if feature_id == "F003":
+        paths.extend([
+            "Sources/LiveInterviewCompanion/App/LiveInterviewCompanionApp.swift",
+            "Sources/LiveInterviewCompanion/Views/RootView.swift",
+            "Sources/LiveInterviewCompanion/Views/SetupView.swift",
+            "Sources/LiveInterviewCompanion/Views/SessionView.swift",
+            "Sources/LiveInterviewCompanion/Views/SessionHistoryView.swift",
+            "Sources/LiveInterviewCompanion/Views/SettingsView.swift",
+            "Sources/LiveInterviewCompanion/Views/CompanionMenuView.swift",
+            "Sources/LiveInterviewCompanion/Views/TransientCueView.swift",
+            "Sources/LiveInterviewCompanion/Stores/AppStore.swift",
+            "Sources/LiveInterviewCompanion/Models/SessionLifecycle.swift",
+            "Sources/LiveInterviewCompanion/Support/TransientCuePanelController.swift",
+            "Sources/LiveInterviewCompanion/Support/CuePresentationPolicy.swift",
+            "docs/architecture.md", "docs/data-flow.md",
+            "docs/features/F002-unified-session-lifecycle.md",
+            "docs/features/F001-product-domain-model.md",
+            "docs/features/F005-persistent-data-store.md",
+            *tests,
+        ])
+    files = list(dict.fromkeys(path for path in paths if path and (repository / path).is_file()))
+    reasons = {path: "selected feature contract, route, lifecycle boundary, focused test, or architecture contract" for path in files}
+    return {
+        "files": files, "file_count": len(files),
+        "approximate_bytes_estimate": sum((repository / path).stat().st_size for path in files),
+        "included_reasons": reasons,
+        "excluded_categories": ["unrelated feature specifications", "unrelated milestones", "full Git history", "global memory", "unrelated skills/plugins", "full test logs"],
+        "truncation": "none; bounded to the selected feature and direct contracts",
+    }
+
+
 def build_run_plan(plan: dict[str, Any], root: Path, *, project: Any | None = None) -> dict[str, Any]:
     action = str(plan.get("proposed_next_action") or "status")
     ready_feature = plan.get("selected_feature")
     deterministic_queue_selection = action == "queue_reconciliation" and isinstance(ready_feature, str) and bool(ready_feature)
     semantic_queue_reconciliation = action == "queue_reconciliation" and not deterministic_queue_selection
     deterministic_actions = {"verify_consistency", "milestone_integration", "planning_finalization"}
+    application_feature = action == "feature_cycle" and project is not None and isinstance(ready_feature, str)
     task = (
+        "application_feature" if application_feature
+        else
         "queue_reconciliation" if semantic_queue_reconciliation
         else "planning_finalization" if action == "planning_finalization"
         else "status" if action in deterministic_actions or deterministic_queue_selection
         else "controller_repair"
     )
-    selection = select_model(task=task, risk="low")
+    risk = "medium" if application_feature else "low"
+    selection = select_model(task=task, risk=risk)
     changed: list[str] = []
-    verify = verification_plan(changed)
+    selected_feature = None
+    if application_feature:
+        selected_feature = FeatureQueue.from_location(project.repository, project.queue_location).feature(ready_feature)
+    verify = verification_plan(changed, risk=risk, application_runtime_changed=application_feature,
+                               feature_id=ready_feature if application_feature else None)
     pack = (
         _queue_reconciliation_context_pack(project)
         if semantic_queue_reconciliation and project is not None
+        else _application_feature_context_pack(project, selected_feature, verify["tests"])
+        if application_feature and selected_feature is not None
         else context_pack(root, changed, verify["tests"])
     )
     parent_sessions_planned = 1 if selection.model is not None else 0
@@ -232,10 +299,12 @@ def build_run_plan(plan: dict[str, Any], root: Path, *, project: Any | None = No
             "selected_model": selection.model, "selected_reasoning_effort": selection.reasoning,
             "parent_session_budget": 1, "child_session_budget": 0, "child_agent_justification": None,
             "context_pack": pack, "deterministic_commands_planned": verify["commands"], "selected_tests": verify["tests"],
+            "implementation_loop_verification": {"tests": verify["tests"], "commands": verify["commands"], "builds": verify["builds"]},
+            "final_feature_acceptance_gates": verify.get("final_acceptance_gates", []),
             "test_tier": verify["tier"], "skipped_validations": verify.get("skipped", []), "reusable_prior_evidence": [],
             "evidence_invalidation_conditions": reusable_evidence(None, "unavailable")["invalidation_conditions"],
             "application_builds_planned": verify["builds"], "expected_application_mutations": bool(plan.get("application_mutation_expected")),
-            "expected_cost_class": "low", "escalation_triggers": list(selection.escalation_triggers),
+            "expected_cost_class": risk, "escalation_triggers": list(selection.escalation_triggers),
             "stopping_criteria": ["selected validations pass", "no unresolved safety risk", "acceptance criteria are proven"],
             "execution": {"models_planned": parent_sessions_planned},
             "usage_accounting": {"deterministic_only": selection.model is None, "parent_sessions_planned": parent_sessions_planned,

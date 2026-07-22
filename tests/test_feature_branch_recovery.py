@@ -34,6 +34,40 @@ class SuccessfulNoEvidenceLauncher:
 
 
 class FeatureBranchRecoveryTests(unittest.TestCase):
+    def test_fresh_branch_is_derived_from_feature_id_and_title(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, project = synthetic_repository(Path(temporary))
+            engine = CycleEngine(controller_configuration(Path(temporary), project), SuccessfulNoEvidenceLauncher())
+            feature = {"id": "F003", "title": "Single-Window Application Shell", "branch": None}
+            self.assertEqual(engine._expected_feature_branch(project, feature), "codex/f003-single-window-application-shell")
+
+    def test_invalid_explicit_feature_branch_is_rejected_before_preparation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, project = synthetic_repository(Path(temporary))
+            engine = CycleEngine(controller_configuration(Path(temporary), project), SuccessfulNoEvidenceLauncher())
+            with self.assertRaisesRegex(RecoveryError, "allowed codex/"):
+                engine._expected_feature_branch(project, {"id": "F003", "title": "Safe", "branch": "bad branch"})
+
+    def test_fresh_branch_preparation_uses_the_exact_starting_commit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            engine = CycleEngine(controller_configuration(Path(temporary), project), SuccessfulNoEvidenceLauncher())
+            inspector = RepositoryInspector(repository)
+            feature = {"id": "F003", "title": "Single-Window Application Shell", "branch": None}
+            state = engine._new_cycle_state(project, "fresh-run", inspector, feature)
+            engine._prepare_feature_branch(project, inspector, state)
+            self.assertEqual(git(repository, "branch", "--show-current"), "codex/f003-single-window-application-shell")
+            self.assertEqual(git(repository, "rev-parse", "HEAD"), state["feature_starting_commit"])
+            self.assertEqual(git(repository, "rev-parse", project.milestone_branch), state["milestone_pre_integration_commit"])
+
+    def test_fresh_dry_plan_never_creates_the_derived_branch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            engine = CycleEngine(controller_configuration(Path(temporary), project), SuccessfulNoEvidenceLauncher())
+            before = git(repository, "show-ref", "--heads")
+            engine.project_plan(project)
+            self.assertEqual(git(repository, "show-ref", "--heads"), before)
+
     def _interrupted_cycle(self, root: Path, *, three_files: bool = False):
         repository, project = synthetic_repository(root)
         engine = CycleEngine(controller_configuration(root, project), SuccessfulNoEvidenceLauncher())

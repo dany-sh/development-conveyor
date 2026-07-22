@@ -648,3 +648,13 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `planning_finalization_recovery`
 - Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-22T17:03:12+00:00
+
+- Agent role: `controller-maintenance-writer`
+- Effective model: `gpt-5.6-terra`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `fresh_application_feature_execution_planning`
+- Safety and autonomy contracts unchanged: `true`

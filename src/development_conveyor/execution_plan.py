@@ -501,6 +501,7 @@ def authoritative_status_fields(
         "selected_feature": status_feature,
         "accepted_feature_commit": status_accepted_commit,
         "feature_starting_commit": status_starting_commit,
+        "starting_commit": status_starting_commit,
         "feature_branch": status_feature_branch,
         "milestone_branch": status_milestone_branch,
         "next_action": action,
@@ -533,6 +534,12 @@ def authoritative_status_fields(
         ),
         "session_resume_eligible": executable.session_resume_eligible,
         "old_session_will_resume": executable.session_resume_eligible,
+        "session_completion_classification": (
+            None if executable.transaction_mode == "fresh" else legacy_plan.get("session_completion_classification")
+        ),
+        "session_completion_flags": (
+            [] if executable.transaction_mode == "fresh" else legacy_plan.get("session_completion_flags", [])
+        ),
         # Transaction descriptions are deliberately distinct from actual model
         # launches: a transaction may be deterministic.
         "transactions_that_would_start": executable.sessions_that_would_launch,

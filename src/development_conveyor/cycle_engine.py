@@ -524,7 +524,7 @@ class CycleEngine:
         try:
             queue = FeatureQueue.from_location(project.repository, project.queue_location)
             feature = queue.feature(str(feature_id)) if feature_id else None
-            feature_branch = (feature or {}).get("branch")
+            feature_branch = self._expected_feature_branch(project, feature) if feature else None
         except (QueueError, OSError):
             feature_branch = None
         if feature_branch is None and feature_id is not None:
@@ -1677,21 +1677,28 @@ class CycleEngine:
     def _expected_feature_branch(project: Project, feature: dict[str, Any]) -> str:
         recorded = feature.get("branch")
         if isinstance(recorded, str) and recorded:
-            return recorded
-        try:
-            adapter = json.loads((project.repository / project.validation_source).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RecoveryError(f"cannot derive feature branch from repository adapter: {exc}") from exc
-        pattern = (adapter.get("git") or {}).get("feature_branch_pattern")
-        feature_id = feature.get("id")
-        title = feature.get("name") or feature.get("title")
-        if not isinstance(pattern, str) or not isinstance(feature_id, str) or not isinstance(title, str):
-            raise RecoveryError("feature branch is absent and adapter branch metadata is incomplete")
-        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
-        try:
-            branch = pattern.format(feature_id=feature_id, feature_id_lower=feature_id.lower(), slug=slug)
-        except (KeyError, ValueError) as exc:
-            raise RecoveryError(f"feature branch pattern is unsupported: {pattern}") from exc
+            branch = recorded
+        else:
+            try:
+                adapter = json.loads((project.repository / project.validation_source).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RecoveryError(f"cannot derive feature branch from repository adapter: {exc}") from exc
+            pattern = (adapter.get("git") or {}).get("feature_branch_pattern")
+            feature_id = feature.get("id")
+            title = feature.get("name") or feature.get("title")
+            if not isinstance(pattern, str) or not isinstance(feature_id, str) or not isinstance(title, str):
+                raise RecoveryError("feature branch is absent and adapter branch metadata is incomplete")
+            slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+            if not re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", feature_id) or not slug:
+                raise RecoveryError("feature ID or title cannot produce a safe feature branch")
+            try:
+                branch = pattern.format(feature_id=feature_id, feature_id_lower=feature_id.lower(), slug=slug)
+            except (KeyError, ValueError) as exc:
+                raise RecoveryError(f"feature branch pattern is unsupported: {pattern}") from exc
+        if not isinstance(branch, str) or not branch.startswith("codex/") or any(char.isspace() for char in branch):
+            raise RecoveryError("feature branch must use the allowed codex/ prefix and contain no whitespace")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch) or ".." in branch or branch.endswith("/"):
+            raise RecoveryError("feature branch contains invalid ref characters")
         if not branch:
             raise RecoveryError("derived feature branch is empty")
         return branch
@@ -3233,6 +3240,21 @@ class CycleEngine:
             )
             feature_kernel.acquire_lease()
             feature_kernel.capture_snapshot()
+            cost_plan = build_run_plan(
+                {
+                    "proposed_next_action": "feature_cycle",
+                    "selected_feature": selection.feature_id,
+                    "application_mutation_expected": True,
+                },
+                self.root,
+                project=project,
+            )
+            if (
+                cost_plan["execution"]["models_planned"] != 1
+                or not cost_plan.get("selected_model")
+                or not cost_plan.get("selected_reasoning_effort")
+            ):
+                raise SessionError("feature execution requires one authoritative model execution plan")
             request = SessionRequest(
                 action="feature_cycle", project=project, run_id=run_id, mode=mode,
                 feature=selection.feature_id,
@@ -3241,6 +3263,10 @@ class CycleEngine:
                 starting_branch=feature_transaction.starting_branch,
                 starting_commit=feature_transaction.starting_head,
                 allowed_paths=feature_allowed_paths,
+                child_session_budget=0,
+                planned_model=str(cost_plan["selected_model"]),
+                planned_reasoning=str(cost_plan["selected_reasoning_effort"]),
+                model_plan_source="cost_aware_execution_plan",
             )
             result, repairs, retry_status = self._launch_with_retries(
                 request, inspector, "feature_in_progress", "implementation_repairs",

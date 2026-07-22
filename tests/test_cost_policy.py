@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,7 @@ from development_conveyor.cost_policy import (
     select_model, ValidationEvidenceCache, validation_identity, verification_plan,
 )
 from development_conveyor.sessions import SessionLauncher, SessionRequest
-from tests.helpers import REPOSITORY_ROOT, synthetic_repository
+from tests.helpers import REPOSITORY_ROOT, synthetic_repository, write_json
 
 
 class CostPolicyTests(unittest.TestCase):
@@ -47,6 +48,21 @@ class CostPolicyTests(unittest.TestCase):
         self.assertEqual(deterministic["queue_reconciliation_route"], "deterministic_queue_selection")
         self.assertIsNone(deterministic["selected_model"])
         self.assertEqual(deterministic["execution"]["models_planned"], 0)
+
+    def test_f003_feature_plan_is_application_focused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            queue_path = repository / project.queue_location
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            queue["features"][0].update({"id": "F003", "title": "Single-Window Application Shell", "spec": "docs/features/F003.md"})
+            (repository / "docs/features/F003.md").write_text("# F003\n", encoding="utf-8")
+            write_json(queue_path, queue)
+            plan = build_run_plan({"proposed_next_action": "feature_cycle", "selected_feature": "F003", "application_mutation_expected": True}, Path.cwd(), project=project)
+            self.assertEqual((plan["task_classification"], plan["risk_classification"]), ("application_feature", "medium"))
+            self.assertEqual((plan["selected_model"], plan["selected_reasoning_effort"]), ("gpt-5.6-terra", "medium"))
+            self.assertGreater(plan["context_pack"]["file_count"], 0)
+            self.assertIn("Tests/LiveInterviewCompanionTests/SessionLifecycleTests.swift", plan["selected_tests"])
+            self.assertTrue(plan["final_feature_acceptance_gates"])
 
     def test_zero_child_budget_blocks_at_session_launcher_before_planning(self):
         with tempfile.TemporaryDirectory() as temporary:
