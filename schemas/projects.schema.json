@@ -32,6 +32,11 @@
           "last_accepted_commit": {"type": ["string", "null"]},
           "current_state": {"type": "string", "enum": ["discover", "bootstrap_required", "baseline_required", "queue_reconciliation", "feature_ready", "feature_running", "feature_review", "feature_accepted", "integration_pending", "integration_ready", "integrating", "integration_validation", "integration_blocked", "feature_integrated", "milestone_gate", "milestone_ready_for_merge", "human_merge_approval", "next_milestone", "human_decision_required", "repository_dirty", "validation_failed", "architecture_decision_required", "destructive_change_required", "conveyor_error", "paused", "disabled"]},
           "registration_notes": {"type": "string"},
+          "inventory_blocking_warning_patterns": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
           "human_decision_gate": {
             "type": ["object", "null"],
             "additionalProperties": false,

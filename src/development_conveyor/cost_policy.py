@@ -39,6 +39,7 @@ def select_model(*, task: str, risk: str = "low", ambiguity: bool = False,
         "status", "consistency", "queue_parse", "dry_run", "integration",
         "git_inspection", "cleanliness", "hash_comparison", "test_execution",
         "validation_selection", "evidence_lookup", "report_generation",
+        "planning_finalization",
     }
     if task in deterministic:
         return ModelSelection(None, None, task, risk, "deterministic implementation available", None, ())
@@ -206,9 +207,10 @@ def build_run_plan(plan: dict[str, Any], root: Path, *, project: Any | None = No
     ready_feature = plan.get("selected_feature")
     deterministic_queue_selection = action == "queue_reconciliation" and isinstance(ready_feature, str) and bool(ready_feature)
     semantic_queue_reconciliation = action == "queue_reconciliation" and not deterministic_queue_selection
-    deterministic_actions = {"verify_consistency", "milestone_integration"}
+    deterministic_actions = {"verify_consistency", "milestone_integration", "planning_finalization"}
     task = (
         "queue_reconciliation" if semantic_queue_reconciliation
+        else "planning_finalization" if action == "planning_finalization"
         else "status" if action in deterministic_actions or deterministic_queue_selection
         else "controller_repair"
     )

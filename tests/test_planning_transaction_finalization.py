@@ -5,22 +5,30 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
+from development_conveyor.contracts import TransactionState, WorkflowType
 from development_conveyor.cycle_engine import CycleEngine
 from development_conveyor.errors import LockError, RecoveryError, SessionError
+from development_conveyor.kernel import QueueReconciliationAdapter, WorkflowKernel
+from development_conveyor.ledger import EvidenceLedger
 from development_conveyor.locks import PlanningWriterLease
 from development_conveyor.planning import (
     PLANNING_CLASSIFICATIONS,
+    _classify_inventory_validation,
     finalize_planning_commit,
     validate_planning_changes,
 )
 from development_conveyor.repository import RepositoryInspector
+from development_conveyor.projection import ProjectionEngine
 from development_conveyor.sessions import SessionPlan, SessionResult
+from development_conveyor.workflow_lease import WorkflowWriterLease
 from tests.helpers import controller_configuration, git, synthetic_repository, write_json
 
 
 RUN_ID = "planning-recovery-run"
 SESSION_ID = "019f77e1-c551-7f00-9409-2fff9f6ee79b"
+ORIGINAL_TRANSACTION_ID = "50824b65-bfc2-4289-a4e7-3538ef892324"
 SEVEN_PATHS = [
     "docs/CURRENT_STATUS.md",
     "docs/FEATURE_CATALOG.md",
@@ -117,7 +125,25 @@ class PlanningTransactionTests(unittest.TestCase):
         queue["features"][0]["status"] = "ready"
         write_json(path, queue)
 
-    def _case_recovery_fixture(self, root: Path):
+    @staticmethod
+    def _apply_case_reconciliation(repository: Path) -> None:
+        queue = json.loads((repository / "docs/FEATURE_QUEUE.yaml").read_text())
+        queue["features"][2]["status"] = "ready"
+        queue["features"][2]["dependencies"] = ["P0-001", "P0-002"]
+        queue["features"][2]["requires_human_decision"] = False
+        write_json(repository / "docs/FEATURE_QUEUE.yaml", queue)
+        (repository / "docs/CURRENT_STATUS.md").write_text("P0-003 is ready.\n", encoding="utf-8")
+        (repository / "docs/FEATURE_CATALOG.md").write_text("| P0-003 | Ready |\n", encoding="utf-8")
+        (repository / "docs/ROADMAP.md").write_text("P0-003 is ready.\n", encoding="utf-8")
+        (repository / "docs/RUN_LOG.md").write_text("Planning reconciliation only.\n", encoding="utf-8")
+        (repository / "docs/features/P0-001-per-case-persistence-authority.md").write_text(
+            "P0-001 integrated planning evidence.\n", encoding="utf-8"
+        )
+        (repository / "docs/features/P0-003-versioned-application-registry.md").write_text(
+            "# P0-003\n\nStatus: Ready\n", encoding="utf-8"
+        )
+
+    def _case_recovery_fixture(self, root: Path, *, apply_changes: bool = True):
         repository, project = synthetic_repository(root, feature_status="proposed")
         baseline = git(repository, "rev-parse", "HEAD")
         git(repository, "branch", "codex/p0-foundation", baseline)
@@ -133,6 +159,8 @@ class PlanningTransactionTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             if relative != "docs/FEATURE_QUEUE.yaml":
                 path.write_text("Planning baseline.\n", encoding="utf-8")
+        (repository / ".factory/locks").mkdir(parents=True, exist_ok=True)
+        (repository / ".factory/locks/.gitignore").write_text("writer.json\n", encoding="utf-8")
         queue = {
             "schema_version": 1,
             "milestones": [{
@@ -179,21 +207,8 @@ class PlanningTransactionTests(unittest.TestCase):
         git(repository, "commit", "-m", "synthetic Phase 0 planning baseline")
         starting_head = git(repository, "rev-parse", "HEAD")
 
-        queue = json.loads((repository / "docs/FEATURE_QUEUE.yaml").read_text())
-        queue["features"][2]["status"] = "ready"
-        queue["features"][2]["dependencies"] = ["P0-001", "P0-002"]
-        queue["features"][2]["requires_human_decision"] = False
-        write_json(repository / "docs/FEATURE_QUEUE.yaml", queue)
-        (repository / "docs/CURRENT_STATUS.md").write_text("P0-003 is ready.\n", encoding="utf-8")
-        (repository / "docs/FEATURE_CATALOG.md").write_text("| P0-003 | Ready |\n", encoding="utf-8")
-        (repository / "docs/ROADMAP.md").write_text("P0-003 is ready.\n", encoding="utf-8")
-        (repository / "docs/RUN_LOG.md").write_text("Planning reconciliation only.\n", encoding="utf-8")
-        (repository / "docs/features/P0-001-per-case-persistence-authority.md").write_text(
-            "P0-001 integrated planning evidence.\n", encoding="utf-8"
-        )
-        (repository / "docs/features/P0-003-versioned-application-registry.md").write_text(
-            "# P0-003\n\nStatus: Ready\n", encoding="utf-8"
-        )
+        if apply_changes:
+            self._apply_case_reconciliation(repository)
         configuration = controller_configuration(root, project)
         engine = CycleEngine(configuration)
         value, output = assistant_result("reconciled_ready_work", 14)
@@ -213,6 +228,129 @@ class PlanningTransactionTests(unittest.TestCase):
         write_json(report_path, report)
         inspector = RepositoryInspector(repository)
         return repository, project, engine, starting_head, inspector.planning_diff_fingerprint()
+
+    def _terminal_kernel_recovery_fixture(self, root: Path):
+        repository, project, engine, starting_head, _ = self._case_recovery_fixture(
+            root, apply_changes=False
+        )
+        inspector = RepositoryInspector(repository)
+        identity = inspector.identity()
+        state_root = engine.root / "state/projects" / project.project_id
+        ledger = EvidenceLedger(
+            state_root / "evidence-ledger.jsonl",
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        projection = ProjectionEngine(ledger, state_root / "projection-cache.json")
+        lease = WorkflowWriterLease(repository / ".factory/locks/writer.json")
+        adapter = QueueReconciliationAdapter(
+            allowed_paths=SEVEN_PATHS,
+            commit_subject="factory: reconcile P0 queue and ready P0-003",
+            next_state="feature_ready",
+        )
+        kernel = WorkflowKernel(
+            project=project,
+            ledger=ledger,
+            projection=projection,
+            lease=lease,
+        )
+        kernel.begin(
+            workflow_type=WorkflowType.QUEUE_RECONCILIATION,
+            milestone="P0",
+            feature_id=None,
+            run_id=RUN_ID,
+            policy=adapter.policy,
+            transaction_id=ORIGINAL_TRANSACTION_ID,
+        )
+        kernel.acquire_lease()
+        kernel.capture_snapshot()
+        kernel.checkpoint("planning_session_reserved", {"models_planned": 1})
+        kernel.session_launched(SESSION_ID)
+        self._apply_case_reconciliation(repository)
+        changed_paths = sorted(inspector.tracked_changed_paths())
+        diff_fingerprint = inspector.planning_diff_fingerprint()
+        evidence = {
+            "schema_version": 1,
+            "classification": "reconciled_ready_work",
+            "summary": "Synthetic queue reconciled.",
+            "next_action": "feature_cycle",
+            "queue_validation": {
+                "valid": True,
+                "milestone_found": True,
+                "feature_count": 14,
+                "selected_feature": "P0-003",
+                "ready_features": ["P0-003"],
+                "dependencies_complete": True,
+            },
+            "retryable": False,
+            "human_decision": None,
+        }
+        envelope = {
+            "schema_version": 1,
+            "workflow_type": "queue_reconciliation",
+            "classification": "RECONCILED_READY_WORK",
+            "project_id": project.project_id,
+            "repository_identity": identity["repository_id"],
+            "transaction_id": ORIGINAL_TRANSACTION_ID,
+            "run_id": RUN_ID,
+            "session_id": SESSION_ID,
+            "starting_branch": project.milestone_branch,
+            "starting_commit": starting_head,
+            "current_commit": starting_head,
+            "feature_id": None,
+            "changed_paths": changed_paths,
+            "evidence": evidence,
+            "next_state": "feature_ready",
+        }
+        report_path = engine.root / "reports" / RUN_ID / "queue_reconciliation.json"
+        report = {
+            "schema_version": 1,
+            "project_id": project.project_id,
+            "run_id": RUN_ID,
+            "action": "queue_reconciliation",
+            "working_directory": str(repository),
+            "exit_status": 0,
+            "structured_output_validation": "valid",
+            "result_classification": "RECONCILED_READY_WORK",
+            "structured_result": envelope,
+            "parsed_structured_result": envelope,
+            "terminal_marker_found": True,
+            "redacted_stdout": "typed terminal result",
+            "session_id": SESSION_ID,
+        }
+        write_json(report_path, report)
+        warnings = ["M1: base_commit is required before feature preparation or integration"]
+        planning_transaction = {
+            "schema_version": 1,
+            "status": "planning_validation_failed",
+            "project_id": project.project_id,
+            "run_id": RUN_ID,
+            "session_id": SESSION_ID,
+            "planning_start_commit": starting_head,
+            "changed_paths": changed_paths,
+            "changed_path_count": len(changed_paths),
+            "diff_fingerprint": diff_fingerprint,
+            "result_classification": "RECONCILED_READY_WORK",
+            "reconciliation_report": str(report_path),
+            "error": "deterministic inventory validation failed: " + json.dumps({
+                "exit_code": 0,
+                "errors": [],
+                "warnings": warnings,
+                "blocking_warnings": [],
+            }, sort_keys=True),
+        }
+        write_json(
+            engine.root / "reports" / RUN_ID / "planning-transaction.json",
+            planning_transaction,
+        )
+        kernel.block(
+            state=TransactionState.TERMINAL_FAILURE,
+            classification="PLANNING_VALIDATION_FAILED",
+            next_state="validation_failed",
+            reference="RecoveryError",
+        )
+        return repository, project, engine, starting_head, ledger, warnings
 
     def test_01_planning_lease_exists_before_session_mutation_and_is_released(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -468,6 +606,145 @@ class PlanningTransactionTests(unittest.TestCase):
             )
             self.assertEqual((repository / "app.txt").read_bytes(), app_before)
             self.assertFalse(any(path.startswith("tests/") for path in RepositoryInspector(repository).changed_paths("HEAD")))
+
+    def test_19_inventory_warnings_are_nonfatal_by_default(self):
+        result = _classify_inventory_validation(
+            exit_code=0,
+            value={"ok": True, "errors": [], "warnings": ["future branch is not derived yet"]},
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["nonfatal_warnings"], ["future branch is not derived yet"])
+        self.assertEqual(result["blocking_warnings"], [])
+
+    def test_20_inventory_nonzero_errors_and_configured_blocking_warnings_fail(self):
+        cases = [
+            (1, {"errors": [], "warnings": []}, ()),
+            (0, {"errors": ["queue is invalid"], "warnings": []}, ()),
+            (0, {"errors": [], "warnings": ["SECURITY: review required"]}, ("SECURITY:*",)),
+        ]
+        for exit_code, value, patterns in cases:
+            with self.subTest(exit_code=exit_code, value=value, patterns=patterns):
+                with self.assertRaisesRegex(RecoveryError, "inventory validation failed"):
+                    _classify_inventory_validation(
+                        exit_code=exit_code,
+                        value={"ok": False, **value},
+                        blocking_warning_patterns=patterns,
+                    )
+
+    def test_21_terminal_planning_dry_run_is_exact_and_write_free(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, project, engine, starting_head, ledger, warnings = (
+                self._terminal_kernel_recovery_fixture(root)
+            )
+            status_before = git(repository, "status", "--porcelain=v1", "--branch")
+            ledger_before = ledger.path.read_bytes()
+            with patch.object(engine, "_compatibility_snapshot", return_value={}) as compatibility:
+                plan = engine.run_project(project, "resume", dry_run=True)
+            compatibility.assert_not_called()
+            self.assertEqual(git(repository, "status", "--porcelain=v1", "--branch"), status_before)
+            self.assertEqual(ledger.path.read_bytes(), ledger_before)
+            self.assertEqual(plan["current_state"], "validation_failed")
+            self.assertEqual(plan["workflow_type"], "queue_reconciliation recovery/finalization")
+            self.assertEqual(plan["transaction_mode"], "recovery")
+            self.assertEqual(plan["original_transaction_id"], ORIGINAL_TRANSACTION_ID)
+            self.assertEqual(plan["starting_commit"], starting_head)
+            self.assertEqual(plan["existing_planning_changes"]["paths"], sorted(SEVEN_PATHS))
+            self.assertEqual(plan["selected_feature"], "P0-003")
+            self.assertEqual(plan["planning_finalization_recovery"]["dependencies"], ["P0-001", "P0-002"])
+            self.assertEqual(plan["planning_finalization_recovery"]["nonfatal_warnings"], warnings)
+            self.assertEqual(plan["model_sessions_that_would_launch"], [])
+            self.assertEqual(plan["child_sessions_that_would_launch"], [])
+            self.assertEqual(plan["cost_aware_run_plan"]["execution"]["models_planned"], 0)
+            self.assertFalse(plan["feature_factory_would_launch"])
+            self.assertFalse(plan["milestone_integrator_would_launch"])
+            self.assertFalse(plan["planning_content_regeneration_would_run"])
+
+    def test_22_terminal_planning_topology_rejects_branch_head_path_and_production_drift(self):
+        mutations = {
+            "branch": lambda repository, project: replace(project, milestone_branch="codex/other"),
+            "head": lambda repository, project: (
+                git(repository, "commit", "--allow-empty", "-m", "advance head"), project
+            )[1],
+            "path": lambda repository, project: (
+                (repository / "docs/README.md").write_text("extra planning path\n", encoding="utf-8"),
+                project,
+            )[1],
+            "production": lambda repository, project: (
+                (repository / "app.txt").write_text("production drift\n", encoding="utf-8"),
+                project,
+            )[1],
+        }
+        for classification, mutate in mutations.items():
+            with self.subTest(classification=classification), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                repository, project, engine, _, _, _ = self._terminal_kernel_recovery_fixture(root)
+                changed_project = mutate(repository, project)
+                with patch.object(engine, "_compatibility_snapshot", return_value={}):
+                    with self.assertRaisesRegex(RecoveryError, "topology disagrees"):
+                        engine.project_plan(changed_project)
+
+    def test_23_terminal_planning_recovery_uses_fresh_transaction_and_one_commit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, project, engine, starting_head, ledger, warnings = (
+                self._terminal_kernel_recovery_fixture(root)
+            )
+            app_before = (repository / "app.txt").read_bytes()
+            original_events = [
+                event for event in ledger.read()
+                if event["transaction_id"] == ORIGINAL_TRANSACTION_ID
+            ]
+            inventory = {
+                "ok": True,
+                "exit_code": 0,
+                "errors": [],
+                "warnings": warnings,
+                "nonfatal_warnings": warnings,
+                "blocking_warnings": [],
+                "validator": "synthetic inventory validator",
+            }
+            with (
+                patch.object(engine, "_compatibility_snapshot", return_value={}),
+                patch("development_conveyor.planning._inventory_validation", return_value=inventory),
+            ):
+                expected_plan = engine.run_project(project, "resume", dry_run=True)
+                result = engine._recover_terminal_planning_finalization(
+                    project,
+                    expected_plan=expected_plan["planning_finalization_recovery"],
+                )
+            self.assertEqual(result["outcome"], "planning_recovery_committed")
+            self.assertEqual(result["selected_feature"], "P0-003")
+            self.assertEqual(result["nonfatal_warnings"], warnings)
+            self.assertEqual(git(repository, "rev-list", "--count", f"{starting_head}..HEAD"), "1")
+            self.assertEqual(RepositoryInspector(repository).changed_paths("HEAD"), sorted(SEVEN_PATHS))
+            self.assertEqual((repository / "app.txt").read_bytes(), app_before)
+            self.assertTrue(RepositoryInspector(repository).is_clean)
+            self.assertFalse((repository / ".factory/locks/writer.json").exists())
+            all_events = ledger.read()
+            self.assertEqual(
+                [event for event in all_events if event["transaction_id"] == ORIGINAL_TRANSACTION_ID],
+                original_events,
+            )
+            recovery_events = [
+                event for event in all_events
+                if event["transaction_id"] == result["recovery_transaction_id"]
+            ]
+            self.assertNotEqual(result["recovery_transaction_id"], ORIGINAL_TRANSACTION_ID)
+            self.assertEqual(recovery_events[0]["workflow_type"], "recovery")
+            self.assertEqual(
+                len([event for event in recovery_events if event["event_type"] == "CommitFinalized"]),
+                1,
+            )
+            self.assertTrue(any(event["event_type"] == "RecoveryApplied" for event in recovery_events))
+            report = json.loads(Path(result["report"]).read_text())
+            self.assertEqual(report["nonfatal_warnings"], warnings)
+            with self.assertRaisesRegex(RecoveryError, "projection disappeared|evidence changed"):
+                engine._recover_terminal_planning_finalization(
+                    project,
+                    expected_plan=expected_plan["planning_finalization_recovery"],
+                )
+            self.assertEqual(git(repository, "rev-list", "--count", f"{starting_head}..HEAD"), "1")
 
 
 if __name__ == "__main__":

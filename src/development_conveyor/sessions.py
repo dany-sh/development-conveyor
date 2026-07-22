@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .compatibility import CompatibilityResult, check_compatibility, resolve_model_selection
+from .compatibility import (
+    CompatibilityResult,
+    ModelSelection as CompatibilityModelSelection,
+    check_compatibility,
+    resolve_model_selection,
+)
 from .errors import SessionError
 from .redaction import redact_text
 from .registry import Project
@@ -94,12 +99,17 @@ class SessionRequest:
     allowed_paths: tuple[str, ...] = ()
     session_kind: str = "parent"
     child_session_budget: int | None = None
+    planned_model: str | None = None
+    planned_reasoning: str | None = None
+    model_plan_source: str | None = None
 
     def __post_init__(self) -> None:
         if self.action == "milestone_integration" and self.accepted_commit == "SELF":
             raise SessionError("milestone integration requires a normalized accepted commit")
         if self.session_kind not in {"parent", "child"}:
             raise SessionError("session kind must be parent or child")
+        if (self.planned_model is None) != (self.planned_reasoning is None):
+            raise SessionError("planned model and reasoning must be supplied together")
 
 
 @dataclass(frozen=True)
@@ -113,6 +123,10 @@ class SessionPlan:
     effective_reasoning: str | None = None
     codex_executable: str | None = None
     compatibility: dict[str, Any] | None = None
+    planned_model: str | None = None
+    planned_reasoning: str | None = None
+    launched_model: str | None = None
+    launched_reasoning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -811,13 +825,52 @@ class SessionLauncher:
         self.controller_root = controller_root.resolve()
         self.configuration = configuration
 
-    def compatibility(self, action: str, *, project_id: str | None = None) -> CompatibilityResult:
+    def compatibility(
+        self,
+        action: str,
+        *,
+        project_id: str | None = None,
+        planned_model: str | None = None,
+        planned_reasoning: str | None = None,
+        model_plan_source: str | None = None,
+    ) -> CompatibilityResult:
         selection = resolve_model_selection(action)
+        if planned_model is not None or planned_reasoning is not None:
+            if not planned_model or not planned_reasoning:
+                raise SessionError("planned model and reasoning must be supplied together")
+            selection = CompatibilityModelSelection(
+                model=planned_model,
+                reasoning=planned_reasoning,
+                source=model_plan_source or "cost_aware_execution_plan",
+                role=selection.role,
+                policy_path=selection.policy_path,
+                minimum_cli_version=None,
+                policy_valid=selection.policy_valid,
+                policy_error=selection.policy_error,
+                manual_reasoning_authorization=selection.manual_reasoning_authorization,
+            )
         return check_compatibility(
             str(self.configuration["codex"]["executable"]),
             selection,
             project_id=project_id,
         )
+
+    @staticmethod
+    def _launch_policy_args(model: str, reasoning: str) -> tuple[str, ...]:
+        return ("--model", model, "-c", f'model_reasoning_effort="{reasoning}"')
+
+    @staticmethod
+    def _launched_policy(argv: tuple[str, ...]) -> tuple[str | None, str | None]:
+        model = None
+        reasoning = None
+        for index, item in enumerate(argv):
+            if item == "--model" and index + 1 < len(argv):
+                model = argv[index + 1]
+            if item == "-c" and index + 1 < len(argv):
+                match = re.fullmatch(r'model_reasoning_effort="([A-Za-z0-9_-]+)"', argv[index + 1])
+                if match:
+                    reasoning = match.group(1)
+        return model, reasoning
 
     def _trusted_resolution_environment(self, request: SessionRequest) -> dict[str, str]:
         if request.action != "milestone_integration":
@@ -986,7 +1039,13 @@ class SessionLauncher:
 
     def plan(self, request: SessionRequest) -> SessionPlan:
         prompt = self._render_prompt(request)
-        compatibility = self.compatibility(request.action, project_id=request.project.project_id)
+        compatibility = self.compatibility(
+            request.action,
+            project_id=request.project.project_id,
+            planned_model=request.planned_model,
+            planned_reasoning=request.planned_reasoning,
+            model_plan_source=request.model_plan_source,
+        )
         if not compatibility.compatible:
             raise SessionError(
                 f"classification={compatibility.classification}; model={compatibility.effective_model}; "
@@ -997,21 +1056,29 @@ class SessionLauncher:
                 f"validate={compatibility.validation_command}"
             )
         executable = str(compatibility.executable)
+        planned_model = request.planned_model or compatibility.effective_model
+        planned_reasoning = request.planned_reasoning or compatibility.effective_reasoning
+        if not planned_model or not planned_reasoning:
+            raise SessionError("model session launch lacks a complete authoritative execution plan")
         sandbox = (
             "read-only"
             if request.action == "human_decision_report" or request.mode in {"audit", "dry-run", "dry-run-validation"}
             else "workspace-write"
         )
-        policy_args = (
-            "--model", str(compatibility.effective_model),
-            "-c", f'model_reasoning_effort="{compatibility.effective_reasoning}"',
-        )
+        policy_args = self._launch_policy_args(planned_model, planned_reasoning)
         if request.session_id:
             argv = (executable, "exec", *policy_args, "resume", "--json", request.session_id, "-")
         else:
             argv = (
                 executable, "exec", *policy_args, "--cd", str(request.project.repository),
                 "--json", "--sandbox", sandbox, "-",
+            )
+        launched_model, launched_reasoning = self._launched_policy(argv)
+        if launched_model != planned_model or launched_reasoning != planned_reasoning:
+            raise SessionError(
+                "planned/launched model binding mismatch before Codex invocation: "
+                f"planned={planned_model}/{planned_reasoning}; "
+                f"launched={launched_model}/{launched_reasoning}"
             )
         SafetyPolicy.validate_controller_command(
             list(argv), cwd=request.project.repository, registered_repository=request.project.repository, allow_codex=True
@@ -1022,10 +1089,14 @@ class SessionLauncher:
             prompt=prompt,
             prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
             sandbox=sandbox,
-            effective_model=compatibility.effective_model,
-            effective_reasoning=compatibility.effective_reasoning,
+            effective_model=launched_model,
+            effective_reasoning=launched_reasoning,
             codex_executable=compatibility.executable,
             compatibility=compatibility.as_dict(),
+            planned_model=planned_model,
+            planned_reasoning=planned_reasoning,
+            launched_model=launched_model,
+            launched_reasoning=launched_reasoning,
         )
 
     def launch(

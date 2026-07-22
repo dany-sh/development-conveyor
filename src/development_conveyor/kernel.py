@@ -777,6 +777,144 @@ class WorkflowKernel:
             "milestone_gate" if result.get("milestone_complete") is True else "feature_ready"
         )
 
+    def finalize_deterministic_planning_recovery(
+        self,
+        *,
+        original_transaction_id: str,
+        changed_paths: tuple[str, ...],
+        expected_diff_fingerprint: str,
+        plan_fingerprint: str,
+        validation_evidence: dict[str, Any],
+        selected_feature: str,
+    ) -> str:
+        """Commit one exact dirty planning baseline without inventing a model session."""
+
+        transaction = self._require()
+        if transaction.workflow_type != WorkflowType.RECOVERY:
+            raise TransactionError("planning finalization requires a recovery transaction")
+        if transaction.current_state != TransactionState.ACTIVE:
+            raise TransactionError("planning recovery must finalize from an active transaction")
+        if transaction.session_ids:
+            raise TransactionError("deterministic planning recovery cannot own a model session")
+        if transaction.allowed_mutation_policy.require_clean_start:
+            raise TransactionError("planning recovery must adopt an exact dirty starting snapshot")
+        self._revalidate_lease()
+        observed_paths = tuple(sorted(
+            set(self.inspector.tracked_changed_paths())
+            | set(self.inspector.untracked_file_hashes())
+        ))
+        if observed_paths != tuple(sorted(changed_paths)):
+            raise TransactionError("planning recovery changed paths differ from the reserved baseline")
+        if self.inspector.untracked_file_hashes():
+            raise TransactionError("planning recovery refuses untracked application content")
+        if self.inspector.planning_diff_fingerprint() != expected_diff_fingerprint:
+            raise TransactionError("planning recovery diff differs from the reserved baseline")
+        if (
+            transaction.starting_tracked_diff_fingerprint != expected_diff_fingerprint
+            or transaction.starting_untracked_fingerprint
+            != capture_repository_snapshot(self.project).untracked_fingerprint
+        ):
+            raise TransactionError("planning recovery starting snapshot changed")
+        transaction.allowed_mutation_policy.validate(observed_paths)
+
+        transaction.transition(TransactionState.RESULT_PENDING)
+        self.ledger.append(
+            event_type="DeterministicExecutionStarted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "plan_fingerprint": plan_fingerprint,
+                "model_session_launched": False,
+                "recovered_transaction_id": original_transaction_id,
+            },
+        )
+        transaction.transition(TransactionState.VALIDATING)
+        self.ledger.append(
+            event_type="DeterministicResultAccepted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "classification": "RECOVERY_APPLIED",
+                "plan_fingerprint": plan_fingerprint,
+                "current_commit": transaction.starting_head,
+                "changed_paths": list(observed_paths),
+                "model_session_launched": False,
+            },
+        )
+        self.ledger.append(
+            event_type="ChangesDetected",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "changed_paths": list(observed_paths),
+                "diff_fingerprint": expected_diff_fingerprint,
+                "adopted_existing_planning_diff": True,
+            },
+        )
+        self.ledger.append(
+            event_type="ValidationStarted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "changed_paths": list(observed_paths),
+                "executor": "deterministic_planning_finalization",
+            },
+        )
+        self.ledger.append(
+            event_type="ValidationPassed",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "commands": validation_evidence.get("commands", []),
+                "warnings": validation_evidence.get("warnings", []),
+                "diff_fingerprint": expected_diff_fingerprint,
+                "executor": "deterministic_planning_finalization",
+            },
+        )
+        transaction.transition(TransactionState.FINALIZING)
+        subject = transaction.allowed_mutation_policy.commit_subject
+        if not subject:
+            raise TransactionError("planning recovery lacks an exact commit subject")
+        self.inspector.stage_planning_paths(list(observed_paths), commit_subject=subject)
+        if tuple(self.inspector.staged_changed_paths()) != observed_paths:
+            raise TransactionError("planning recovery staged paths differ from the reserved baseline")
+        commit = self.inspector.commit_planning_paths(list(observed_paths), commit_subject=subject)
+        if (
+            self.inspector.rev_parse(f"{commit}^", check=False) != transaction.starting_head
+            or tuple(self.inspector.changed_paths(commit)) != observed_paths
+            or not self.inspector.is_clean
+        ):
+            raise TransactionError("planning recovery did not create one exact clean commit")
+        self.final_commit = commit
+        self.ledger.append(
+            event_type="CommitFinalized",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "commit": commit,
+                "parent": transaction.starting_head,
+                "changed_paths": list(observed_paths),
+                "diff_fingerprint": self.inspector.patch_fingerprint(commit),
+                "source_diff_fingerprint": expected_diff_fingerprint,
+                "commit_subject": subject,
+                "recovered_transaction_id": original_transaction_id,
+                "model_session_launched": False,
+            },
+        )
+        self.ledger.append(
+            event_type="RecoveryApplied",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "recovered_transaction_id": original_transaction_id,
+                "classification": "planning_finalization_recovery",
+                "selected_feature": selected_feature,
+                "model_session_launched": False,
+            },
+        )
+        transaction.next_project_state = "feature_ready"
+        return commit
+
     def record_file_mutation_boundary(self) -> None:
         transaction = self._require()
         if any(

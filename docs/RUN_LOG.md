@@ -638,3 +638,13 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `m1_002_cost_aware_execution`
 - Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-22T08:05:13+00:00
+
+- Agent role: `development-conveyor`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `planning_finalization_recovery`
+- Safety and autonomy contracts unchanged: `true`

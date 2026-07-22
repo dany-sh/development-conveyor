@@ -32,6 +32,7 @@ class Project:
     current_state: str
     registration_notes: str
     human_decision_gate: dict[str, Any] | None = None
+    inventory_blocking_warning_patterns: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "Project":
@@ -56,6 +57,9 @@ class Project:
             current_state=value["current_state"],
             registration_notes=value["registration_notes"],
             human_decision_gate=value.get("human_decision_gate"),
+            inventory_blocking_warning_patterns=tuple(
+                value.get("inventory_blocking_warning_patterns") or ()
+            ),
         )
 
 

@@ -36,6 +36,7 @@ from .planning import (
     allowed_planning_path,
     capture_planning_start,
     finalize_planning_commit,
+    inspect_planning_finalization_recovery,
     load_planning_transaction,
     persist_planning_transaction,
     planning_commit_subject,
@@ -606,12 +607,95 @@ class CycleEngine:
         recovered["projection_fingerprint"] = projection_fingerprint(recovered)
         return recovered
 
+    def _planning_finalization_recovery_plan(
+        self,
+        project: Project,
+        projection: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if (
+            projection.get("current_state") != "validation_failed"
+            or projection.get("active_transaction") is not None
+        ):
+            return None
+        latest = max(
+            projection.get("transactions") or [],
+            key=lambda item: int(item.get("last_sequence") or 0),
+            default={},
+        )
+        if (
+            latest.get("workflow_type") != WorkflowType.QUEUE_RECONCILIATION.value
+            or latest.get("state") != "terminal_failure"
+            or latest.get("terminal_classification") != "PLANNING_VALIDATION_FAILED"
+        ):
+            return None
+        original_transaction_id = latest.get("transaction_id")
+        run_id = latest.get("run_id")
+        if not isinstance(original_transaction_id, str) or not isinstance(run_id, str):
+            raise RecoveryError("terminal planning projection lacks recovery identity")
+        report_root = self.configuration.owned_path(
+            self.configuration.conveyor["report_directory"]
+        )
+        planning_path = planning_report_path(report_root, run_id)
+        planning_transaction = load_planning_transaction(planning_path)
+        if planning_transaction is None:
+            raise RecoveryError("terminal planning recovery lacks its persisted transaction")
+        session_path = self._report_path(report_root, run_id, "queue_reconciliation.json")
+        try:
+            session_report = json.loads(session_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RecoveryError("terminal planning recovery lacks its session report") from exc
+        recorded_report = planning_transaction.get("reconciliation_report")
+        if not isinstance(recorded_report, str) or Path(recorded_report).resolve() != session_path:
+            raise RecoveryError("persisted planning transaction points to a different session report")
+        inspector = RepositoryInspector(project.repository)
+        identity = inspector.identity()
+        state_root = self.root / "state/projects" / project.project_id
+        ledger = EvidenceLedger(
+            state_root / "evidence-ledger.jsonl",
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        events = ledger.read()
+        plan = inspect_planning_finalization_recovery(
+            project,
+            inspector,
+            ledger_events=events,
+            projection=projection,
+            original_transaction_id=original_transaction_id,
+            planning_transaction=planning_transaction,
+            session_report=session_report,
+            writer_lease_exists=inspector.writer_lock_path(
+                self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+            ).exists(),
+        )
+        plan.update({
+            "original_ledger_sequence": ledger.verify().sequence,
+            "original_ledger_fingerprint": ledger.verify().fingerprint,
+            "planning_transaction_path": str(planning_path),
+            "session_report_path": str(session_path),
+            "planning_transaction_fingerprint": fingerprint(planning_transaction),
+            "session_report_fingerprint": fingerprint(session_report),
+        })
+        plan["plan_fingerprint"] = fingerprint(plan)
+        return plan
+
     def _verified_failed_integration_recovery(
         self, project: Project, projection: dict[str, Any]
     ) -> dict[str, Any] | None:
         """Resolve a failed integration only from two independently verified refs."""
 
         if projection.get("active_transaction") is not None:
+            return None
+        latest = max(
+            projection.get("transactions") or [],
+            key=lambda item: int(item.get("last_sequence") or 0),
+            default={},
+        )
+        if (
+            latest.get("workflow_type") != WorkflowType.MILESTONE_INTEGRATION.value
+            or latest.get("state") not in {"terminal_failure", "human_decision_required"}
+        ):
             return None
         failed = next(
             (
@@ -1081,10 +1165,6 @@ class CycleEngine:
                     )
                 ),
             ))
-            compatibility = self._compatibility_snapshot(
-                project, str(authoritative.get("allowed_next_action") or "verify_consistency")
-            )
-            plan["compatibility_preflight"] = compatibility
             plan.update({
                 "current_planning_transaction": authoritative_planning_transaction,
                 "current_repository_state": {
@@ -1102,8 +1182,51 @@ class CycleEngine:
                     ),
                 },
             })
+            planning_recovery = self._planning_finalization_recovery_plan(
+                effective, authoritative
+            )
+            if planning_recovery is not None:
+                plan.update({
+                    "current_state": "validation_failed",
+                    "workflow_type": "queue_reconciliation recovery/finalization",
+                    "transaction_mode": "recovery",
+                    "proposed_next_action": "planning_finalization",
+                    "next_action": "planning_finalization",
+                    "original_transaction_id": planning_recovery["original_transaction_id"],
+                    "starting_commit": planning_recovery["starting_commit"],
+                    "existing_planning_changes": planning_recovery["existing_planning_changes"],
+                    "selected_feature": planning_recovery["selected_feature"],
+                    "next_feature_selection": {
+                        "selected_feature": planning_recovery["selected_feature"],
+                        "selected_feature_starting_commit": None,
+                    },
+                    "planning_finalization_recovery": planning_recovery,
+                    "model_sessions_that_would_launch": [],
+                    "child_sessions_that_would_launch": [],
+                    "sessions_that_would_launch": [],
+                    "execution": {"models_planned": 0},
+                    "deterministic_only": True,
+                    "application_mutation_expected": True,
+                    "expected_mutation": "commit existing validated planning metadata",
+                    "feature_factory_would_launch": False,
+                    "milestone_integrator_would_launch": False,
+                    "planning_content_regeneration_would_run": False,
+                    "expected_stop_condition": (
+                        "Finalize the exact existing planning diff without a model session or feature launch."
+                    ),
+                    "compatibility_preflight": None,
+                })
+                plan["cost_aware_run_plan"] = build_run_plan(
+                    plan, self.root, project=effective
+                )
+                return plan
+            compatibility = self._compatibility_snapshot(
+                project, str(authoritative.get("allowed_next_action") or "verify_consistency")
+            )
+            plan["compatibility_preflight"] = compatibility
             self._attach_milestone_integration_contract(plan, project)
-            plan["cost_aware_run_plan"] = build_run_plan(plan, self.root, project=project)
+            cost_plan = build_run_plan(plan, self.root, project=project)
+            plan["cost_aware_run_plan"] = cost_plan
             return plan
         planning_transaction = None
         persisted_evidence = (
@@ -2053,6 +2176,10 @@ class CycleEngine:
                 getattr(plan, "codex_executable", None) if "plan" in locals() else (compatibility or {}).get("executable")
             ),
             "compatibility": getattr(plan, "compatibility", None) if "plan" in locals() else compatibility,
+            "planned_model": request.planned_model,
+            "planned_reasoning": request.planned_reasoning,
+            "launched_model": getattr(plan, "launched_model", None) if "plan" in locals() else None,
+            "launched_reasoning": getattr(plan, "launched_reasoning", None) if "plan" in locals() else None,
             "safe_resume_command": f"scripts/conveyor resume --project {request.project.project_id}",
             "created_at": utc_now(),
         })
@@ -2106,6 +2233,10 @@ class CycleEngine:
             "optional_warnings": list(result.optional_warnings),
             "effective_model": result.plan.effective_model,
             "effective_reasoning": result.plan.effective_reasoning,
+            "planned_model": result.plan.planned_model,
+            "planned_reasoning": result.plan.planned_reasoning,
+            "launched_model": result.plan.launched_model,
+            "launched_reasoning": result.plan.launched_reasoning,
             "codex_executable": result.plan.codex_executable,
             "compatibility": result.plan.compatibility,
             "safe_resume_command": f"scripts/conveyor resume --project {request.project.project_id}",
@@ -3389,6 +3520,23 @@ class CycleEngine:
         preselected = FeatureQueue.from_location(project.repository, project.queue_location).select_next(
             project.active_milestone or ""
         )
+        cost_plan = build_run_plan(
+            {
+                "proposed_next_action": "queue_reconciliation",
+                "selected_feature": preselected.feature_id if preselected else None,
+            },
+            self.root,
+            project=project,
+        )
+        if (
+            cost_plan["execution"]["models_planned"] != 1
+            or not cost_plan.get("selected_model")
+            or not cost_plan.get("selected_reasoning_effort")
+        ):
+            raise RecoveryError(
+                "queue reconciliation cannot launch without one authoritative model execution plan"
+            )
+        planning_start["cost_aware_execution_plan"] = cost_plan
         adapter = QueueReconciliationAdapter(
             allowed_paths=allowed_paths,
             allowed_prefixes=tuple(prefix.rstrip("/") for prefix in ALLOWED_PLANNING_PREFIXES),
@@ -3435,6 +3583,7 @@ class CycleEngine:
                 transaction_path=transaction_path,
                 kernel=kernel,
                 adapter=adapter,
+                cost_plan=cost_plan,
             )
         except (ConveyorError, ValueError) as exc:
             self._terminalize_handled_kernel_failure(kernel, adapter, exc)
@@ -3454,6 +3603,7 @@ class CycleEngine:
         transaction_path: Path,
         kernel: WorkflowKernel,
         adapter: QueueReconciliationAdapter,
+        cost_plan: dict[str, Any],
     ) -> dict[str, Any]:
         result, repairs, retry_status = self._launch_with_retries(SessionRequest(
             action="queue_reconciliation", project=project, run_id=run_id, mode=mode,
@@ -3462,6 +3612,9 @@ class CycleEngine:
             starting_branch=kernel.transaction.starting_branch,
             starting_commit=kernel.transaction.starting_head,
             allowed_paths=kernel.transaction.allowed_mutation_policy.allowed_paths,
+            planned_model=str(cost_plan["selected_model"]),
+            planned_reasoning=str(cost_plan["selected_reasoning_effort"]),
+            model_plan_source="cost_aware_execution_plan",
         ), inspector, "queue_reconciliation", "queue_reconciliation_repairs", reservation_held=True,
             on_session_started=kernel.session_launched)
         if not result.session_id:
@@ -4537,6 +4690,16 @@ class CycleEngine:
             reservation.release(run_id)
 
     def resume_project(self, project: Project, run_id: str | None = None) -> dict[str, Any]:
+        planning_plan = self.project_plan(project)
+        planning_recovery = planning_plan.get("planning_finalization_recovery")
+        if (
+            planning_plan.get("proposed_next_action") == "planning_finalization"
+            and isinstance(planning_recovery, dict)
+        ):
+            return self._recover_terminal_planning_finalization(
+                project,
+                expected_plan=planning_recovery,
+            )
         kernel_recovery = self._kernel_recovery_preflight(project, apply=True)
         if kernel_recovery is not None:
             return kernel_recovery
@@ -4868,6 +5031,228 @@ class CycleEngine:
         finally:
             if reservation is not None:
                 reservation.release(run_id)
+
+    def _recover_terminal_planning_finalization(
+        self,
+        project: Project,
+        *,
+        expected_plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Finalize one terminal warning-only planning result in a fresh recovery transaction."""
+
+        effective = self.effective_project(project)
+        inspector = RepositoryInspector(project.repository)
+        identity = inspector.identity()
+        reservation = self._launch_lock(effective, inspector)
+        recovery_run_id = f"recovery-{uuid.uuid4()}"
+        reservation.acquire(make_lock_record(
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            run_id=recovery_run_id,
+            current_feature=expected_plan.get("selected_feature"),
+            current_phase="planning_finalization_recovery",
+        ))
+        state_root = self.root / "state/projects" / project.project_id
+        ledger = EvidenceLedger(
+            state_root / "evidence-ledger.jsonl",
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        projection = ProjectionEngine(ledger, state_root / "projection-cache.json")
+        workflow_lease = WorkflowWriterLease(inspector.writer_lock_path(
+            self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+        ))
+        selected_feature = str(expected_plan["selected_feature"])
+        expected_paths = tuple(expected_plan["existing_planning_changes"]["paths"])
+        adapter = RecoveryAdapter(
+            allowed_paths=expected_paths,
+            allow_untracked=False,
+            commit_subject=planning_commit_subject(effective, selected_feature),
+            next_state="feature_ready",
+            require_clean_start=False,
+        )
+        kernel = WorkflowKernel(
+            project=effective,
+            ledger=ledger,
+            projection=projection,
+            lease=workflow_lease,
+        )
+        try:
+            refreshed_projection = self._authoritative_projection(project)
+            if refreshed_projection is None:
+                raise RecoveryError("planning recovery projection disappeared under reservation")
+            refreshed = self._planning_finalization_recovery_plan(
+                effective, refreshed_projection
+            )
+            if refreshed is None or refreshed.get("plan_fingerprint") != expected_plan.get("plan_fingerprint"):
+                raise RecoveryError("planning recovery evidence changed under reservation")
+            transaction = kernel.begin(
+                workflow_type=WorkflowType.RECOVERY,
+                milestone=project.active_milestone,
+                feature_id=None,
+                run_id=recovery_run_id,
+                policy=adapter.policy,
+                start_evidence={
+                    "recovered_transaction_id": expected_plan["original_transaction_id"],
+                    "recovery_classification": "planning_finalization_recovery",
+                    "original_run_id": expected_plan["original_run_id"],
+                    "original_session_id": expected_plan["original_session_id"],
+                    "original_ledger_sequence": expected_plan["original_ledger_sequence"],
+                    "original_ledger_fingerprint": expected_plan["original_ledger_fingerprint"],
+                    "planning_transaction_fingerprint": expected_plan["planning_transaction_fingerprint"],
+                    "session_report_fingerprint": expected_plan["session_report_fingerprint"],
+                    "model_sessions_planned": 0,
+                    "child_sessions_planned": 0,
+                },
+                expected_starting_branch=expected_plan["starting_branch"],
+                expected_starting_head=expected_plan["starting_commit"],
+            )
+            kernel.acquire_lease()
+            kernel.capture_snapshot()
+            kernel.checkpoint("planning_finalization_recovery_verified", {
+                "recovered_transaction_id": expected_plan["original_transaction_id"],
+                "changed_paths": list(expected_paths),
+                "diff_fingerprint": expected_plan["mutation_fingerprint"],
+                "selected_feature": selected_feature,
+                "model_session_launched": False,
+            })
+            try:
+                session_report = json.loads(
+                    Path(expected_plan["session_report_path"]).read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RecoveryError("planning recovery session report changed") from exc
+            validation = validate_planning_changes(
+                effective,
+                inspector,
+                session_report,
+                run_id=expected_plan["original_run_id"],
+                starting_head=expected_plan["starting_commit"],
+                expected_diff_fingerprint=expected_plan["mutation_fingerprint"],
+                expected_changed_paths=list(expected_paths),
+                expected_session_id=expected_plan["original_session_id"],
+                expected_transaction_id=expected_plan["original_transaction_id"],
+            )
+            inventory = validation.get("inventory_validation") or {}
+            validation_warnings = list(inventory.get("nonfatal_warnings") or [])
+            commit = kernel.finalize_deterministic_planning_recovery(
+                original_transaction_id=expected_plan["original_transaction_id"],
+                changed_paths=expected_paths,
+                expected_diff_fingerprint=expected_plan["mutation_fingerprint"],
+                plan_fingerprint=expected_plan["plan_fingerprint"],
+                validation_evidence={
+                    "commands": [
+                        {"validator": inventory.get("validator"), "exit_code": inventory.get("exit_code")},
+                        {"validator": "git diff --check", "exit_code": 0},
+                    ],
+                    "warnings": validation_warnings,
+                },
+                selected_feature=selected_feature,
+            )
+            committed = {
+                **validation,
+                "status": "planning_changes_committed",
+                "planning_result_commit": commit,
+                "effective_milestone_head": commit,
+                "planning_commit_status": "committed",
+                "planning_commit_subject": inspector.commit_subject(commit),
+                "planning_commit_would_be_created": False,
+                "repository_clean": True,
+                "selected_feature_starting_commit": commit,
+                "recovery": True,
+                "recovery_transaction_id": transaction.transaction_id,
+                "original_transaction_id": expected_plan["original_transaction_id"],
+                "model_sessions_launched": [],
+                "child_sessions_launched": [],
+                "nonfatal_warnings": validation_warnings,
+                "next_state": "feature_ready",
+                "committed_at": utc_now(),
+            }
+            completed = kernel.complete(
+                classification="RECOVERY_APPLIED",
+                evidence={
+                    "planning_status": "passed",
+                    "selected_feature": selected_feature,
+                    "planning_result_commit": commit,
+                    "recovered_transaction_id": expected_plan["original_transaction_id"],
+                    "model_session_launched": False,
+                    "nonfatal_warnings": validation_warnings,
+                },
+            )
+            recovery_report = self._report_path(
+                self.configuration.owned_path(
+                    self.configuration.conveyor["report_directory"]
+                ),
+                recovery_run_id,
+                "planning-finalization.json",
+            )
+            atomic_write_json(recovery_report, {
+                "schema_version": 1,
+                "project_id": project.project_id,
+                "run_id": recovery_run_id,
+                "workflow_type": "recovery",
+                "transaction_id": transaction.transaction_id,
+                "original_transaction_id": expected_plan["original_transaction_id"],
+                "starting_branch": expected_plan["starting_branch"],
+                "starting_commit": expected_plan["starting_commit"],
+                "planning_result_commit": commit,
+                "selected_feature": selected_feature,
+                "changed_paths": list(expected_paths),
+                "inventory_validation": inventory,
+                "nonfatal_warnings": validation_warnings,
+                "model_sessions_launched": [],
+                "child_sessions_launched": [],
+                "deterministic_only": True,
+                "outcome": "planning_recovery_committed",
+                "created_at": utc_now(),
+            })
+            document = self.load_project_state(project) or self._project_document(
+                effective, recovery_run_id, identity["path_fingerprint"]
+            )
+            projection_evidence = {
+                "transaction_id": transaction.transaction_id,
+                "ledger_sequence": completed["projection"]["ledger_sequence"],
+                "ledger_fingerprint": completed["projection"]["ledger_fingerprint"],
+                "projection_fingerprint": completed["projection"]["projection_fingerprint"],
+            }
+            self._transition_project(
+                effective,
+                document,
+                "feature_ready",
+                run_id=recovery_run_id,
+                checkpoint="planning_finalization_recovered",
+                feature=selected_feature,
+                state_evidence={"planning_transaction": committed},
+                event_branch=inspector.current_branch,
+                event_commit=commit,
+                event_command_category="planning_finalization_recovery",
+                event_validation_outcome="passed_with_nonfatal_warnings" if validation_warnings else "passed",
+                kernel_owned=True,
+                kernel_projection=projection_evidence,
+            )
+            return {
+                "project_id": project.project_id,
+                "outcome": "planning_recovery_committed",
+                "current_state": "feature_ready",
+                "selected_feature": selected_feature,
+                "planning_result_commit": commit,
+                "planning_transaction": committed,
+                "recovery_transaction_id": transaction.transaction_id,
+                "original_transaction_id": expected_plan["original_transaction_id"],
+                "report": str(recovery_report),
+                "nonfatal_warnings": validation_warnings,
+                "model_sessions_launched": [],
+                "child_sessions_launched": [],
+                "feature_factory_would_launch": False,
+                "milestone_integrator_would_launch": False,
+                "application_source_written": False,
+            }
+        except (ConveyorError, ValueError) as exc:
+            self._terminalize_handled_kernel_failure(kernel, adapter, exc)
+            raise
+        finally:
+            reservation.release(recovery_run_id)
 
     def recover_planning_transaction(
         self,
@@ -6586,6 +6971,19 @@ class CycleEngine:
             reservation.release(resolution_id)
 
     def run_project(self, project: Project, mode: str, *, dry_run: bool = False) -> dict[str, Any]:
+        if mode == "resume":
+            planning_plan = self.project_plan(project)
+            planning_recovery = planning_plan.get("planning_finalization_recovery")
+            if (
+                planning_plan.get("proposed_next_action") == "planning_finalization"
+                and isinstance(planning_recovery, dict)
+            ):
+                if dry_run:
+                    return planning_plan
+                return self._recover_terminal_planning_finalization(
+                    project,
+                    expected_plan=planning_recovery,
+                )
         kernel_recovery = self._kernel_recovery_preflight(
             project, apply=(mode == "resume" and not dry_run)
         )
@@ -6769,6 +7167,12 @@ class CycleEngine:
         if dry_run or mode == "audit":
             return plan
         if plan["proposed_next_action"] == "planning_finalization":
+            kernel_recovery = plan.get("planning_finalization_recovery")
+            if isinstance(kernel_recovery, dict):
+                return self._recover_terminal_planning_finalization(
+                    project,
+                    expected_plan=kernel_recovery,
+                )
             transaction = plan.get("current_planning_transaction") or {}
             if transaction.get("recovery_exact_expectation_recorded") is not False:
                 return self.recover_planning_transaction(

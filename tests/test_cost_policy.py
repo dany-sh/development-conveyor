@@ -1,18 +1,20 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from development_conveyor.compatibility import CompatibilityResult
 from development_conveyor.cost_policy import (
     ChildSessionBudget, build_run_plan, contain_command_output, context_pack, reusable_evidence,
     select_model, ValidationEvidenceCache, validation_identity, verification_plan,
 )
 from development_conveyor.sessions import SessionLauncher, SessionRequest
-from tests.helpers import synthetic_repository
+from tests.helpers import REPOSITORY_ROOT, synthetic_repository
 
 
 class CostPolicyTests(unittest.TestCase):
     def test_deterministic_work_never_selects_a_model(self):
-        for task in ("status", "consistency", "queue_parse", "dry_run", "integration"):
+        for task in ("status", "consistency", "queue_parse", "dry_run", "integration", "planning_finalization"):
             selected = select_model(task=task)
             self.assertIsNone(selected.model)
             self.assertIsNone(selected.reasoning)
@@ -53,6 +55,88 @@ class CostPolicyTests(unittest.TestCase):
             launcher = SessionLauncher(Path(temporary), {"codex": {"executable": "definitely-not-called"}})
             with self.assertRaisesRegex(Exception, "child session budget exhausted"):
                 launcher.launch(request)
+
+    def test_authoritative_cost_plan_is_bound_to_launch_argv(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            launcher = SessionLauncher(
+                REPOSITORY_ROOT,
+                {"codex": {"executable": "codex", "session_timeout_seconds": 60}},
+            )
+            compatible = CompatibilityResult(
+                classification="compatible",
+                executable="codex",
+                detected_version="1.0.0",
+                required_minimum_version=None,
+                effective_model="gpt-5.6-terra",
+                effective_reasoning="medium",
+                policy_source="cost_aware_execution_plan",
+                policy_role="feature-inventory-lead",
+                compatible=True,
+                diagnostic="ok",
+                remediation="none",
+                validation_command="scripts/conveyor doctor",
+            )
+            request = SessionRequest(
+                "queue_reconciliation",
+                project,
+                "run",
+                "one_feature",
+                planned_model="gpt-5.6-terra",
+                planned_reasoning="medium",
+                model_plan_source="cost_aware_execution_plan",
+            )
+            with patch.object(launcher, "compatibility", return_value=compatible):
+                plan = launcher.plan(request)
+            self.assertIn("gpt-5.6-terra", plan.argv)
+            self.assertIn('model_reasoning_effort="medium"', plan.argv)
+            self.assertEqual(
+                (plan.planned_model, plan.planned_reasoning),
+                (plan.launched_model, plan.launched_reasoning),
+            )
+            self.assertEqual(plan.cwd, repository)
+
+    def test_planned_launch_mismatch_fails_before_process_invocation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, project = synthetic_repository(Path(temporary))
+            launcher = SessionLauncher(
+                REPOSITORY_ROOT,
+                {"codex": {"executable": "codex", "session_timeout_seconds": 60}},
+            )
+            compatible = CompatibilityResult(
+                classification="compatible",
+                executable="/usr/bin/true",
+                detected_version="1.0.0",
+                required_minimum_version=None,
+                effective_model="gpt-5.6-terra",
+                effective_reasoning="medium",
+                policy_source="cost_aware_execution_plan",
+                policy_role="feature-inventory-lead",
+                compatible=True,
+                diagnostic="ok",
+                remediation="none",
+                validation_command="scripts/conveyor doctor",
+            )
+            request = SessionRequest(
+                "queue_reconciliation",
+                project,
+                "run",
+                "one_feature",
+                planned_model="gpt-5.6-terra",
+                planned_reasoning="medium",
+            )
+            with (
+                patch.object(launcher, "compatibility", return_value=compatible),
+                patch.object(
+                    launcher,
+                    "_launch_policy_args",
+                    return_value=("--model", "gpt-5.6-sol", "-c", 'model_reasoning_effort="high"'),
+                ),
+                patch("development_conveyor.sessions.subprocess.Popen") as popen,
+            ):
+                with self.assertRaisesRegex(Exception, "planned/launched model binding mismatch"):
+                    launcher.launch(request)
+            popen.assert_not_called()
 
     def test_context_pack_is_focused_and_high_risk_contracts_are_added(self):
         with tempfile.TemporaryDirectory() as temporary:

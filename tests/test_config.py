@@ -5,6 +5,7 @@ from pathlib import Path
 
 from development_conveyor.config import load_configuration
 from development_conveyor.errors import ConfigurationError, SchemaValidationError
+from development_conveyor.registry import ProjectRegistry
 from tests.helpers import REPOSITORY_ROOT
 
 
@@ -49,3 +50,15 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(SchemaValidationError):
             load_configuration(root, {"HOME": "/tmp"})
 
+    def test_inventory_blocking_warning_patterns_are_typed_registry_policy(self):
+        root = self._root()
+        path = root / "config/projects.yaml"
+        value = json.loads(path.read_text())
+        value["projects"][0]["inventory_blocking_warning_patterns"] = ["SECURITY:*", "POLICY:*"]
+        path.write_text(json.dumps(value), encoding="utf-8")
+        configuration = load_configuration(root, {"HOME": "/tmp/synthetic-home"})
+        project = ProjectRegistry(configuration).all()[0]
+        self.assertEqual(
+            project.inventory_blocking_warning_patterns,
+            ("SECURITY:*", "POLICY:*"),
+        )
