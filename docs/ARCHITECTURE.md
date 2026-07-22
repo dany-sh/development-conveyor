@@ -25,6 +25,8 @@ The `KernelWorkflowBridge` is phase-sized. Its handler may produce mutations and
 
 Recovery first inspects immutable evidence and exact repository state. It can resume, finalize one already-created exact commit, supersede an interrupted recovery, block, or require a human decision. Stale lease archives use safe transaction identities, a controller-confined directory, no-follow descriptor access, and reject unsafe archive roots or targets. Migration imports legacy source bytes by fingerprint into a deterministic recovery transaction; dry-run never writes, and apply is idempotent.
 
+A terminal pre-mutation milestone-integration failure can produce a fresh integration plan only through a two-ref recovery contract. The configured milestone ref must still equal the failed transaction's exact starting snapshot, while exactly one self-identifying accepted feature ref must carry an immutable queue snapshot with `integration_pending`, matching branch and integration base, `accepted_commit: SELF`, pending integration, and complete acceptance evidence. The feature ref HEAD must be a non-merge commit whose sole parent is that exact milestone ref HEAD, proving one direct feature commit; it then resolves `SELF`. A failed session report may only corroborate that commit. Live queue reconciliation may meanwhile show the feature as `ready`, so recovered dispatch does not use the live queue as acceptance authority. Both refs are revalidated under the controller launch reservation immediately before the kernel starts a new writable transaction, and the terminal session is never resumed.
+
 ## Constraints
 
 - Production code uses only the Python standard library.

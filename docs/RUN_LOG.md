@@ -549,3 +549,40 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `m1_f005_two_ref_recovery_repair`
 - Safety and autonomy contracts unchanged: `true`
+
+### F005 two-ref failed-integration recovery repair — 2026-07-21
+
+- Recovery authority: a terminal pre-mutation integration failure now resolves the accepted commit only from the unique accepted feature ref whose immutable queue snapshot self-identifies the feature as `integration_pending`, binds the exact branch and milestone integration base, retains `accepted_commit: SELF`, records pending integration, and has complete tests/review/documentation acceptance evidence.
+- Independent refs: the configured milestone ref must equal the failed transaction's starting branch and HEAD. The accepted feature ref HEAD resolves `SELF` independently. The failed report corroborates transaction, session, repository, pre-mutation status, and accepted commit but cannot select the commit.
+- Dispatch: the live milestone queue may record the recovered feature as `ready`. Projected integration admits only the verified recovered identity without `select_integration`, then revalidates both refs under the launch reservation before the kernel begins. The old terminal session remains non-resumable.
+- Disposable integration evidence: a real synthetic two-ref topology with a live `ready` queue and accepted-ref `SELF` snapshot completed one fresh kernel integration through a fake launcher, preserved the immutable accepted ref, advanced only the disposable milestone ref, produced the combined accepted content, released its lease, and did not resume the old session.
+- Negative evidence: accepted-feature and milestone-ref drift both failed before a new ledger event; incomplete snapshot acceptance failed to recover; status, milestone dry-run, and consistency appended no recovery event and did not change the disposable repository.
+- Focused validation: `tests.test_projection_authority` passed 17/17, `tests.test_integration_gate_lifecycle` passed 4/4, `tests.test_milestone_integration_result_contract` passed 6/6, and `tests.test_two_ref_integration_recovery` passed 6/6, for 33/33 focused tests. Relevant `compileall` checks passed.
+- Live read-only evidence: Interview Companion status and milestone dry-run select F005 as a fresh `milestone_integration` from milestone `e07d8803fbe56bbbfb7430aeb19e888f3d7d06a7` and accepted feature ref `a1f2c8dd47aaa68580cd7dfc3dc6923e04469857`, with `old_session_resume=false`. Consistency returned `CONSISTENT` with no failed invariant. The application remained clean on `codex/m0-foundation`; both refs, HEAD, and the 21-line controller ledger SHA-256 remained unchanged. The real F005 integration was not run.
+
+### F005 two-ref ancestry review correction — 2026-07-21
+
+- Confirmed Medium finding: queue `integration_base_commit` agreement alone did not prove the accepted feature ref contained exactly one direct feature commit based on the verified milestone ref.
+- Correction: recovery now reads the accepted ref HEAD's parent list and requires exactly one parent equal to the independently verified milestone ref HEAD. Merge commits, multi-commit feature histories, root commits, and unrelated-parent histories fail closed.
+- Focused negatives: disposable multi-commit and unrelated-history feature refs each retained otherwise-valid SELF queue snapshots and matching reports, yet neither produced `integration_ready` nor appended a ledger event.
+- Review disposition: the confirmed Medium finding is corrected; bounded recheck has no remaining Critical, High, or Medium finding.
+
+### Model execution — 2026-07-22T01:40:51+00:00
+
+- Agent role: `test-engineer`
+- Effective model: `gpt-5.6-terra`
+- Effective reasoning effort: `high`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_f005_two_ref_ancestry_validation`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-22T01:40:51+00:00
+
+- Agent role: `adversarial-reviewer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `xhigh`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_f005_two_ref_bounded_medium_recheck`
+- Safety and autonomy contracts unchanged: `true`

@@ -827,6 +827,10 @@ class ConsistencyChecker:
                             recovery.get("checks")
                             if isinstance(recovery, dict) else None
                         )
+                        recovery_snapshot_checks = (
+                            recovery.get("snapshot_checks")
+                            if isinstance(recovery, dict) else None
+                        )
                         verified_fresh_recovery = bool(
                             isinstance(recovery, dict)
                             and recovery.get("classification")
@@ -836,6 +840,9 @@ class ConsistencyChecker:
                             and isinstance(recovery_checks, dict)
                             and recovery_checks
                             and all(recovery_checks.values())
+                            and isinstance(recovery_snapshot_checks, dict)
+                            and recovery_snapshot_checks
+                            and all(recovery_snapshot_checks.values())
                         )
                         recovered_branch_binding = bool(
                             verified_fresh_recovery
@@ -864,7 +871,14 @@ class ConsistencyChecker:
                             projected_accepted = observed_projection.get(
                                 "accepted_feature_commit"
                             )
-                            if (
+                            if verified_fresh_recovery:
+                                live_checks["planned_accepted_commit"] = bool(
+                                    recovered_branch_binding
+                                    and observed_executable.accepted_commit
+                                    == projected_accepted
+                                    == recovery.get("accepted_commit")
+                                )
+                            elif (
                                 planned_feature
                                 and planned_feature.get("accepted_commit") == "SELF"
                                 and isinstance(projected_accepted, str)

@@ -539,6 +539,33 @@ class CycleEngine:
 
         if projection.get("active_transaction") is not None or projection.get("current_state") != "validation_failed":
             return projection
+        candidate = self._verified_failed_integration_recovery(project, projection)
+        if candidate is None:
+            return projection
+        recovered = dict(projection)
+        recovered.update({
+            "current_state": "integration_ready",
+            "current_feature": candidate["feature_id"],
+            "selected_next_feature": candidate["feature_id"],
+            "accepted_feature_commit": candidate["accepted_commit"],
+            "selected_feature_starting_commit": candidate["starting_commit"],
+            "feature_branch": candidate["feature_branch"],
+            "milestone_branch": candidate["milestone_branch"],
+            "allowed_next_action": "milestone_integration",
+            "required_lease": "integration_writer",
+            "session_resume_eligible": False,
+            "failed_integration_recovery": candidate,
+        })
+        recovered["projection_fingerprint"] = projection_fingerprint(recovered)
+        return recovered
+
+    def _verified_failed_integration_recovery(
+        self, project: Project, projection: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Resolve a failed integration only from two independently verified refs."""
+
+        if projection.get("active_transaction") is not None:
+            return None
         failed = next(
             (
                 item for item in reversed(projection.get("transactions", []))
@@ -548,12 +575,12 @@ class CycleEngine:
             None,
         )
         if not isinstance(failed, dict):
-            return projection
+            return None
         run_id = failed.get("run_id")
         feature_id = failed.get("feature_id")
         snapshot = failed.get("starting_snapshot")
         if not isinstance(run_id, str) or not isinstance(feature_id, str) or not isinstance(snapshot, dict):
-            return projection
+            return None
         report_path = self._report_path(
             self.configuration.owned_path(self.configuration.conveyor["report_directory"]),
             run_id,
@@ -562,11 +589,71 @@ class CycleEngine:
         try:
             report = json.loads(report_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return projection
+            return None
         inspector = RepositoryInspector(project.repository)
-        queue = FeatureQueue.from_location(project.repository, project.queue_location)
-        feature = queue.feature(feature_id)
-        accepted = report.get("accepted_commit")
+        milestone_branch = project.milestone_branch
+        milestone_head = (
+            inspector.rev_parse(milestone_branch, check=False)
+            if isinstance(milestone_branch, str) else None
+        )
+
+        snapshot_candidates: list[dict[str, Any]] = []
+        for branch in inspector.local_branches():
+            if branch == milestone_branch:
+                continue
+            branch_head = inspector.rev_parse(branch, check=False)
+            if not isinstance(branch_head, str):
+                continue
+            parents = inspector.git([
+                "rev-list", "--parents", "-n", "1", branch_head,
+            ]).stdout.split()
+            queue_text = inspector.file_at_commit(branch_head, project.queue_location)
+            if queue_text is None:
+                continue
+            try:
+                snapshot_queue = FeatureQueue(json.loads(queue_text))
+            except (json.JSONDecodeError, QueueError):
+                continue
+            snapshot_feature = snapshot_queue.feature(feature_id)
+            snapshot_milestone = snapshot_queue.milestone(project.active_milestone or "")
+            acceptance = (
+                snapshot_feature.get("acceptance")
+                if isinstance(snapshot_feature, dict) else None
+            )
+            snapshot_checks = {
+                "feature_status": isinstance(snapshot_feature, dict)
+                and snapshot_feature.get("status") == "integration_pending",
+                "feature_branch": isinstance(snapshot_feature, dict)
+                and snapshot_feature.get("branch") == branch,
+                "feature_milestone": isinstance(snapshot_feature, dict)
+                and snapshot_feature.get("milestone")
+                == (snapshot_milestone or {}).get("id"),
+                "integration_base": isinstance(snapshot_feature, dict)
+                and snapshot_feature.get("integration_base_commit") == milestone_head,
+                "single_direct_parent": parents == [branch_head, milestone_head],
+                "accepted_self": isinstance(snapshot_feature, dict)
+                and snapshot_feature.get("accepted_commit") == "SELF",
+                "integration_pending": isinstance(snapshot_feature, dict)
+                and snapshot_feature.get("integration_status") == "pending",
+                "acceptance_evidence": isinstance(acceptance, dict)
+                and all(
+                    acceptance.get(key) is True
+                    for key in ("tests_passed", "review_passed", "documentation_current")
+                ),
+                "milestone_branch": isinstance(snapshot_milestone, dict)
+                and snapshot_milestone.get("integration_branch") == milestone_branch,
+            }
+            if all(snapshot_checks.values()):
+                snapshot_candidates.append({
+                    "feature_branch": branch,
+                    "accepted_commit": branch_head,
+                    "snapshot_checks": snapshot_checks,
+                })
+
+        if len(snapshot_candidates) != 1:
+            return None
+        snapshot_candidate = snapshot_candidates[0]
+        accepted = snapshot_candidate["accepted_commit"]
         old_sessions = list(failed.get("session_ids") or [])
         report_session = report.get("session_id")
         report_commands = report.get("post_integration_commands") or []
@@ -574,11 +661,6 @@ class CycleEngine:
             report.get("terminal_marker_found") is True
             or "CONVEYOR_TRANSACTION_RESULT=" in str(report.get("redacted_stdout") or "")
         )
-        exact_feature_branches = [
-            branch for branch in inspector.local_branches()
-            if branch != project.milestone_branch
-            and inspector.rev_parse(branch, check=False) == accepted
-        ]
         checks = {
             "terminal_failure": failed.get("terminal_classification") in {
                 "VALIDATION_FAILED", "TERMINAL_INTEGRATION_FAILURE"
@@ -589,16 +671,15 @@ class CycleEngine:
             "report_repository": Path(str(report.get("working_directory") or "")).resolve()
             == project.repository.resolve(),
             "session_identity": len(old_sessions) == 1 and report_session == old_sessions[0],
-            "accepted_commit": isinstance(accepted, str)
-            and accepted != "SELF"
-            and inspector.ref_exists(accepted),
-            "exact_feature_branch": len(exact_feature_branches) == 1,
-            "feature_ready": isinstance(feature, dict)
-            and feature.get("status") in {"ready", "accepted", "integration_pending"}
-            and feature.get("milestone") == project.active_milestone,
-            "milestone_start": snapshot.get("branch") == project.milestone_branch
-            and snapshot.get("head") == inspector.head
-            and inspector.current_branch == project.milestone_branch,
+            "report_accepted_corroborates": report.get("accepted_commit") == accepted,
+            "feature_ref_head": inspector.rev_parse(
+                snapshot_candidate["feature_branch"], check=False
+            ) == accepted,
+            "milestone_ref_head": isinstance(milestone_branch, str)
+            and snapshot.get("branch") == milestone_branch
+            and snapshot.get("head") == milestone_head,
+            "milestone_checkout": inspector.current_branch == milestone_branch
+            and inspector.head == milestone_head,
             "repository_clean": inspector.is_clean,
             "no_git_operation": not any(inspector.git_operation_state().values()),
             "no_writer_lease": not inspector.writer_lock_path(
@@ -615,33 +696,24 @@ class CycleEngine:
             ),
         }
         if not all(checks.values()):
-            return projection
-        recovered = dict(projection)
-        recovered.update({
-            "current_state": "integration_ready",
-            "current_feature": feature_id,
-            "selected_next_feature": feature_id,
-            "accepted_feature_commit": accepted,
-            "selected_feature_starting_commit": snapshot.get("head"),
-            "feature_branch": exact_feature_branches[0],
-            "milestone_branch": project.milestone_branch,
-            "allowed_next_action": "milestone_integration",
-            "required_lease": "integration_writer",
-            "session_resume_eligible": False,
-            "failed_integration_recovery": {
-                "classification": "fresh_after_terminal_pre_mutation_failure",
-                "failed_transaction_id": failed.get("transaction_id"),
-                "failed_run_id": run_id,
-                "failed_session_id": old_sessions[0],
-                "accepted_commit": accepted,
-                "starting_commit": snapshot.get("head"),
-                "fresh_transaction": True,
-                "old_session_resume": False,
-                "checks": checks,
-            },
-        })
-        recovered["projection_fingerprint"] = projection_fingerprint(recovered)
-        return recovered
+            return None
+        return {
+            "classification": "fresh_after_terminal_pre_mutation_failure",
+            "failed_transaction_id": failed.get("transaction_id"),
+            "failed_run_id": run_id,
+            "failed_session_id": old_sessions[0],
+            "feature_id": feature_id,
+            "accepted_commit": accepted,
+            "accepted_commit_source": "immutable_feature_ref_head",
+            "feature_branch": snapshot_candidate["feature_branch"],
+            "feature_queue_snapshot": project.queue_location,
+            "starting_commit": milestone_head,
+            "milestone_branch": milestone_branch,
+            "fresh_transaction": True,
+            "old_session_resume": False,
+            "snapshot_checks": snapshot_candidate["snapshot_checks"],
+            "checks": checks,
+        }
 
     def _validate_projected_dispatch(
         self,
@@ -705,6 +777,11 @@ class CycleEngine:
                     )
             elif workflow_type == WorkflowType.MILESTONE_INTEGRATION:
                 selection = queue.select_integration(project.active_milestone or "")
+                recovery = projection.get("failed_integration_recovery")
+                verified_recovery = (
+                    self._verified_failed_integration_recovery(project, projection)
+                    if isinstance(recovery, dict) else None
+                )
                 if selection is None and allow_unmaterialized_integration_queue:
                     if (
                         inspector.current_branch != executable.feature_branch
@@ -712,6 +789,22 @@ class CycleEngine:
                     ):
                         raise ProjectionError(
                             "accepted feature snapshot no longer matches the integration plan"
+                        )
+                    return projection, executable
+                if selection is None and verified_recovery is not None:
+                    recovered_identity = {
+                        "feature_id": executable.feature_id,
+                        "accepted_commit": executable.accepted_commit,
+                        "feature_branch": executable.feature_branch,
+                        "starting_commit": executable.starting_commit,
+                        "milestone_branch": executable.milestone_branch,
+                    }
+                    if any(
+                        verified_recovery.get(key) != value
+                        for key, value in recovered_identity.items()
+                    ):
+                        raise ProjectionError(
+                            "recovered integration refs no longer match the execution plan"
                         )
                     return projection, executable
                 if (
@@ -4426,9 +4519,18 @@ class CycleEngine:
         inspector = RepositoryInspector(project.repository)
         queue = FeatureQueue.from_location(project.repository, project.queue_location)
         selection = queue.select_integration(project.active_milestone or "")
-        if selection is None:
+        recovery = projection.get("failed_integration_recovery")
+        verified_recovery = (
+            self._verified_failed_integration_recovery(project, projection)
+            if selection is None and isinstance(recovery, dict) else None
+        )
+        if selection is None and verified_recovery is None:
             raise RecoveryError("projected integration has no unique active-milestone candidate")
-        if projection.get("current_feature") not in {None, selection.feature_id}:
+        feature_id = (
+            selection.feature_id if selection is not None
+            else str(verified_recovery["feature_id"])
+        )
+        if projection.get("current_feature") not in {None, feature_id}:
             raise RecoveryError("projected feature contradicts the unique integration candidate")
         accepted = executable.accepted_commit
         if (
@@ -4464,7 +4566,7 @@ class CycleEngine:
             raise RecoveryError("accepted integration commit has no changed paths")
         adapter = MilestoneIntegrationAdapter(
             allowed_paths=accepted_paths,
-            commit_subject=f"factory: integrate {selection.feature_id}",
+            commit_subject=f"factory: integrate {feature_id}",
             next_state="feature_integrated",
         )
         kernel = WorkflowKernel(
@@ -4476,7 +4578,7 @@ class CycleEngine:
         reservation.acquire(make_lock_record(
             project_id=project.project_id,
             repository_identity=identity["repository_id"], run_id=run_id,
-            current_feature=selection.feature_id,
+            current_feature=feature_id,
             current_phase="projected_integration",
         ))
         try:
@@ -4494,7 +4596,7 @@ class CycleEngine:
             transaction = kernel.begin_for_branch(
                 workflow_type=WorkflowType.MILESTONE_INTEGRATION,
                 target_branch=str(project.milestone_branch),
-                milestone=project.active_milestone, feature_id=selection.feature_id,
+                milestone=project.active_milestone, feature_id=feature_id,
                 run_id=run_id, policy=adapter.policy,
                 expected_starting_branch=executable.milestone_branch,
                 expected_starting_head=executable.starting_commit,
@@ -4502,7 +4604,7 @@ class CycleEngine:
             kernel.acquire_lease(); kernel.prepare_starting_branch(); kernel.capture_snapshot()
             request = SessionRequest(
                 action="milestone_integration", project=project, run_id=run_id,
-                mode=mode, feature=selection.feature_id,
+                mode=mode, feature=feature_id,
                 transaction_id=transaction.transaction_id,
                 repository_identity=identity["repository_id"],
                 starting_branch=transaction.starting_branch,
@@ -4516,7 +4618,7 @@ class CycleEngine:
             )
             if result.transaction_envelope is None:
                 raise SessionError(self._session_failure_message(
-                    project, run_id, result, "integrating", selection.feature_id
+                    project, run_id, result, "integrating", feature_id
                 ))
             envelope = SessionResultEnvelope.from_dict(result.transaction_envelope)
             blocked = self._route_kernel_result(kernel, adapter, envelope)
@@ -4545,7 +4647,7 @@ class CycleEngine:
             return {
                 "project_id": project.project_id,
                 "outcome": "feature_integrated",
-                "feature": selection.feature_id,
+                "feature": feature_id,
                 "accepted_commit": accepted,
                 "integrated_commit": integrated,
                 "kernel_projection": completion["projection"],

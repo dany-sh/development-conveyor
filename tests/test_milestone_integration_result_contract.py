@@ -208,7 +208,22 @@ class MilestoneIntegrationResultContractTests(unittest.TestCase):
         starting = git(self.repository, "rev-parse", "HEAD")
         git(self.repository, "switch", "-c", "codex/F001-accepted")
         (self.repository / "app.txt").write_text("baseline\naccepted\n", encoding="utf-8")
-        git(self.repository, "add", "app.txt")
+        queue_path = self.repository / self.project.queue_location
+        queue = json.loads(queue_path.read_text(encoding="utf-8"))
+        queue["features"][0].update({
+            "status": "integration_pending",
+            "branch": "codex/F001-accepted",
+            "integration_base_commit": starting,
+            "accepted_commit": "SELF",
+            "integration_status": "pending",
+            "acceptance": {
+                "tests_passed": True,
+                "review_passed": True,
+                "documentation_current": True,
+            },
+        })
+        write_json(queue_path, queue)
+        git(self.repository, "add", "app.txt", self.project.queue_location)
         git(self.repository, "commit", "-m", "F001: accepted")
         accepted = git(self.repository, "rev-parse", "HEAD")
         git(self.repository, "switch", "codex/m0-foundation")
@@ -263,6 +278,8 @@ class MilestoneIntegrationResultContractTests(unittest.TestCase):
         self.assertTrue(evidence["fresh_transaction"])
         self.assertFalse(evidence["old_session_resume"])
         self.assertEqual(session_id, evidence["failed_session_id"])
+        self.assertEqual("immutable_feature_ref_head", evidence["accepted_commit_source"])
+        self.assertTrue(all(evidence["snapshot_checks"].values()))
 
 
 if __name__ == "__main__":
