@@ -613,20 +613,18 @@ class CycleEngine:
         project: Project,
         projection: dict[str, Any],
     ) -> dict[str, Any] | None:
-        if (
-            projection.get("current_state") != "validation_failed"
-            or projection.get("active_transaction") is not None
-        ):
+        if projection.get("active_transaction") is not None or projection.get("current_state") == "feature_ready":
             return None
-        latest = max(
-            projection.get("transactions") or [],
-            key=lambda item: int(item.get("last_sequence") or 0),
-            default={},
-        )
+        latest = next((item for item in reversed(projection.get("transactions") or [])
+            if item.get("workflow_type") == WorkflowType.QUEUE_RECONCILIATION.value
+            and item.get("state") == "terminal_failure"
+            and item.get("terminal_classification") in {"PLANNING_VALIDATION_FAILED", "PLANNING_SEMANTIC_CONFLICT"}), {})
         if (
             latest.get("workflow_type") != WorkflowType.QUEUE_RECONCILIATION.value
             or latest.get("state") != "terminal_failure"
-            or latest.get("terminal_classification") != "PLANNING_VALIDATION_FAILED"
+            or latest.get("terminal_classification") not in {
+                "PLANNING_VALIDATION_FAILED", "PLANNING_SEMANTIC_CONFLICT",
+            }
         ):
             return None
         original_transaction_id = latest.get("transaction_id")
@@ -646,7 +644,9 @@ class CycleEngine:
         except (OSError, json.JSONDecodeError) as exc:
             raise RecoveryError("terminal planning recovery lacks its session report") from exc
         recorded_report = planning_transaction.get("reconciliation_report")
-        if not isinstance(recorded_report, str) or Path(recorded_report).resolve() != session_path:
+        if recorded_report is not None and (
+            not isinstance(recorded_report, str) or Path(recorded_report).resolve() != session_path
+        ):
             raise RecoveryError("persisted planning transaction points to a different session report")
         inspector = RepositoryInspector(project.repository)
         identity = inspector.identity()
@@ -1199,12 +1199,13 @@ class CycleEngine:
             if planning_recovery is not None:
                 plan.update({
                     "current_state": "validation_failed",
-                    "workflow_type": "queue_reconciliation recovery/finalization",
+                    "workflow_type": planning_recovery["workflow_type"],
                     "transaction_mode": "recovery",
                     "proposed_next_action": "planning_finalization",
                     "next_action": "planning_finalization",
                     "original_transaction_id": planning_recovery["original_transaction_id"],
                     "starting_commit": planning_recovery["starting_commit"],
+                    "existing_commit": planning_recovery.get("existing_commit"),
                     "existing_planning_changes": planning_recovery["existing_planning_changes"],
                     "selected_feature": planning_recovery["selected_feature"],
                     "next_feature_selection": {
@@ -1218,7 +1219,7 @@ class CycleEngine:
                     "execution": {"models_planned": 0},
                     "deterministic_only": True,
                     "application_mutation_expected": True,
-                    "expected_mutation": "commit existing validated planning metadata",
+                    "expected_mutation": planning_recovery["expected_mutation"],
                     "feature_factory_would_launch": False,
                     "milestone_integrator_would_launch": False,
                     "planning_content_regeneration_would_run": False,
@@ -5127,12 +5128,14 @@ class CycleEngine:
         ))
         selected_feature = str(expected_plan["selected_feature"])
         expected_paths = tuple(expected_plan["existing_planning_changes"]["paths"])
+        existing_commit = expected_plan.get("existing_commit")
+        committed_recovery = isinstance(existing_commit, str)
         adapter = RecoveryAdapter(
             allowed_paths=expected_paths,
             allow_untracked=False,
             commit_subject=planning_commit_subject(effective, selected_feature),
             next_state="feature_ready",
-            require_clean_start=False,
+            require_clean_start=committed_recovery,
         )
         kernel = WorkflowKernel(
             project=effective,
@@ -5168,14 +5171,14 @@ class CycleEngine:
                     "child_sessions_planned": 0,
                 },
                 expected_starting_branch=expected_plan["starting_branch"],
-                expected_starting_head=expected_plan["starting_commit"],
+                expected_starting_head=(existing_commit if committed_recovery else expected_plan["starting_commit"]),
             )
             kernel.acquire_lease()
             kernel.capture_snapshot()
             kernel.checkpoint("planning_finalization_recovery_verified", {
                 "recovered_transaction_id": expected_plan["original_transaction_id"],
                 "changed_paths": list(expected_paths),
-                "diff_fingerprint": expected_plan["mutation_fingerprint"],
+                "diff_fingerprint": expected_plan.get("mutation_fingerprint") or expected_plan.get("existing_commit"),
                 "selected_feature": selected_feature,
                 "model_session_launched": False,
             })
@@ -5185,33 +5188,31 @@ class CycleEngine:
                 )
             except (OSError, json.JSONDecodeError) as exc:
                 raise RecoveryError("planning recovery session report changed") from exc
-            validation = validate_planning_changes(
-                effective,
-                inspector,
-                session_report,
-                run_id=expected_plan["original_run_id"],
-                starting_head=expected_plan["starting_commit"],
-                expected_diff_fingerprint=expected_plan["mutation_fingerprint"],
-                expected_changed_paths=list(expected_paths),
-                expected_session_id=expected_plan["original_session_id"],
-                expected_transaction_id=expected_plan["original_transaction_id"],
-            )
-            inventory = validation.get("inventory_validation") or {}
-            validation_warnings = list(inventory.get("nonfatal_warnings") or [])
-            commit = kernel.finalize_deterministic_planning_recovery(
-                original_transaction_id=expected_plan["original_transaction_id"],
-                changed_paths=expected_paths,
-                expected_diff_fingerprint=expected_plan["mutation_fingerprint"],
-                plan_fingerprint=expected_plan["plan_fingerprint"],
-                validation_evidence={
-                    "commands": [
-                        {"validator": inventory.get("validator"), "exit_code": inventory.get("exit_code")},
-                        {"validator": "git diff --check", "exit_code": 0},
-                    ],
-                    "warnings": validation_warnings,
-                },
-                selected_feature=selected_feature,
-            )
+            if committed_recovery:
+                inventory = expected_plan.get("inventory_validation") or {}
+                validation_warnings = list(inventory.get("nonfatal_warnings") or [])
+                validation = {"inventory_validation": inventory, "queue_validation_evidence": expected_plan.get("queue_validation_evidence")}
+                commit = kernel.adopt_committed_planning_recovery(
+                    original_transaction_id=expected_plan["original_transaction_id"], commit=existing_commit,
+                    expected_parent=expected_plan["starting_commit"], expected_paths=expected_paths,
+                    expected_subject="factory: reconcile M0 queue", plan_fingerprint=expected_plan["plan_fingerprint"],
+                    selected_feature=selected_feature,
+                )
+            else:
+                validation = validate_planning_changes(
+                    effective, inspector, session_report, run_id=expected_plan["original_run_id"],
+                    starting_head=expected_plan["starting_commit"], expected_diff_fingerprint=expected_plan["mutation_fingerprint"],
+                    expected_changed_paths=list(expected_paths), expected_session_id=expected_plan["original_session_id"],
+                    expected_transaction_id=expected_plan["original_transaction_id"],
+                )
+                inventory = validation.get("inventory_validation") or {}
+                validation_warnings = list(inventory.get("nonfatal_warnings") or [])
+                commit = kernel.finalize_deterministic_planning_recovery(
+                    original_transaction_id=expected_plan["original_transaction_id"], changed_paths=expected_paths,
+                    expected_diff_fingerprint=expected_plan["mutation_fingerprint"], plan_fingerprint=expected_plan["plan_fingerprint"],
+                    validation_evidence={"commands": [{"validator": inventory.get("validator"), "exit_code": inventory.get("exit_code")}, {"validator": "git diff --check", "exit_code": 0}], "warnings": validation_warnings},
+                    selected_feature=selected_feature,
+                )
             committed = {
                 **validation,
                 "status": "planning_changes_committed",
@@ -5293,6 +5294,17 @@ class CycleEngine:
                 kernel_owned=True,
                 kernel_projection=projection_evidence,
             )
+            cycle_path = inspector.cycle_state_path()
+            cycle = self.cycle_store.read(cycle_path) or {}
+            cycle.update({
+                "current_feature": selected_feature,
+                "current_phase": "feature_ready",
+                "kernel_ledger_sequence": completed["projection"]["ledger_sequence"],
+                "kernel_ledger_fingerprint": completed["projection"]["ledger_fingerprint"],
+                "kernel_projection_fingerprint": completed["projection"]["projection_fingerprint"],
+                "latest_recovery_transaction_id": transaction.transaction_id,
+            })
+            self.cycle_store.write(cycle_path, cycle)
             return {
                 "project_id": project.project_id,
                 "outcome": "planning_recovery_committed",

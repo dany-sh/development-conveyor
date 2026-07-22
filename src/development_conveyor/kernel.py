@@ -915,6 +915,50 @@ class WorkflowKernel:
         transaction.next_project_state = "feature_ready"
         return commit
 
+    def adopt_committed_planning_recovery(
+        self, *, original_transaction_id: str, commit: str, expected_parent: str,
+        expected_paths: tuple[str, ...], expected_subject: str, plan_fingerprint: str,
+        selected_feature: str,
+    ) -> str:
+        """Record fresh terminal evidence for an existing, verified planning commit."""
+        transaction = self._require()
+        if transaction.workflow_type != WorkflowType.RECOVERY or transaction.current_state != TransactionState.ACTIVE:
+            raise TransactionError("committed planning recovery requires an active recovery transaction")
+        if transaction.session_ids or self.inspector.head != commit or self.inspector.current_branch != transaction.starting_branch:
+            raise TransactionError("committed planning recovery topology changed")
+        if self.inspector.rev_parse(f"{commit}^", check=False) != expected_parent:
+            raise TransactionError("committed planning recovery parent changed")
+        if self.inspector.commit_subject(commit) != expected_subject or not self.inspector.is_clean:
+            raise TransactionError("committed planning recovery commit or cleanliness changed")
+        paths = tuple(sorted(self.inspector.changed_paths(commit)))
+        if paths != tuple(sorted(expected_paths)):
+            raise TransactionError("committed planning recovery paths changed")
+        self._revalidate_lease()
+        transaction.transition(TransactionState.RESULT_PENDING)
+        for event_type, payload in (
+            ("DeterministicExecutionStarted", {"plan_fingerprint": plan_fingerprint, "model_session_launched": False, "recovered_transaction_id": original_transaction_id}),
+            ("DeterministicResultAccepted", {"classification": "RECOVERY_APPLIED", "current_commit": commit, "changed_paths": list(paths), "model_session_launched": False}),
+            ("ValidationStarted", {"changed_paths": list(paths), "executor": "committed_planning_finalization"}),
+            ("ValidationPassed", {"commands": [], "preserved_existing_commit": commit}),
+        ):
+            if event_type == "DeterministicResultAccepted":
+                transaction.transition(TransactionState.VALIDATING)
+            self.ledger.append(event_type=event_type, transaction_id=transaction.transaction_id,
+                workflow_type=transaction.workflow_type, payload=payload)
+        transaction.transition(TransactionState.FINALIZING)
+        self.final_commit = commit
+        self.ledger.append(event_type="CommitFinalized", transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type, payload={"commit": commit, "parent": expected_parent,
+                "changed_paths": list(paths), "diff_fingerprint": self.inspector.patch_fingerprint(commit),
+                "commit_subject": expected_subject, "reused_existing_commit": True,
+                "recovered_transaction_id": original_transaction_id})
+        self.ledger.append(event_type="RecoveryApplied", transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type, payload={"recovered_transaction_id": original_transaction_id,
+                "classification": "queue_reconciliation_committed_finalization_recovery",
+                "selected_feature": selected_feature, "model_session_launched": False})
+        transaction.next_project_state = "feature_ready"
+        return commit
+
     def finalize_deterministic_feature_recovery(
         self,
         *,

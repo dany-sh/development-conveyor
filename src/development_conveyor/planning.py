@@ -376,6 +376,164 @@ def _warning_only_inventory_failure(transaction: dict[str, Any]) -> dict[str, An
     return {"exit_code": 0, "errors": [], "warnings": warnings}
 
 
+def normalize_queue_validation_evidence(value: dict[str, Any]) -> dict[str, Any]:
+    """Canonicalize equivalent structured and deterministic queue evidence."""
+    if not isinstance(value, dict):
+        raise RecoveryError("queue validation evidence is not an object")
+
+    def count(name: str) -> int | None:
+        item = value.get(name)
+        if item is None:
+            return None
+        if isinstance(item, bool):
+            raise RecoveryError(f"queue validation {name} is not a count")
+        if isinstance(item, int) and item >= 0:
+            return item
+        if isinstance(item, list):
+            return len(item)
+        raise RecoveryError(f"queue validation {name} is malformed")
+
+    def feature_ids(*names: str) -> list[str] | None:
+        present = next((name for name in names if name in value), None)
+        if present is None:
+            return None
+        items = value[present]
+        if not isinstance(items, list) or not all(isinstance(item, str) and item for item in items):
+            raise RecoveryError(f"queue validation {present} is malformed")
+        return sorted(set(items))
+
+    def integer(*names: str) -> int | None:
+        present = next((name for name in names if name in value), None)
+        if present is None:
+            return None
+        item = value[present]
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            raise RecoveryError(f"queue validation {present} is malformed")
+        return item
+
+    ok = value.get("ok", value.get("valid"))
+    if ok is not None and not isinstance(ok, bool):
+        raise RecoveryError("queue validation ok is malformed")
+    usage = value.get("project_usage")
+    if usage is not None and not isinstance(usage, str):
+        raise RecoveryError("queue validation project_usage is malformed")
+    return {
+        "ok": ok,
+        "errors": count("errors"),
+        "warnings": count("warnings"),
+        "ready_features": feature_ids("ready_features", "ready"),
+        "active_features": feature_ids("active_features", "active"),
+        "feature_count": integer("feature_count"),
+        "milestone_count": integer("milestone_count"),
+        "configured_milestone_feature_count": integer("feature_count_in_configured_milestone"),
+        "project_usage": usage,
+    }
+
+
+def compare_queue_validation_evidence(
+    structured: dict[str, Any], deterministic: dict[str, Any]
+) -> dict[str, Any]:
+    """Fail closed only on a semantic disagreement, preserving both forms."""
+    normalized_structured = normalize_queue_validation_evidence(structured)
+    normalized_deterministic = normalize_queue_validation_evidence(deterministic)
+    disagreements: list[str] = []
+    for name in (
+        "ok", "errors", "warnings", "ready_features", "active_features",
+        "feature_count", "milestone_count", "configured_milestone_feature_count",
+        "project_usage",
+    ):
+        left, right = normalized_structured[name], normalized_deterministic[name]
+        if left is not None and right is not None and left != right:
+            disagreements.append(name)
+    if normalized_structured["errors"] not in {None, 0} or normalized_deterministic["errors"] not in {None, 0}:
+        disagreements.append("nonzero_errors")
+    if disagreements:
+        raise RecoveryError(
+            "queue validation evidence disagrees semantically: " + ", ".join(sorted(set(disagreements)))
+        )
+    return {
+        "raw_structured": structured,
+        "raw_deterministic": deterministic,
+        "normalized_structured": normalized_structured,
+        "normalized_deterministic": normalized_deterministic,
+    }
+
+
+def _inspect_committed_planning_finalization_recovery(
+    project: Project, inspector: RepositoryInspector, *, transaction_events: list[dict[str, Any]],
+    projection: dict[str, Any], original_transaction_id: str, planning_transaction: dict[str, Any],
+    session_report: dict[str, Any], writer_lease_exists: bool,
+) -> dict[str, Any]:
+    """Recognize a committed reconciliation blocked only before terminal semantics."""
+    start, session_event, finalized, blocked, projected = (
+        transaction_events[0], transaction_events[4], transaction_events[9], transaction_events[10], transaction_events[12]
+    )
+    start_payload = start.get("payload") or {}
+    final_payload = finalized.get("payload") or {}
+    blocked_payload = blocked.get("payload") or {}
+    snapshot = blocked_payload.get("terminal_snapshot") or {}
+    run_id = start_payload.get("run_id")
+    session_id = (session_event.get("payload") or {}).get("session_id")
+    starting_head = start_payload.get("starting_head")
+    starting_branch = start_payload.get("starting_branch")
+    existing_commit = final_payload.get("commit")
+    if not all(isinstance(item, str) and item for item in (run_id, session_id, starting_head, starting_branch, existing_commit)):
+        raise RecoveryError("committed planning transaction identity is incomplete")
+    report_evidence = validate_reconciliation_report(session_report, project=project, run_id=run_id,
+        expected_session_id=session_id, expected_transaction_id=original_transaction_id)
+    envelope = session_report.get("structured_result")
+    if not isinstance(envelope, dict):
+        raise RecoveryError("committed planning session lacks its typed result")
+    paths = sorted(final_payload.get("changed_paths") or [])
+    expected_paths = sorted(planning_transaction.get("changed_paths") or [])
+    latest = next((item for item in reversed(projection.get("transactions") or [])
+        if item.get("transaction_id") == original_transaction_id), {})
+    checks = {
+        "latest_transaction_is_original": latest.get("transaction_id") == original_transaction_id,
+        "terminal_planning_semantic_block": (latest.get("workflow_type") == "queue_reconciliation" and latest.get("state") == "terminal_failure"),
+        "branch": inspector.current_branch == starting_branch == project.milestone_branch,
+        "head": inspector.head == existing_commit,
+        "parent": inspector.rev_parse(f"{existing_commit}^", check=False) == starting_head == final_payload.get("parent"),
+        "subject": inspector.commit_subject(existing_commit) == "factory: reconcile M0 queue" == final_payload.get("commit_subject"),
+        "changed_paths": paths == expected_paths == sorted(envelope.get("changed_paths") or []) == inspector.changed_paths(existing_commit),
+        "exact_allowed_path_count": len(paths) == 7,
+        "planning_paths_only": bool(paths) and all(allowed_planning_path(path) for path in paths),
+        "repository_clean": inspector.is_clean,
+        "writer_lease_absent": writer_lease_exists is False,
+        "terminal_snapshot": snapshot.get("branch") == starting_branch and snapshot.get("head") == existing_commit,
+        "report_identity": (session_report.get("result_classification") == "RECONCILED_READY_WORK" and envelope.get("starting_commit") == starting_head),
+        "planning_transaction_identity": (planning_transaction.get("run_id") == run_id and planning_transaction.get("session_id") == session_id and planning_transaction.get("planning_result_commit") == existing_commit),
+        "terminal_projection": (projected.get("payload") or {}).get("current_state") == "validation_failed",
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise RecoveryError("committed planning finalization topology disagrees: " + ", ".join(failed))
+    queue = FeatureQueue.from_location(project.repository, project.queue_location)
+    selection = _selected_feature_evidence(project, queue, report_evidence["classification"])
+    inventory = _inventory_validation(project)
+    comparison = compare_queue_validation_evidence(
+        (report_evidence.get("structured_result") or {}).get("queue_validation") or {}, inventory
+    )
+    if selection["selected_feature"] != "F004":
+        raise RecoveryError("committed planning recovery did not select the sole ready feature")
+    return {
+        "schema_version": 1, "current_state": "validation_failed",
+        "workflow_type": "queue reconciliation committed-finalization recovery",
+        "transaction_mode": "recovery", "original_transaction_id": original_transaction_id,
+        "original_run_id": run_id, "original_session_id": session_id,
+        "starting_branch": starting_branch, "starting_commit": starting_head,
+        "existing_commit": existing_commit, "existing_planning_changes": {"count": len(paths), "paths": paths},
+        "result_classification": report_evidence["terminal_classification"], "selected_feature": "F004",
+        "ready_features": selection["ready_features"], "checks": checks,
+        "queue_validation_evidence": comparison, "inventory_validation": inventory,
+        "model_sessions_that_would_launch": [], "child_sessions_that_would_launch": [],
+        "execution": {"models_planned": 0}, "deterministic_only": True,
+        "application_mutation_expected": False,
+        "expected_mutation": "ledger terminal recovery evidence and local cycle-cache rebinding only",
+        "feature_factory_would_launch": False, "milestone_integrator_would_launch": False,
+    }
+
+
 def inspect_planning_finalization_recovery(
     project: Project,
     inspector: RepositoryInspector,
@@ -394,6 +552,17 @@ def inspect_planning_finalization_recovery(
         if event.get("transaction_id") == original_transaction_id
     ]
     event_types = [event.get("event_type") for event in transaction_events]
+    committed_event_types = [
+        "TransactionStarted", "LeaseAcquired", "SnapshotCaptured", "CheckpointRecorded", "SessionLaunched",
+        "SessionResultAccepted", "ChangesDetected", "ValidationStarted", "ValidationPassed", "CommitFinalized",
+        "TransactionBlocked", "LeaseReleased", "ProjectionUpdated",
+    ]
+    if event_types == committed_event_types:
+        return _inspect_committed_planning_finalization_recovery(
+            project, inspector, transaction_events=transaction_events, projection=projection,
+            original_transaction_id=original_transaction_id, planning_transaction=planning_transaction,
+            session_report=session_report, writer_lease_exists=writer_lease_exists,
+        )
     expected_event_types = [
         "TransactionStarted",
         "LeaseAcquired",
@@ -674,6 +843,10 @@ def validate_planning_changes(
     classification = report_evidence["classification"]
     selection = _selected_feature_evidence(project, queue, classification)
     inventory = _inventory_validation(project)
+    queue_comparison = compare_queue_validation_evidence(
+        (report_evidence.get("structured_result") or {}).get("queue_validation") or {},
+        inventory,
+    )
     diff_check = _diff_check(project)
     semantic = _semantic_document_agreement(project, changed_paths, selection["selected_feature"])
     run_log = project.repository / "docs/RUN_LOG.md"
@@ -707,6 +880,7 @@ def validate_planning_changes(
         "untracked_file_fingerprint": stable_fingerprint(untracked),
         "report_validation": report_evidence["checks"],
         "inventory_validation": inventory,
+        "queue_validation_evidence": queue_comparison,
         "diff_check": diff_check,
         "semantic_agreement": semantic,
         "model_evidence": model_records,
@@ -743,6 +917,10 @@ def validate_planning_noop(
         project, queue, report_evidence["classification"]
     )
     inventory = _inventory_validation(project)
+    queue_comparison = compare_queue_validation_evidence(
+        (report_evidence.get("structured_result") or {}).get("queue_validation") or {},
+        inventory,
+    )
     return {
         "schema_version": 1,
         "phase": "queue_reconciliation",
@@ -764,6 +942,7 @@ def validate_planning_noop(
         "queue_fingerprint": queue_fingerprint(project),
         "report_validation": report_evidence["checks"],
         "inventory_validation": inventory,
+        "queue_validation_evidence": queue_comparison,
         **selection,
         "planning_commit_would_be_created": False,
         "planning_commit_status": "not_required",
