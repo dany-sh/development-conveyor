@@ -668,6 +668,206 @@ class ProjectionTests(unittest.TestCase):
 
 
 class MigrationAndSimulatorTests(unittest.TestCase):
+    INTERVIEW_ACCEPTED_COMMIT = "a1f2c8dd47aaa68580cd7dfc3dc6923e04469857"
+    INTERVIEW_MILESTONE_START = "e07d8803fbe56bbbfb7430aeb19e888f3d7d06a7"
+    INTERVIEW_FAILED_RUN = "fd2e154b-f80a-4f95-8724-efe1f17925c0"
+    INTERVIEW_FAILED_TRANSACTION = "ccad845b-7fdd-4250-9f64-f072d17c4e49"
+    INTERVIEW_FAILED_SESSION = "019f86cc-d38c-7dc1-87de-294a89e163c4"
+
+    @classmethod
+    def immutable_migration_fixture(
+        cls,
+        root: Path,
+        *,
+        project_id: str,
+        feature_id: str,
+        integration_pending: bool,
+        exact_interview_identity: bool = False,
+        terminal_failure: bool = False,
+    ):
+        """Build all migration inputs under one disposable controller/repository root."""
+
+        repository, project = synthetic_repository(root / "application")
+        queue_path = repository / project.queue_location
+        queue = json.loads(queue_path.read_text(encoding="utf-8"))
+        adapter_path = repository / ".factory/project.yaml"
+        adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
+        adapter["project"]["id"] = f"fixture-{project_id}"
+        adapter_path.write_text(json.dumps(adapter, indent=2) + "\n", encoding="utf-8")
+
+        feature = queue["features"][0]
+        feature.update({
+            "id": feature_id,
+            "title": f"Immutable {feature_id} fixture",
+            "spec": f"docs/features/{feature_id}.md",
+        })
+        (repository / f"docs/features/{feature_id}.md").write_text(
+            f"# {feature_id}\n\nImmutable migration fixture.\n", encoding="utf-8"
+        )
+        git(repository, "rm", project.queue_location)
+        git(repository, "add", ".factory/project.yaml", f"docs/features/{feature_id}.md")
+        git(repository, "commit", "-m", "test: create immutable migration fixture")
+        milestone_start = git(repository, "rev-parse", "HEAD")
+
+        feature_branch = None
+        accepted_commit = None
+        if integration_pending:
+            feature_branch = (
+                "codex/F005-persistent-data-store"
+                if feature_id == "F005" else f"codex/{feature_id}-accepted"
+            )
+            git(repository, "switch", "-c", feature_branch)
+            (repository / "app.txt").write_text(
+                f"baseline\n{feature_id} accepted behavior\n", encoding="utf-8"
+            )
+            git(repository, "add", "app.txt")
+            git(repository, "commit", "-m", f"{feature_id}: accepted fixture")
+            generated_accepted = git(repository, "rev-parse", "HEAD")
+            git(repository, "switch", "codex/m0-foundation")
+            accepted_commit = (
+                cls.INTERVIEW_ACCEPTED_COMMIT
+                if exact_interview_identity else generated_accepted
+            )
+            feature.update({
+                "status": "integration_pending",
+                "branch": feature_branch,
+                "integration_base_commit": (
+                    cls.INTERVIEW_MILESTONE_START
+                    if exact_interview_identity else milestone_start
+                ),
+                "accepted_commit": accepted_commit,
+                "integrated_commit": None,
+                "integration_status": "pending",
+            })
+        else:
+            feature.update({
+                "status": "ready",
+                "branch": None,
+                "integration_base_commit": None,
+                "accepted_commit": None,
+                "integrated_commit": None,
+                "integration_status": "pending",
+            })
+
+        exclude = repository / ".git/info/exclude"
+        exclude.write_text(
+            exclude.read_text(encoding="utf-8")
+            + "\ndocs/FEATURE_QUEUE.yaml\n.factory/conveyor-state.json\n",
+            encoding="utf-8",
+        )
+        queue_path.write_text(json.dumps(queue, indent=2) + "\n", encoding="utf-8")
+        project = replace(
+            project,
+            project_id=project_id,
+            repository=repository,
+            last_accepted_feature=feature_id if integration_pending else None,
+            last_accepted_commit=accepted_commit,
+            current_state="validation_failed" if terminal_failure else (
+                "integration_ready" if integration_pending else "feature_ready"
+            ),
+            registration_notes="Immutable disposable migration fixture.",
+        )
+        identity = RepositoryInspector(repository).identity()
+        if integration_pending:
+            cycle = {
+                "schema_version": 1,
+                "project_id": project_id,
+                "repository_identity": identity,
+                "current_feature": feature_id,
+                "current_phase": "branch_preparing",
+                "conveyor_run_id": "old-pre-migration-run",
+                "feature_session_id": "old-pre-migration-session",
+            }
+            (repository / ".factory/conveyor-state.json").write_text(
+                json.dumps(cycle, indent=2) + "\n", encoding="utf-8"
+            )
+
+        configuration = controller_configuration(root, project)
+        state_root = configuration.root / "state/projects"
+        state_root.mkdir(parents=True, exist_ok=True)
+
+        if terminal_failure:
+            (state_root / f"{project_id}.json").write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "project_id": project_id,
+                    "repository_fingerprint": identity["path_fingerprint"],
+                    "current_state": "validation_failed",
+                    "run_id": cls.INTERVIEW_FAILED_RUN,
+                }, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            project_state = state_root / project_id
+            ledger = EvidenceLedger(
+                project_state / "evidence-ledger.jsonl",
+                project_id=project_id,
+                repository_identity=identity["repository_id"],
+                repository_path_fingerprint=identity["path_fingerprint"],
+            )
+            workflow = WorkflowType.MILESTONE_INTEGRATION
+            transaction = cls.INTERVIEW_FAILED_TRANSACTION
+            ledger.append(
+                event_type="TransactionStarted", transaction_id=transaction,
+                workflow_type=workflow, payload={
+                    "run_id": cls.INTERVIEW_FAILED_RUN,
+                    "feature_id": feature_id,
+                    "milestone": "M0",
+                    "starting_branch": "codex/m0-foundation",
+                    "starting_head": cls.INTERVIEW_MILESTONE_START,
+                    "allowed_mutation_policy": {},
+                },
+            )
+            ledger.append(
+                event_type="LeaseAcquired", transaction_id=transaction,
+                workflow_type=workflow,
+                payload={"lease_id": "failed-lease", "lease_type": "integration_writer"},
+            )
+            ledger.append(
+                event_type="SnapshotCaptured", transaction_id=transaction,
+                workflow_type=workflow, payload={"snapshot": {
+                    "branch": "codex/m0-foundation",
+                    "head": cls.INTERVIEW_MILESTONE_START,
+                }},
+            )
+            ledger.append(
+                event_type="SessionLaunched", transaction_id=transaction,
+                workflow_type=workflow,
+                payload={"session_id": cls.INTERVIEW_FAILED_SESSION},
+            )
+            ledger.append(
+                event_type="ValidationStarted", transaction_id=transaction,
+                workflow_type=workflow, payload={},
+            )
+            ledger.append(
+                event_type="ValidationFailed", transaction_id=transaction,
+                workflow_type=workflow,
+                payload={"diagnostic": "fixture pre-mutation structured result rejected"},
+            )
+            ledger.append(
+                event_type="TransactionBlocked", transaction_id=transaction,
+                workflow_type=workflow, payload={
+                    "classification": "VALIDATION_FAILED",
+                    "reference": "SessionError",
+                    "terminal_state": "terminal_failure",
+                    "next_state": "validation_failed",
+                    "terminal_snapshot": {
+                        "branch": "codex/m0-foundation",
+                        "head": cls.INTERVIEW_MILESTONE_START,
+                        "clean": True,
+                    },
+                },
+            )
+            ledger.append(
+                event_type="LeaseReleased", transaction_id=transaction,
+                workflow_type=workflow, payload={"lease_id": "failed-lease"},
+            )
+            ProjectionEngine(
+                ledger, project_state / "projection-cache.json"
+            ).rebuild(persist_cache=True)
+        if git(repository, "status", "--porcelain"):
+            raise AssertionError("immutable migration fixture repository is dirty")
+        return configuration, project, accepted_commit
+
     @staticmethod
     def start_kernel(
         root: Path, repository: Path, project, *, workflow: WorkflowType,
@@ -2162,75 +2362,136 @@ kernel.acquire_lease(); kernel.capture_snapshot()
         self.assertEqual(before, after)
 
     def test_real_interview_dry_run_projection(self):
-        root = Path(__file__).resolve().parents[1]
-        configuration = __import__("development_conveyor.config", fromlist=["load_configuration"]).load_configuration(root)
-        project = __import__("development_conveyor.registry", fromlist=["ProjectRegistry"]).ProjectRegistry(configuration).get("interview-companion")
-        before = self.repository_immutability_snapshot(project.repository, controller_root=root, project_id=project.project_id)
-        result = LegacyStateMigrator(controller_root=root, project=project).plan()
-        after = self.repository_immutability_snapshot(project.repository, controller_root=root, project_id=project.project_id)
-        projection = result["projected_state_after"]
-        self.assertEqual("integration_ready", projection["current_state"])
-        self.assertEqual("F005", projection["current_feature"])
-        self.assertEqual("a1f2c8dd47aaa68580cd7dfc3dc6923e04469857", projection["accepted_feature_commit"])
-        self.assertEqual("superseded", projection["legacy_cycle_classification"])
-        self.assertEqual("e07d8803fbe56bbbfb7430aeb19e888f3d7d06a7", projection["selected_feature_starting_commit"])
-        self.assertEqual("codex/F005-persistent-data-store", projection["feature_branch"])
-        self.assertEqual("codex/m0-foundation", projection["milestone_branch"])
-        self.assertEqual("milestone_integration", projection["allowed_next_action"])
-        queue = FeatureQueue.from_location(project.repository, project.queue_location)
-        self.assertEqual("integration_pending", queue.feature("F005")["status"])
-        self.assertFalse(projection["old_session_resume"])
-        self.assertFalse(projection["session_resume_eligible"])
-        self.assertFalse(any(
-            item.get("workflow_type") == "milestone_integration"
-            for item in result["transactions_that_would_be_reconstructed"]
-        ))
-        self.assertFalse(result["application_repository_written"])
-        self.assertEqual([], result["application_git_mutations"])
-        self.assertEqual(before, after)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            configuration, project, _ = self.immutable_migration_fixture(
+                root,
+                project_id="interview-companion",
+                feature_id="F005",
+                integration_pending=True,
+                exact_interview_identity=True,
+                terminal_failure=True,
+            )
+            before = self.repository_immutability_snapshot(
+                project.repository,
+                controller_root=configuration.root,
+                project_id=project.project_id,
+            )
+            migrator = LegacyStateMigrator(
+                controller_root=configuration.root, project=project
+            )
+            original_rev_parse = migrator.inspector.rev_parse
+            immutable_inspector = mock.Mock(wraps=migrator.inspector)
+            immutable_inspector.head = self.INTERVIEW_MILESTONE_START
+            immutable_inspector.current_branch = "codex/m0-foundation"
+            immutable_inspector.is_clean = True
+
+            def immutable_ref(ref, *, check=True):
+                if ref == self.INTERVIEW_ACCEPTED_COMMIT:
+                    return self.INTERVIEW_ACCEPTED_COMMIT
+                if ref == "codex/F005-persistent-data-store":
+                    return self.INTERVIEW_ACCEPTED_COMMIT
+                if ref == "codex/m0-foundation":
+                    return self.INTERVIEW_MILESTONE_START
+                return original_rev_parse(ref, check=check)
+
+            immutable_inspector.rev_parse.side_effect = immutable_ref
+            migrator.inspector = immutable_inspector
+            result = migrator.plan()
+            after = self.repository_immutability_snapshot(
+                project.repository,
+                controller_root=configuration.root,
+                project_id=project.project_id,
+            )
+            before_projection = result["projected_state_before"]
+            projection = result["projected_state_after"]
+            failed = next(
+                item for item in before_projection["transactions"]
+                if item["transaction_id"] == self.INTERVIEW_FAILED_TRANSACTION
+            )
+            self.assertEqual("validation_failed", before_projection["current_state"])
+            self.assertIsNone(before_projection["active_transaction"])
+            self.assertEqual("terminal_failure", failed["state"])
+            self.assertEqual("VALIDATION_FAILED", failed["terminal_classification"])
+            self.assertEqual([self.INTERVIEW_FAILED_SESSION], failed["session_ids"])
+            self.assertFalse(before_projection["session_resume_eligible"])
+
+            self.assertEqual("integration_ready", projection["current_state"])
+            self.assertEqual("F005", projection["current_feature"])
+            self.assertEqual(
+                self.INTERVIEW_ACCEPTED_COMMIT,
+                projection["accepted_feature_commit"],
+            )
+            self.assertEqual("superseded", projection["legacy_cycle_classification"])
+            self.assertEqual(
+                self.INTERVIEW_MILESTONE_START,
+                projection["selected_feature_starting_commit"],
+            )
+            self.assertEqual(
+                "codex/F005-persistent-data-store", projection["feature_branch"]
+            )
+            self.assertEqual("codex/m0-foundation", projection["milestone_branch"])
+            self.assertEqual("milestone_integration", projection["allowed_next_action"])
+            self.assertEqual("pending", projection["integration_status"])
+            self.assertEqual([], projection["historical_integration_outcomes"])
+            self.assertEqual(
+                self.INTERVIEW_ACCEPTED_COMMIT,
+                immutable_inspector.rev_parse("codex/F005-persistent-data-store"),
+            )
+            self.assertEqual(
+                self.INTERVIEW_MILESTONE_START,
+                immutable_inspector.rev_parse("codex/m0-foundation"),
+            )
+            queue = FeatureQueue.from_location(
+                project.repository, project.queue_location
+            )
+            queued = queue.feature("F005")
+            self.assertEqual("integration_pending", queued["status"])
+            self.assertEqual(self.INTERVIEW_ACCEPTED_COMMIT, queued["accepted_commit"])
+            self.assertEqual(
+                self.INTERVIEW_MILESTONE_START,
+                queued["integration_base_commit"],
+            )
+            self.assertFalse(projection["old_session_resume"])
+            self.assertFalse(projection["session_resume_eligible"])
+            self.assertFalse(any(
+                item.get("workflow_type") == "milestone_integration"
+                for item in result["transactions_that_would_be_reconstructed"]
+            ))
+            self.assertFalse(result["application_repository_written"])
+            self.assertEqual([], result["application_git_mutations"])
+            self.assertEqual(before, after)
 
     def test_post_migration_real_fixtures_route_only_fresh_kernel_actions(self):
-        source_root = Path(__file__).resolve().parents[1]
-        configuration = __import__(
-            "development_conveyor.config", fromlist=["load_configuration"]
-        ).load_configuration(source_root)
-        registry = __import__(
-            "development_conveyor.registry", fromlist=["ProjectRegistry"]
-        ).ProjectRegistry(configuration)
         expectations = {
-            "case-manager": ("feature_cycle", "P0-003", "_execute_feature"),
+            "case-manager": (
+                "feature_cycle", "P0-003", False, "_execute_feature"
+            ),
             "interview-companion": (
-                "milestone_integration", "F005", "_execute_projected_integration"
+                "milestone_integration", "F005", True,
+                "_execute_projected_integration",
             ),
         }
-        for project_id, (action, feature_id, method) in expectations.items():
+        for project_id, (action, feature_id, integration_pending, method) in expectations.items():
             with self.subTest(project_id=project_id), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary); source = registry.get(project_id)
-                repository = root / "fixture"
-                subprocess.run(
-                    ["git", "clone", "--no-local", str(source.repository), str(repository)],
-                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                root = Path(temporary)
+                controller, project, _ = self.immutable_migration_fixture(
+                    root,
+                    project_id=project_id,
+                    feature_id=feature_id,
+                    integration_pending=integration_pending,
                 )
-                if source.milestone_branch:
-                    subprocess.run(
-                        ["git", "switch", source.milestone_branch], cwd=repository,
-                        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                    )
-                for relative in (
-                    source.queue_location,
-                    ".factory/project.yaml",
-                ):
-                    source_path = source.repository / relative
-                    if source_path.is_file():
-                        target_path = repository / relative
-                        target_path.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(source_path, target_path)
-                project = replace(source, repository=repository)
-                controller = controller_configuration(root, project)
                 LegacyStateMigrator(
                     controller_root=controller.root, project=project
                 ).apply()
-                engine = CycleEngine(controller)
+                launcher = mock.Mock()
+                launcher.plan.side_effect = AssertionError(
+                    "migration routing fixture must not render a prompt"
+                )
+                launcher.launch.side_effect = AssertionError(
+                    "migration routing fixture must not launch a model"
+                )
+                engine = CycleEngine(controller, launcher=launcher)
                 with mock.patch.object(
                     engine, method,
                     return_value={"outcome": "routed", "feature": feature_id},
@@ -2241,6 +2502,8 @@ kernel.acquire_lease(); kernel.capture_snapshot()
                     result = engine.run_project(project, "milestone")
                 self.assertEqual("routed", result["outcome"])
                 routed.assert_called_once()
+                launcher.plan.assert_not_called()
+                launcher.launch.assert_not_called()
                 authoritative = engine._authoritative_projection(project)
                 self.assertEqual(action, authoritative["allowed_next_action"])
                 self.assertEqual(feature_id, authoritative["current_feature"])

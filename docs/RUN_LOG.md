@@ -493,3 +493,21 @@ This log records model configuration and deterministic deployment evidence. It n
 - Live read-only consistency: Case Manager and Interview Companion both returned `CONSISTENT`, with no failed invariants and `application_repository_written: false`. The planner-facing fresh recovery projection is accepted only when its project and immutable ledger identity match, its fingerprint validates, and its feature branch and accepted commit are independently bound to the live repository.
 - Recovery dry-run: Interview Companion plans a fresh F005 milestone-integration transaction from `e07d8803fbe56bbbfb7430aeb19e888f3d7d06a7`, integrates accepted commit `a1f2c8dd47aaa68580cd7dfc3dc6923e04469857` from `codex/F005-persistent-data-store`, does not resume the terminal session, and exposes the exact mutation command and terminal JSON Schema.
 - Scope: no full unittest suite or pytest run; no CLI upgrade, subagent, real F005 integration, application-repository mutation, push, tag, publish, deploy, or release.
+
+### Model execution — 2026-07-21T23:57:27+00:00
+
+- Agent role: `primary-agent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `global_default`
+- Event: `start`
+- Reason code: `immutable_migration_fixture_followup`
+- Safety and autonomy contracts unchanged: `true`
+
+### Immutable migration-fixture follow-up — 2026-07-21
+
+- Classification: `test_post_migration_real_fixtures_route_only_fresh_kernel_actions` had an incomplete test-controller execution seam. It could reach the production `SessionLauncher` even though its temporary controller had no prompt resources. The fixture now supplies a fail-closed fake launcher and asserts that neither prompt planning nor model launch occurs.
+- Interview projection cause: `test_real_interview_dry_run_projection` read the mutable registered Interview Companion repository. Its live F005 queue state had changed to `ready`, so production migration correctly returned `feature_ready`; the assertion described a different scenario.
+- Immutable scenario: the replacement fixture is entirely temporary and explicitly records F005 `integration_pending`, accepted commit `a1f2c8dd47aaa68580cd7dfc3dc6923e04469857`, milestone start `e07d8803fbe56bbbfb7430aeb19e888f3d7d06a7`, the `codex/F005-persistent-data-store` feature ref identity, a terminal `VALIDATION_FAILED` integration transaction, a matching projection cache, no active transaction, no successful integration, and a non-resumable old session. Migration projects `integration_ready` with a fresh `milestone_integration` action.
+- Targeted evidence: each regression passed independently in 2.050 and 0.587 seconds, then both passed together in 2.510 seconds. The existing focused suites passed 17/17 in 35.088 seconds, 4/4 in 12.848 seconds, and 6/6 in 0.844 seconds.
+- Isolation: all new fixture repositories, queues, controller project state, ledgers, caches, refs, and terminal events live under `TemporaryDirectory`. No registered application repository or real controller `state/projects` input is read or mutated by these tests.
