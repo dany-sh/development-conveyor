@@ -21,7 +21,9 @@ from .workflow_lease import WorkflowLeaseRecord
 from .errors import AmbiguousLockError
 from .execution_plan import (
     ExecutionPlan,
+    bind_projection_to_queue,
     execution_plan_projection_agreement,
+    integrated_feature_execution_checks,
 )
 
 
@@ -240,6 +242,13 @@ class ConsistencyChecker:
                 persist_cache=False, observations=observations,
             )
             active_transaction = ledger_projection.get("active_transaction")
+            if queue is not None:
+                ledger_projection = bind_projection_to_queue(
+                    ledger_projection,
+                    queue,
+                    str(self.project.active_milestone or ""),
+                )
+                cache_projection = ledger_projection
 
         active_transactions = [
             item for item in (ledger_projection or {}).get("transactions", [])
@@ -683,13 +692,24 @@ class ConsistencyChecker:
         if ledger_exists and cache_path is not None and cache_path.exists() and ledger_projection is not None:
             try:
                 cache = self.projection.load_cache()
-                agreement = cache is not None and cache_projection is not None and cache_agrees(cache, cache_projection)
+                agreement = bool(
+                    cache is not None
+                    and cache.get("ledger_sequence")
+                    == ledger_projection.get("ledger_sequence")
+                    and cache.get("ledger_fingerprint")
+                    == ledger_projection.get("ledger_fingerprint")
+                )
                 add(
                     "projection_cache_agreement", agreement,
                     ConsistencyClassification.RECOVERABLE_INCONSISTENCY,
                     evidence={
                         "cache_sequence": (cache or {}).get("ledger_sequence"),
                         "ledger_sequence": ledger_projection.get("ledger_sequence"),
+                        "semantic_cache_match": bool(
+                            cache is not None
+                            and cache_projection is not None
+                            and cache_agrees(cache, cache_projection)
+                        ),
                     },
                     diagnostic="projection cache is stale",
                 )
@@ -724,6 +744,16 @@ class ConsistencyChecker:
                 feature_branch=(queue_feature or {}).get("branch"),
                 milestone_branch=self.project.milestone_branch,
             )
+            terminal_plan_checks = (
+                integrated_feature_execution_checks(
+                    routing_projection,
+                    executable,
+                    queue,
+                    str(self.project.active_milestone or ""),
+                )
+                if queue is not None
+                else {}
+            )
             compatibility_path = (
                 self.controller_root / "state/projects" / f"{self.project.project_id}.json"
             )
@@ -755,6 +785,54 @@ class ConsistencyChecker:
                     observed_projection = status.get("kernel_projection")
                     if not isinstance(observed_projection, dict):
                         observed_projection = routing_projection
+                    if queue is not None:
+                        raw_plan = status.get("executable_plan") or {}
+                        summary = queue.summary(str(self.project.active_milestone or ""))
+                        integrated_ids = {
+                            str(item.get("id"))
+                            for item in queue.features_for_milestone(
+                                str(self.project.active_milestone or "")
+                            )
+                            if item.get("status") == "integrated"
+                            and item.get("integration_status") == "passed"
+                        }
+                        historical_commits = {
+                            item.get("accepted_commit")
+                            for item in observed_projection.get(
+                                "historical_integration_outcomes", []
+                            )
+                            if isinstance(item, dict)
+                        }
+                        raw_feature_workflow = raw_plan.get("workflow_type") in {
+                            WorkflowType.FEATURE_EXECUTION.value,
+                            WorkflowType.MILESTONE_INTEGRATION.value,
+                        }
+                        observed_selected = observed_projection.get(
+                            "current_feature"
+                        ) or observed_projection.get("selected_next_feature")
+                        terminal_plan_checks.update(
+                            {
+                                "observed_integrated_feature_not_executable": not (
+                                    raw_feature_workflow
+                                    and raw_plan.get("feature_id") in integrated_ids
+                                ),
+                                "observed_empty_ready_queue_has_no_feature_plan": not (
+                                    not summary["ready_features"]
+                                    and raw_plan.get("workflow_type")
+                                    == WorkflowType.FEATURE_EXECUTION.value
+                                ),
+                                "observed_selection_matches_queue": (
+                                    observed_projection.get("allowed_next_action")
+                                    != "feature_cycle"
+                                    or observed_selected == summary["selected_feature"]
+                                ),
+                                "observed_historical_commit_not_reused": not (
+                                    raw_feature_workflow
+                                    and raw_plan.get("accepted_commit")
+                                    in historical_commits
+                                ),
+                            }
+                        )
                     projection_binding = {
                         "project_id": observed_projection.get("project_id")
                         == routing_projection.get("project_id"),
@@ -934,6 +1012,16 @@ class ConsistencyChecker:
                 evidence=agreement_evidence,
                 diagnostic="status or executable routing disagrees with the kernel projection",
             )
+            add(
+                "integrated_feature_not_executable",
+                bool(terminal_plan_checks) and all(terminal_plan_checks.values()),
+                ConsistencyClassification.HUMAN_DECISION_REQUIRED,
+                evidence={"checks": terminal_plan_checks},
+                diagnostic=(
+                    "integrated or historically accepted feature was selected by an "
+                    "executable plan"
+                ),
+            )
         else:
             add(
                 "execution_plan_projection_agreement",
@@ -941,6 +1029,13 @@ class ConsistencyChecker:
                 ConsistencyClassification.RECOVERABLE_INCONSISTENCY,
                 evidence={"ledger_exists": ledger_exists},
                 diagnostic="no authoritative projection is available for executable routing",
+            )
+            add(
+                "integrated_feature_not_executable",
+                not ledger_exists,
+                ConsistencyClassification.HUMAN_DECISION_REQUIRED,
+                evidence={"ledger_exists": ledger_exists},
+                diagnostic="no authoritative executable plan is available",
             )
 
         failed = [item for item in results if not item.passed]

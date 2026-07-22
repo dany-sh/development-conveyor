@@ -15,7 +15,9 @@ from development_conveyor.execution_plan import (
     ACTION_WORKFLOW,
     ExecutionPlan,
     authoritative_status_fields,
+    bind_projection_to_queue,
     execution_plan_projection_agreement,
+    integrated_feature_execution_checks,
 )
 from development_conveyor.errors import ProjectionError, TransactionError
 from development_conveyor.migration import LegacyStateMigrator
@@ -35,8 +37,38 @@ from tests.helpers import (
 
 
 class ProjectionAuthorityTests(unittest.TestCase):
-    def _integration_fixture(self, root: Path):
+    def _integration_fixture(
+        self, root: Path, *, next_feature_status: str | None = None
+    ):
         repository, project = synthetic_repository(root)
+        if next_feature_status is not None:
+            (repository / "docs/features/F002.md").write_text(
+                "# F002\n\nAdd a distinct synthetic feature.\n", encoding="utf-8"
+            )
+            queue_path = repository / project.queue_location
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            queue["features"].append(
+                {
+                    "id": "F002",
+                    "title": "Distinct next feature",
+                    "status": next_feature_status,
+                    "priority": 2,
+                    "milestone": "M0",
+                    "dependencies": ["F001"],
+                    "spec": "docs/features/F002.md",
+                    "acceptance_criteria": ["app.txt records F002"],
+                    "requires_human_decision": False,
+                    "branch": "codex/f002-distinct",
+                    "integration_base_commit": None,
+                    "accepted_commit": None,
+                    "integrated_commit": None,
+                    "integration_status": "pending",
+                    "integration_fix_commits": [],
+                }
+            )
+            write_json(queue_path, queue)
+            git(repository, "add", "docs/features/F002.md", project.queue_location)
+            git(repository, "commit", "-m", "docs: register future F002")
         milestone_start = git(repository, "rev-parse", "HEAD")
         feature_branch = "codex/f001-authoritative"
         git(repository, "switch", "-c", feature_branch)
@@ -165,6 +197,30 @@ class ProjectionAuthorityTests(unittest.TestCase):
         )
         return repository, project, configuration, engine, accepted, inspector.cycle_state_path()
 
+    def _completed_integration_fixture(
+        self, root: Path, *, next_feature_status: str = "proposed"
+    ):
+        fixture = self._integration_fixture(
+            root, next_feature_status=next_feature_status
+        )
+        repository, project, configuration, engine, accepted, cycle_path = fixture
+        result = engine.run_project(project, "milestone")
+        self.assertEqual("feature_integrated", result["outcome"])
+        terminal = git(repository, "rev-parse", "HEAD")
+        integrating = git(repository, "rev-parse", "HEAD^")
+        integrated = str(result["integrated_commit"])
+        return (
+            repository,
+            project,
+            configuration,
+            engine,
+            accepted,
+            integrated,
+            integrating,
+            terminal,
+            cycle_path,
+        )
+
     def test_valid_projection_overrides_stale_project_and_repository_cycle(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository, project, _, engine, accepted, cycle_path = self._integration_fixture(
@@ -218,6 +274,150 @@ class ProjectionAuthorityTests(unittest.TestCase):
                 result = engine.run_project(project, "milestone")
             self.assertEqual("routed", result["outcome"])
             integration.assert_called_once()
+
+    def test_completed_integration_clears_terminal_feature_from_empty_queue_plan(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                repository,
+                project,
+                configuration,
+                engine,
+                accepted,
+                integrated,
+                integrating,
+                terminal,
+                cycle_path,
+            ) = self._completed_integration_fixture(Path(temporary))
+            ledger_path = (
+                configuration.root
+                / "state/projects/synthetic/evidence-ledger.jsonl"
+            )
+            before = (
+                git(repository, "rev-parse", "HEAD"),
+                git(repository, "rev-parse", "HEAD^{tree}"),
+                git(repository, "status", "--porcelain=v1", "-uall"),
+                ledger_path.read_bytes(),
+                cycle_path.read_bytes(),
+            )
+
+            plan = engine.run_project(project, "resume", dry_run=True)
+
+            after = (
+                git(repository, "rev-parse", "HEAD"),
+                git(repository, "rev-parse", "HEAD^{tree}"),
+                git(repository, "status", "--porcelain=v1", "-uall"),
+                ledger_path.read_bytes(),
+                cycle_path.read_bytes(),
+            )
+            self.assertEqual(before, after)
+            self.assertEqual(terminal, before[0])
+            self.assertEqual(integrating, git(repository, "rev-parse", "HEAD^"))
+            self.assertEqual(integrated, git(repository, "rev-parse", "HEAD^^"))
+            self.assertEqual("queue_reconciliation", plan["current_state"])
+            self.assertEqual("queue_reconciliation", plan["workflow_type"])
+            self.assertIsNone(plan["selected_feature"])
+            self.assertIsNone(plan["accepted_feature_commit"])
+            self.assertIsNone(plan["execution_plan"]["feature_id"])
+            self.assertIsNone(plan["executable_plan"]["feature_id"])
+            self.assertNotEqual("feature_writer", plan["required_lease"])
+            self.assertFalse(plan["old_session_will_resume"])
+            self.assertFalse(plan["feature_factory_would_launch"])
+            self.assertEqual([], engine.launcher.actions)
+            historical = plan["kernel_projection"]["historical_integration_outcomes"]
+            self.assertEqual("F001", historical[-1]["feature_id"])
+            self.assertEqual(accepted, historical[-1]["accepted_commit"])
+            self.assertEqual(integrated, historical[-1]["integrated_commit"])
+            superseded = plan["superseded_legacy_cycles"]
+            self.assertTrue(any(
+                item.get("feature_id") == "F001"
+                and item.get("classification") == "superseded"
+                for item in superseded
+            ))
+
+    def test_distinct_ready_feature_remains_selectable_after_completed_integration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                repository,
+                project,
+                configuration,
+                engine,
+                _,
+                _,
+                _,
+                _,
+                _,
+            ) = self._completed_integration_fixture(
+                Path(temporary), next_feature_status="ready"
+            )
+            ledger_path = (
+                configuration.root
+                / "state/projects/synthetic/evidence-ledger.jsonl"
+            )
+            before = (
+                git(repository, "rev-parse", "HEAD"),
+                git(repository, "rev-parse", "HEAD^{tree}"),
+                ledger_path.read_bytes(),
+            )
+
+            plan = engine.run_project(project, "resume", dry_run=True)
+
+            self.assertEqual(before, (
+                git(repository, "rev-parse", "HEAD"),
+                git(repository, "rev-parse", "HEAD^{tree}"),
+                ledger_path.read_bytes(),
+            ))
+            self.assertEqual("feature_ready", plan["current_state"])
+            self.assertEqual("F002", plan["selected_feature"])
+            self.assertEqual("F002", plan["execution_plan"]["feature_id"])
+            self.assertEqual("F002", plan["executable_plan"]["feature_id"])
+            self.assertNotEqual("F001", plan["selected_feature"])
+            self.assertEqual([], engine.launcher.actions)
+
+    def test_consistency_invariant_rejects_reselected_integrated_feature(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                _, project, configuration, engine, accepted, _, _, _, _,
+            ) = self._completed_integration_fixture(Path(temporary))
+            good = engine.project_plan(project)
+            malicious_projection = dict(good["kernel_projection"])
+            malicious_projection.update(
+                {
+                    "current_state": "feature_ready",
+                    "current_feature": "F001",
+                    "selected_next_feature": "F001",
+                    "accepted_feature_commit": accepted,
+                    "allowed_next_action": "feature_cycle",
+                }
+            )
+            malicious_projection["projection_fingerprint"] = projection_fingerprint(
+                malicious_projection
+            )
+            malicious_status = dict(good)
+            malicious_status["kernel_projection"] = malicious_projection
+            malicious_status["executable_plan"] = {
+                **good["executable_plan"],
+                "workflow_type": "feature_execution",
+                "feature_id": "F001",
+                "accepted_commit": accepted,
+                "lease_type": "feature_writer",
+            }
+            checker = ConsistencyChecker(
+                controller_root=configuration.root,
+                project=project,
+                planner_observer=lambda: malicious_status,
+            )
+
+            result = checker.check()
+
+            invariant = next(
+                item for item in result["invariants"]
+                if item["invariant"] == "integrated_feature_not_executable"
+            )
+            self.assertFalse(invariant["passed"])
+            self.assertIn(
+                "observed_integrated_feature_not_executable",
+                invariant["evidence"]["checks"],
+            )
 
     def test_feature_cycle_revalidates_projection_before_internal_integration(self):
         with tempfile.TemporaryDirectory() as temporary:

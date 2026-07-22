@@ -8,6 +8,7 @@ from typing import Any, Iterable
 from .contracts import WorkflowType, WORKFLOW_LEASE
 from .errors import ProjectionError
 from .projection import projection_fingerprint
+from .queue import FeatureQueue
 
 
 HUMAN_MERGE_APPROVAL = "human_merge_approval"
@@ -43,6 +44,107 @@ SESSION_DESCRIPTION: dict[WorkflowType, str] = {
     WorkflowType.HUMAN_DECISION_RESOLUTION: "fresh human-decision transaction",
     WorkflowType.RECOVERY: "fresh recovery transaction",
 }
+
+
+def bind_projection_to_queue(
+    projection: dict[str, Any], queue: FeatureQueue, milestone_id: str
+) -> dict[str, Any]:
+    """Bind idle next-feature routing to the live validated milestone queue."""
+
+    if projection.get("active_transaction") is not None:
+        return projection
+    action = projection.get("allowed_next_action")
+    candidate = projection.get("current_feature") or projection.get(
+        "selected_next_feature"
+    )
+    queued_candidate = queue.feature(str(candidate)) if candidate else None
+    terminal_candidate = bool(
+        isinstance(queued_candidate, dict)
+        and queued_candidate.get("status") == "integrated"
+        and queued_candidate.get("integration_status") == "passed"
+    )
+    if action not in {"feature_cycle", "queue_reconciliation"} and not terminal_candidate:
+        return projection
+
+    selected = queue.select_next(milestone_id)
+    bound = dict(projection)
+    bound.update(
+        {
+            "accepted_feature_commit": None,
+            "integration_status": None,
+            "required_lease": None,
+            "session_resume_eligible": False,
+            "human_gate": None,
+        }
+    )
+    if selected is None:
+        bound.update(
+            {
+                "current_state": "queue_reconciliation",
+                "current_feature": None,
+                "selected_next_feature": None,
+                "feature_branch": None,
+                "allowed_next_action": "queue_reconciliation",
+            }
+        )
+    else:
+        feature = queue.feature(selected.feature_id) or {}
+        bound.update(
+            {
+                "current_state": "feature_ready",
+                "current_feature": selected.feature_id,
+                "selected_next_feature": selected.feature_id,
+                "feature_branch": feature.get("branch"),
+                "allowed_next_action": "feature_cycle",
+            }
+        )
+    bound["projection_fingerprint"] = projection_fingerprint(bound)
+    return bound
+
+
+def integrated_feature_execution_checks(
+    projection: dict[str, Any], executable: "ExecutionPlan", queue: FeatureQueue,
+    milestone_id: str,
+) -> dict[str, bool]:
+    """Return fail-closed queue/plan checks for terminal feature identities."""
+
+    summary = queue.summary(milestone_id)
+    integrated = {
+        str(item.get("id"))
+        for item in queue.features_for_milestone(milestone_id)
+        if item.get("status") == "integrated"
+        and item.get("integration_status") == "passed"
+    }
+    historical = projection.get("historical_integration_outcomes") or []
+    historical_commits = {
+        item.get("accepted_commit")
+        for item in historical
+        if isinstance(item, dict) and isinstance(item.get("accepted_commit"), str)
+    }
+    executable_feature_workflow = executable.workflow in {
+        WorkflowType.FEATURE_EXECUTION,
+        WorkflowType.MILESTONE_INTEGRATION,
+    }
+    projected = projection.get("current_feature") or projection.get(
+        "selected_next_feature"
+    )
+    return {
+        "integrated_feature_not_executable": not (
+            executable_feature_workflow and executable.feature_id in integrated
+        ),
+        "empty_ready_queue_has_no_feature_plan": not (
+            not summary["ready_features"]
+            and executable.workflow == WorkflowType.FEATURE_EXECUTION
+        ),
+        "projected_selection_matches_queue": (
+            projection.get("allowed_next_action") != "feature_cycle"
+            or projected == summary["selected_feature"]
+        ),
+        "historical_accepted_commit_not_reused": not (
+            executable_feature_workflow
+            and executable.accepted_commit in historical_commits
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -147,6 +249,29 @@ class ExecutionPlan:
             or gate_identity.get("accepted_commit")
             or projection.get("accepted_feature_commit")
         )
+        historical = projection.get("historical_integration_outcomes") or []
+        integrated_features = {
+            item.get("feature_id")
+            for item in historical
+            if isinstance(item, dict) and item.get("classification") == "INTEGRATED"
+        }
+        historical_accepted_commits = {
+            item.get("accepted_commit")
+            for item in historical
+            if isinstance(item, dict) and isinstance(item.get("accepted_commit"), str)
+        }
+        if workflow in {
+            WorkflowType.FEATURE_EXECUTION,
+            WorkflowType.MILESTONE_INTEGRATION,
+        }:
+            if not isinstance(feature_id, str) or not feature_id:
+                raise ProjectionError("executable feature workflow lacks a selected feature")
+            if feature_id in integrated_features:
+                raise ProjectionError("integrated feature cannot receive a new executable plan")
+            if accepted_commit in historical_accepted_commits:
+                raise ProjectionError(
+                    "historical accepted commit cannot create a fresh executable plan"
+                )
         projected_starting_commit = (
             gate_identity.get("feature_starting_commit")
             or gate_identity.get("candidate_validated_planning_commit")
@@ -303,6 +428,32 @@ def authoritative_status_fields(
     executable.validate_against(projection)
     action = str(projection.get("allowed_next_action") or "verify_consistency")
     workflow = executable.workflow
+    effective_superseded = list(superseded_cycles)
+    legacy_cycle = legacy_plan.get("existing_active_cycle")
+    integrated_features = {
+        item.get("feature_id")
+        for item in projection.get("historical_integration_outcomes", [])
+        if isinstance(item, dict) and item.get("classification") == "INTEGRATED"
+    }
+    if (
+        isinstance(legacy_cycle, dict)
+        and legacy_cycle.get("feature") in integrated_features
+        and not any(
+            item.get("run_id") == legacy_cycle.get("run_id")
+            for item in effective_superseded
+        )
+    ):
+        effective_superseded.append(
+            {
+                "workflow_type": WorkflowType.FEATURE_EXECUTION.value,
+                "run_id": legacy_cycle.get("run_id"),
+                "session_id": legacy_cycle.get("session_id"),
+                "feature_id": legacy_cycle.get("feature"),
+                "legacy_phase": legacy_cycle.get("phase"),
+                "classification": "superseded",
+                "reason": "completed integration is terminal for the legacy feature cycle",
+            }
+        )
     legacy_observations = {
         "persisted_compatibility_state": persisted_state,
         "legacy_proposed_next_action": legacy_plan.get("proposed_next_action"),
@@ -310,12 +461,9 @@ def authoritative_status_fields(
         "legacy_stale_cycle_evidence": legacy_plan.get("stale_cycle_evidence"),
         "legacy_sessions_that_would_launch": legacy_plan.get("sessions_that_would_launch", []),
     }
-    legacy_gate = legacy_plan.get("integration_gate")
     projection_gate = projection.get("human_gate")
     identity_gate = (
-        legacy_gate
-        if isinstance(legacy_gate, dict)
-        else (projection_gate if isinstance(projection_gate, dict) else {})
+        projection_gate if isinstance(projection_gate, dict) else {}
     )
     status_feature = (
         identity_gate.get("feature_id")
@@ -371,9 +519,18 @@ def authoritative_status_fields(
         "executable_plan": executable.to_dict(),
         "execution_plan": executable.to_dict(),
         "legacy_observations": legacy_observations,
-        "superseded_legacy_cycles": superseded_cycles,
+        "superseded_legacy_cycles": effective_superseded,
         "existing_active_cycle": None,
         "stale_cycle_evidence": None,
+        "branch_recovery_required": False,
+        "cycle_phase": None,
+        "cycle_stop_reason": None,
+        "expected_branch": status_feature_branch,
+        "expected_stop_condition": (
+            "Reconcile the validated milestone queue without reusing terminal feature identity."
+            if workflow == WorkflowType.QUEUE_RECONCILIATION
+            else legacy_plan.get("expected_stop_condition")
+        ),
         "session_resume_eligible": executable.session_resume_eligible,
         "old_session_will_resume": executable.session_resume_eligible,
         "sessions_that_would_launch": executable.sessions_that_would_launch,

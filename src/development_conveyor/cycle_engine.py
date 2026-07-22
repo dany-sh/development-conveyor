@@ -21,6 +21,7 @@ from .errors import (
     QueueError,
     RecoveryError,
     SessionError,
+    TransactionError,
 )
 from .locks import (
     DurableLock,
@@ -81,10 +82,11 @@ from .kernel import (
     WorkflowKernel,
 )
 from .ledger import EvidenceLedger
-from .projection import ProjectionEngine, cache_agrees, projection_fingerprint
+from .projection import ProjectionEngine, projection_fingerprint
 from .execution_plan import (
     ExecutionPlan,
     authoritative_status_fields,
+    bind_projection_to_queue,
     superseded_legacy_cycles,
 )
 from .integration_executor import (
@@ -458,11 +460,26 @@ class CycleEngine:
         engine = ProjectionEngine(ledger, state_root / "projection-cache.json")
         rebuilt = engine.rebuild(persist_cache=False)
         cache = engine.load_cache()
-        if cache is None or not cache_agrees(cache, rebuilt):
+        if cache is None:
             raise ProjectionError(
                 "authoritative execution requires a projection cache bound to the ledger head"
             )
-        return rebuilt
+        if (
+            cache.get("ledger_sequence") != rebuilt.get("ledger_sequence")
+            or cache.get("ledger_fingerprint") != rebuilt.get("ledger_fingerprint")
+        ):
+            raise ProjectionError(
+                "authoritative execution requires a projection cache bound to the ledger head"
+            )
+        try:
+            queue = FeatureQueue.from_location(
+                project.repository, project.queue_location
+            )
+        except (QueueError, OSError):
+            return rebuilt
+        return bind_projection_to_queue(
+            rebuilt, queue, str(project.active_milestone or "")
+        )
 
     def _execution_plan(
         self, project: Project, projection: dict[str, Any]
@@ -1078,7 +1095,10 @@ class CycleEngine:
                 },
                 "next_feature_selection": {
                     "selected_feature": plan.get("selected_feature"),
-                    "selected_feature_starting_commit": plan.get("feature_starting_commit"),
+                    "selected_feature_starting_commit": (
+                        plan.get("feature_starting_commit")
+                        if plan.get("selected_feature") else None
+                    ),
                 },
             })
             self._attach_milestone_integration_contract(plan, project)
@@ -4686,6 +4706,12 @@ class CycleEngine:
             accepted = executable.accepted_commit
             if not isinstance(accepted, str) or accepted == "SELF":
                 raise ProjectionError("reserved integration plan lacks a normalized accepted commit")
+            if inspector.rev_parse(
+                str(project.milestone_branch), check=False
+            ) != executable.starting_commit:
+                raise TransactionError(
+                    "planned transaction start changed after reserved dispatch validation"
+                )
             reserved_two_ref = inspect_two_refs(
                 repository=project.repository,
                 controller_project_id=project.project_id,

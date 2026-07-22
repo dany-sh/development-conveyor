@@ -39,6 +39,8 @@ NEXT_ACTION = {
     "milestone_ready_for_merge": "human_merge_approval",
 }
 
+PROJECTION_SEMANTICS_VERSION = 2
+
 
 def projection_fingerprint(value: dict[str, Any]) -> str:
     unsigned = dict(value)
@@ -259,6 +261,30 @@ class ProjectionEngine:
                 "multiple incomplete transactions violate single-writer projection invariants"
             )
         active_transaction = active_ids[-1] if active_ids else None
+        if active_transaction is None:
+            terminal_feature = (
+                current_feature if current_feature in integrated_features else None
+            )
+            if terminal_feature is not None:
+                if selected_next_feature in integrated_features:
+                    selected_next_feature = None
+                current_feature = (
+                    selected_next_feature
+                    if selected_next_feature not in integrated_features
+                    else None
+                )
+                accepted_feature_commit = None
+                integration_status = None
+                if current_feature is None and current_state in {
+                    "feature_ready",
+                    "feature_accepted",
+                    "integration_pending",
+                    "integration_ready",
+                    "feature_integrated",
+                }:
+                    current_state = "queue_reconciliation"
+                if current_state != "human_decision_required":
+                    human_gate = None
         current_accepted_commit = feature_commits.get(current_feature) if current_feature else accepted_feature_commit
         if current_accepted_commit and current_state == "feature_running" and current_feature not in integrated_features:
             current_state = "integration_ready"
@@ -304,6 +330,7 @@ class ProjectionEngine:
                 integration_status = observed_integration
         projection = {
             "schema_version": 1,
+            "projection_semantics_version": PROJECTION_SEMANTICS_VERSION,
             "project_id": self.ledger.project_id,
             "repository_identity": self.ledger.repository_identity,
             "repository_path_fingerprint": self.ledger.repository_path_fingerprint,
