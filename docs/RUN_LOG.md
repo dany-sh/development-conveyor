@@ -628,3 +628,13 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `deterministic_integration_handoff_repair`
 - Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-22T06:32:16+00:00
+
+- Agent role: `controller-maintenance-writer`
+- Effective model: `gpt-5.6-terra`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `m1_002_cost_aware_execution`
+- Safety and autonomy contracts unchanged: `true`

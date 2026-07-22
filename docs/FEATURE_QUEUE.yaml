@@ -35,6 +35,23 @@
       "integrated_commit": "6f97dcca8cb1c1e4b1560bda1b617f260995a9e0",
       "integration_status": "passed",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-002",
+      "title": "Cost-aware execution policy",
+      "status": "ready",
+      "priority": 2,
+      "milestone": "M1",
+      "dependencies": ["M1-001"],
+      "spec": "docs/features/M1-002-cost-aware-execution.md",
+      "acceptance_criteria": ["Cost plans, deterministic routing, focused verification, and safe evidence reuse are inspectable before execution"],
+      "requires_human_decision": false,
+      "branch": "codex/m1-2-cost-aware-execution",
+      "integration_base_commit": "96c5c4a85f54b183e7c6b798890b947bd1de782f",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

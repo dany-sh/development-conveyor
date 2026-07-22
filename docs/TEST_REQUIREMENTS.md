@@ -2,6 +2,10 @@
 
 This table maps every required M1 scenario to executable evidence. The M1-specific tests live primarily in `tests/test_transactional_kernel.py`; established compatibility suites remain cited where they are the stronger end-to-end check.
 
+## M1-002 cost-aware policy
+
+`tests/test_cost_policy.py` covers deterministic zero-model routing, the independent model/reasoning matrix, child-session fail-closed enforcement, focused context packs, changed-path verification selection, complete trusted validation-evidence reuse, and command-output containment. All tests use temporary directories only.
+
 | # | Required scenario | Executable evidence |
 |---:|---|---|
 | 1 | Ledger append and canonical serialization | `LedgerTests.test_append_is_canonical_and_monotonic` |

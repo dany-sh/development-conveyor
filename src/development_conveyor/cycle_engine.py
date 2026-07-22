@@ -102,6 +102,7 @@ from .workflow_lease import WorkflowWriterLease
 from .command_authority import CommandAuthority
 from .workflow_recovery import RecoveryPlanner
 from .validation import SafetyPolicy
+from .cost_policy import build_run_plan
 
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 DETERMINISTIC_COMPATIBILITY_FAILURES = {
@@ -1102,6 +1103,7 @@ class CycleEngine:
                 },
             })
             self._attach_milestone_integration_contract(plan, project)
+            plan["cost_aware_run_plan"] = build_run_plan(plan, self.root)
             return plan
         planning_transaction = None
         persisted_evidence = (
@@ -1239,6 +1241,7 @@ class CycleEngine:
             plan["expected_stop_condition"] = compatibility.get("diagnostic")
             plan["sessions_that_would_launch"] = []
             plan["compatibility_human_gate"] = compatibility
+        plan["cost_aware_run_plan"] = build_run_plan(plan, self.root)
         return plan
 
     def _reconcile_projection_compatibility_cache(
