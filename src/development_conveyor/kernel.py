@@ -915,6 +915,152 @@ class WorkflowKernel:
         transaction.next_project_state = "feature_ready"
         return commit
 
+    def finalize_deterministic_feature_recovery(
+        self,
+        *,
+        original_transaction_id: str,
+        changed_paths: tuple[str, ...],
+        original_content_fingerprint: str,
+        plan_fingerprint: str,
+        validation_evidence: dict[str, Any],
+    ) -> str:
+        """Validate and commit one preserved feature diff without a model session."""
+
+        transaction = self._require()
+        if transaction.workflow_type != WorkflowType.FEATURE_EXECUTION:
+            raise TransactionError("feature-result recovery requires feature_execution")
+        if transaction.current_state != TransactionState.ACTIVE:
+            raise TransactionError("feature-result recovery must finalize from an active transaction")
+        if transaction.session_ids:
+            raise TransactionError("feature-result recovery cannot own a model session")
+        if transaction.allowed_mutation_policy.require_clean_start:
+            raise TransactionError("feature-result recovery must adopt an exact dirty baseline")
+        self._revalidate_lease()
+        observed_paths = tuple(sorted(
+            set(self.inspector.tracked_changed_paths())
+            | set(self.inspector.untracked_file_hashes())
+        ))
+        if observed_paths != tuple(sorted(changed_paths)):
+            raise TransactionError(
+                "feature-result recovery changed paths differ from the reserved baseline"
+            )
+        transaction.allowed_mutation_policy.validate(observed_paths)
+        if not validation_evidence.get("all_required_passed"):
+            raise TransactionError("feature-result recovery lacks passing host validation")
+
+        transaction.transition(TransactionState.RESULT_PENDING)
+        self.ledger.append(
+            event_type="DeterministicExecutionStarted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "plan_fingerprint": plan_fingerprint,
+                "model_session_launched": False,
+                "recovered_transaction_id": original_transaction_id,
+                "execution_mode": "preserved_feature_result_recovery",
+            },
+        )
+        transaction.transition(TransactionState.VALIDATING)
+        self.ledger.append(
+            event_type="DeterministicResultAccepted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "classification": "FEATURE_ACCEPTED",
+                "plan_fingerprint": plan_fingerprint,
+                "current_commit": transaction.starting_head,
+                "changed_paths": list(observed_paths),
+                "model_session_launched": False,
+            },
+        )
+        final_content_fingerprint = self.inspector.content_diff_fingerprint(observed_paths)
+        self.ledger.append(
+            event_type="ChangesDetected",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "changed_paths": list(observed_paths),
+                "diff_fingerprint": final_content_fingerprint,
+                "original_content_fingerprint": original_content_fingerprint,
+                "adopted_existing_feature_diff": True,
+            },
+        )
+        self.ledger.append(
+            event_type="ValidationStarted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "changed_paths": list(observed_paths),
+                "executor": "controller_host_feature_result_recovery",
+            },
+        )
+        self.ledger.append(
+            event_type="ValidationPassed",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "commands": validation_evidence.get("commands", []),
+                "checks": validation_evidence.get("checks", []),
+                "warnings": validation_evidence.get("warnings", []),
+                "diff_fingerprint": final_content_fingerprint,
+                "executor": "controller_host_feature_result_recovery",
+            },
+        )
+        transaction.transition(TransactionState.FINALIZING)
+        subject = transaction.allowed_mutation_policy.commit_subject
+        if not subject:
+            raise TransactionError("feature-result recovery lacks an exact commit subject")
+        self._run_git(["add", "--", *observed_paths])
+        if tuple(self.inspector.staged_changed_paths()) != observed_paths:
+            raise TransactionError("feature-result recovery staged paths differ from the baseline")
+        self._run_git(["commit", "-m", subject, "--", *observed_paths])
+        commit = self.inspector.head
+        final_checks = {
+            "direct_parent": self.inspector.rev_parse(f"{commit}^", check=False)
+            == transaction.starting_head,
+            "changed_paths": tuple(sorted(self.inspector.changed_paths(commit)))
+            == observed_paths,
+            "content_fingerprint": self.inspector.content_diff_fingerprint(
+                observed_paths, commit=commit
+            ) == final_content_fingerprint,
+            "clean_repository": self.inspector.is_clean,
+        }
+        if not all(final_checks.values()):
+            failed = ", ".join(key for key, passed in final_checks.items() if not passed)
+            raise TransactionError(
+                "feature-result recovery did not create one exact clean commit: " + failed
+            )
+        self.final_commit = commit
+        self.ledger.append(
+            event_type="CommitFinalized",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "commit": commit,
+                "parent": transaction.starting_head,
+                "changed_paths": list(observed_paths),
+                "diff_fingerprint": self.inspector.patch_fingerprint(commit),
+                "content_fingerprint": final_content_fingerprint,
+                "commit_subject": subject,
+                "recovered_transaction_id": original_transaction_id,
+                "model_session_launched": False,
+            },
+        )
+        self.ledger.append(
+            event_type="RecoveryApplied",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "recovered_transaction_id": original_transaction_id,
+                "classification": "preserved_feature_result_recovery",
+                "selected_feature": transaction.feature_id,
+                "accepted_feature_commit": commit,
+                "model_session_launched": False,
+            },
+        )
+        transaction.next_project_state = "integration_pending"
+        return commit
+
     def record_file_mutation_boundary(self) -> None:
         transaction = self._require()
         if any(

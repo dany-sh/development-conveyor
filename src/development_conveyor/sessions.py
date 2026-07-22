@@ -102,6 +102,7 @@ class SessionRequest:
     planned_model: str | None = None
     planned_reasoning: str | None = None
     model_plan_source: str | None = None
+    context_files: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.action == "milestone_integration" and self.accepted_commit == "SELF":
@@ -110,6 +111,25 @@ class SessionRequest:
             raise SessionError("session kind must be parent or child")
         if (self.planned_model is None) != (self.planned_reasoning is None):
             raise SessionError("planned model and reasoning must be supplied together")
+        if self.action == "feature_cycle":
+            bindings = {
+                "feature": self.feature,
+                "transaction_id": self.transaction_id,
+                "repository_identity": self.repository_identity,
+                "starting_branch": self.starting_branch,
+                "starting_commit": self.starting_commit,
+            }
+            missing = sorted(
+                key for key, value in bindings.items()
+                if not isinstance(value, str) or not value.strip()
+            )
+            if missing:
+                raise SessionError(
+                    "direct feature session lacks authoritative identity: "
+                    + ", ".join(missing)
+                )
+            if self.child_session_budget != 0:
+                raise SessionError("direct feature session requires child_session_budget=0")
 
 
 @dataclass(frozen=True)
@@ -127,6 +147,7 @@ class SessionPlan:
     planned_reasoning: str | None = None
     launched_model: str | None = None
     launched_reasoning: str | None = None
+    collaboration_tools_removed: bool = False
 
 
 @dataclass(frozen=True)
@@ -244,6 +265,115 @@ def milestone_integration_terminal_example(request: "SessionRequest") -> dict[st
         },
         "next_state": "feature_integrated",
     }
+
+
+def feature_execution_terminal_schema(request: "SessionRequest") -> dict[str, Any]:
+    """Return the exact direct-feature terminal contract bound to the request."""
+
+    required_identity = {
+        "project_id": request.project.project_id,
+        "repository_identity": request.repository_identity,
+        "run_id": request.run_id,
+        "transaction_id": request.transaction_id,
+        "workflow_type": "feature_execution",
+        "feature_id": request.feature,
+        "starting_branch": request.starting_branch,
+        "starting_commit": request.starting_commit,
+        "current_commit": request.starting_commit,
+        "classification": "FEATURE_ACCEPTED",
+        "next_state": "feature_accepted",
+    }
+    if any(not isinstance(value, str) or not value for value in required_identity.values()):
+        raise SessionError("direct feature terminal schema lacks authoritative identity")
+    properties: dict[str, Any] = {
+        "schema_version": {"const": 1},
+        **{key: {"const": value} for key, value in required_identity.items()},
+        "session_id": {
+            "type": "string",
+            "format": "uuid",
+            "minLength": 1,
+        },
+        "changed_paths": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": True,
+        },
+        "evidence": {
+            "type": "object",
+            "additionalProperties": True,
+            "required": [
+                "implementation_complete",
+                "focused_validation",
+                "controller_acceptance_pending",
+            ],
+            "properties": {
+                "implementation_complete": {"const": True},
+                "focused_validation": {"type": "array", "items": {"type": "object"}},
+                "controller_acceptance_pending": {"const": True},
+            },
+        },
+    }
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "schema_version", "project_id", "repository_identity", "run_id",
+            "transaction_id", "workflow_type", "feature_id", "session_id",
+            "classification", "next_state", "starting_branch", "starting_commit",
+            "current_commit", "changed_paths", "evidence",
+        ],
+        "properties": properties,
+    }
+
+
+def validate_feature_execution_result(
+    value: dict[str, Any], request: SessionRequest, *, observed_session_id: str | None
+) -> tuple[str, ...]:
+    """Bind a direct feature result to the launch request and live worktree."""
+
+    evidence = value.get("evidence") if isinstance(value.get("evidence"), dict) else {}
+    checks = {
+        "project_id_matches_execution_plan": value.get("project_id") == request.project.project_id,
+        "repository_identity_matches_execution_plan": value.get("repository_identity") == request.repository_identity,
+        "run_id_matches_execution_plan": value.get("run_id") == request.run_id,
+        "transaction_id_matches_execution_plan": value.get("transaction_id") == request.transaction_id,
+        "workflow_type_is_feature_execution": value.get("workflow_type") == "feature_execution",
+        "feature_id_matches_execution_plan": value.get("feature_id") == request.feature,
+        "session_id_matches_launcher": bool(observed_session_id)
+        and value.get("session_id") == observed_session_id,
+        "classification_is_feature_accepted": value.get("classification") == "FEATURE_ACCEPTED",
+        "next_state_is_feature_accepted": value.get("next_state") == "feature_accepted",
+        "starting_branch_matches_execution_plan": value.get("starting_branch") == request.starting_branch,
+        "starting_commit_matches_execution_plan": value.get("starting_commit") == request.starting_commit,
+        "current_commit_unchanged": value.get("current_commit") == request.starting_commit,
+        "implementation_complete": evidence.get("implementation_complete") is True,
+        "focused_validation_present": isinstance(evidence.get("focused_validation"), list),
+        "controller_acceptance_pending": evidence.get("controller_acceptance_pending") is True,
+    }
+    inspector = RepositoryInspector(request.project.repository)
+    observed_paths = tuple(sorted({
+        *inspector.tracked_changed_paths(),
+        *inspector.untracked_file_hashes().keys(),
+    }))
+    reported_paths = tuple(value.get("changed_paths") or ())
+    checks.update({
+        "repository_on_starting_branch": inspector.current_branch == request.starting_branch,
+        "repository_head_unchanged": inspector.head == request.starting_commit,
+        "changed_paths_match_repository": reported_paths == observed_paths,
+    })
+    placeholder_tokens = ("PLACEHOLDER", "ACTUAL_", "EXACT_", "LEGACY_", "TODO")
+    identity_fields = (
+        "project_id", "repository_identity", "run_id", "transaction_id",
+        "feature_id", "session_id", "starting_branch", "starting_commit", "current_commit",
+    )
+    checks["no_placeholder_identity"] = all(
+        isinstance(value.get(key), str)
+        and value[key]
+        and not any(token in value[key].upper() for token in placeholder_tokens)
+        for key in identity_fields
+    )
+    return tuple(key for key, passed in checks.items() if not passed)
 
 
 def _content_text(content: Any) -> str:
@@ -901,6 +1031,37 @@ class SessionLauncher:
         }
 
     @staticmethod
+    def _verify_zero_child_capability(executable: str, cwd: Path) -> None:
+        """Prove the installed CLI can remove collaboration tools before launch."""
+
+        argv = [
+            executable,
+            "-c", "features.multi_agent=false",
+            "-c", "features.multi_agent_v2=false",
+            "features", "list",
+        ]
+        SafetyPolicy.validate_controller_command(
+            argv, cwd=cwd, registered_repository=cwd, allow_codex=True
+        )
+        result = subprocess.run(
+            argv, cwd=cwd, text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False,
+        )
+        if result.returncode != 0:
+            raise SessionError(
+                "installed Codex CLI cannot verify zero-child collaboration removal"
+            )
+        observed: dict[str, bool] = {}
+        for line in result.stdout.splitlines():
+            columns = line.split()
+            if columns and columns[0] in {"multi_agent", "multi_agent_v2"}:
+                observed[columns[0]] = columns[-1].lower() == "true"
+        if observed != {"multi_agent": False, "multi_agent_v2": False}:
+            raise SessionError(
+                "installed Codex CLI cannot mechanically remove collaboration tools"
+            )
+
+    @staticmethod
     def _relevant_status_context(text: str, feature_id: str, milestone_id: str) -> str:
         sections = re.split(r"(?=^##\s)", text, flags=re.MULTILINE)
         selected = [
@@ -965,6 +1126,28 @@ class SessionLauncher:
         rendered.append(f"### Relevant current-status blocks\n\n```text\n{status.rstrip()}\n```")
         return "\n\n".join(rendered)
 
+    def _focused_feature_context(self, request: SessionRequest) -> str:
+        """Embed only the controller-selected application feature context pack."""
+
+        repository = request.project.repository.resolve()
+        rendered: list[str] = []
+        for relative in request.context_files:
+            candidate = (repository / relative).resolve()
+            try:
+                candidate.relative_to(repository)
+            except ValueError as exc:
+                raise SessionError("feature context path escapes the repository") from exc
+            if not candidate.is_file():
+                raise SessionError(f"feature context file is unavailable: {relative}")
+            try:
+                content = candidate.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise SessionError(f"feature context file cannot be read: {relative}") from exc
+            rendered.append(f"### {relative}\n\n```text\n{content.rstrip()}\n```")
+        if not rendered:
+            raise SessionError("direct feature session received an empty context pack")
+        return "\n\n".join(rendered)
+
     def _render_prompt(self, request: SessionRequest) -> str:
         try:
             filename = ACTION_PROMPTS[request.action]
@@ -972,7 +1155,12 @@ class SessionLauncher:
             raise SessionError(f"unknown session action: {request.action}") from exc
         template = (self.controller_root / "prompts" / filename).read_text(encoding="utf-8")
         mutation_command = milestone_integration_mutation_command(request.feature or "FEATURE_ID")
-        terminal_schema = json.dumps(milestone_integration_terminal_schema(), indent=2, sort_keys=True)
+        terminal_contract = (
+            feature_execution_terminal_schema(request)
+            if request.action == "feature_cycle"
+            else milestone_integration_terminal_schema()
+        )
+        terminal_schema = json.dumps(terminal_contract, indent=2, sort_keys=True)
         terminal_example = json.dumps(milestone_integration_terminal_example(request), separators=(",", ":"))
         prompt = template.format(
             repository=request.project.repository,
@@ -992,7 +1180,13 @@ class SessionLauncher:
             mutation_command=mutation_command,
             terminal_schema=terminal_schema,
             terminal_example=terminal_example,
-            focused_context=(self._focused_integration_context(request) if request.action == "milestone_integration" else ""),
+            focused_context=(
+                self._focused_feature_context(request)
+                if request.action == "feature_cycle"
+                else self._focused_integration_context(request)
+                if request.action == "milestone_integration"
+                else ""
+            ),
         )
         if request.repair_attempt is not None:
             prompt += (
@@ -1056,6 +1250,9 @@ class SessionLauncher:
                 f"validate={compatibility.validation_command}"
             )
         executable = str(compatibility.executable)
+        collaboration_tools_removed = request.child_session_budget == 0
+        if collaboration_tools_removed:
+            self._verify_zero_child_capability(executable, request.project.repository)
         planned_model = request.planned_model or compatibility.effective_model
         planned_reasoning = request.planned_reasoning or compatibility.effective_reasoning
         if not planned_model or not planned_reasoning:
@@ -1066,11 +1263,18 @@ class SessionLauncher:
             else "workspace-write"
         )
         policy_args = self._launch_policy_args(planned_model, planned_reasoning)
+        zero_child_args = (
+            "--disable", "multi_agent", "--disable", "multi_agent_v2", "--strict-config"
+        ) if collaboration_tools_removed else ()
         if request.session_id:
-            argv = (executable, "exec", *policy_args, "resume", "--json", request.session_id, "-")
+            argv = (
+                executable, "exec", *policy_args, *zero_child_args,
+                "resume", "--json", request.session_id, "-",
+            )
         else:
             argv = (
-                executable, "exec", *policy_args, "--cd", str(request.project.repository),
+                executable, "exec", *policy_args, *zero_child_args,
+                "--cd", str(request.project.repository),
                 "--json", "--sandbox", sandbox, "-",
             )
         launched_model, launched_reasoning = self._launched_policy(argv)
@@ -1097,6 +1301,7 @@ class SessionLauncher:
             planned_reasoning=planned_reasoning,
             launched_model=launched_model,
             launched_reasoning=launched_reasoning,
+            collaboration_tools_removed=collaboration_tools_removed,
         )
 
     def launch(
@@ -1214,6 +1419,12 @@ class SessionLauncher:
                         command_observed=_integration_mutation_command_observed(
                             result.stdout, request.feature or "FEATURE_ID"
                         ),
+                    )
+                elif request.action == "feature_cycle":
+                    failed_semantic_checks = validate_feature_execution_result(
+                        parsed_structured_result,
+                        request,
+                        observed_session_id=session_id,
                     )
                 if failed_semantic_checks:
                     validation = "semantic_invalid"

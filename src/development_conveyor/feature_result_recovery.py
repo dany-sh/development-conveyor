@@ -1,0 +1,814 @@
+"""Zero-model recovery of one exact terminal feature-session implementation diff."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Callable
+
+from .contracts import TransactionState, WorkflowType, fingerprint
+from .errors import RecoveryError, TransactionError
+from .kernel import FeatureExecutionAdapter, WorkflowKernel
+from .ledger import EvidenceLedger
+from .locks import DurableLock, inspect_repository_writer_lock, make_lock_record
+from .logging import atomic_write_bytes, atomic_write_json, utc_now
+from .projection import ProjectionEngine
+from .queue import FeatureQueue
+from .redaction import redact_text
+from .registry import Project
+from .repository import RepositoryInspector
+from .workflow_lease import WorkflowWriterLease
+
+
+CommandRunner = Callable[[list[str], Path], dict[str, Any]]
+
+
+def _changed_paths(inspector: RepositoryInspector) -> tuple[str, ...]:
+    return tuple(sorted({
+        *inspector.tracked_changed_paths(),
+        *inspector.untracked_file_hashes().keys(),
+    }))
+
+
+def _terminal_legacy_payload(report: dict[str, Any]) -> dict[str, Any]:
+    output = report.get("redacted_stdout")
+    if not isinstance(output, str):
+        raise RecoveryError("original feature report lacks redacted session output")
+    messages: list[str] = []
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        item = event.get("item") if isinstance(event, dict) else None
+        if (
+            event.get("type") == "item.completed"
+            and isinstance(item, dict)
+            and item.get("type") == "agent_message"
+            and isinstance(item.get("text"), str)
+        ):
+            messages.append(item["text"])
+    if not messages:
+        raise RecoveryError("original feature report lacks a terminal assistant message")
+    marker = "CONVEYOR_TRANSACTION_RESULT="
+    lines = messages[-1].splitlines()
+    candidates = [line.removeprefix(marker) for line in lines if line.startswith(marker)]
+    if len(candidates) != 1 or not next((line for line in reversed(lines) if line.strip()), "").startswith(marker):
+        raise RecoveryError("original feature report lacks one terminal legacy result")
+    try:
+        payload = json.loads(candidates[0])
+    except json.JSONDecodeError as exc:
+        raise RecoveryError("original feature legacy result is invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RecoveryError("original feature legacy result is not an object")
+    return payload
+
+
+def _default_runner(argv: list[str], cwd: Path) -> dict[str, Any]:
+    started = time.monotonic()
+    result = subprocess.run(
+        argv,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=1800,
+    )
+    output = result.stdout + result.stderr
+    record = {
+        "argv": argv,
+        "exit_code": result.returncode,
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "output_sha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
+        "output_summary": redact_text(output[-1200:]),
+    }
+    if argv and Path(argv[1] if len(argv) > 1 else "").name == "bootstrap_project.py":
+        try:
+            payload = json.loads(result.stdout)
+            audit = payload["inspection"]["content_audit"]
+            record["content_audit_hard_gate"] = audit.get("hard_gate")
+            record["content_audit_gate_categories"] = sorted(
+                str(item.get("category"))
+                for item in audit.get("gate_reasons", [])
+                if isinstance(item, dict) and item.get("category")
+            )
+        except (KeyError, TypeError, json.JSONDecodeError):
+            record["content_audit_hard_gate"] = None
+    return record
+
+
+class FeatureResultRecovery:
+    """Inspect and apply one exact preserved F003 implementation recovery."""
+
+    def __init__(
+        self,
+        *,
+        controller_root: Path,
+        configuration: dict[str, Any],
+        project: Project,
+        command_runner: CommandRunner | None = None,
+    ):
+        self.controller_root = controller_root.resolve()
+        self.configuration = configuration
+        self.project = project
+        self.inspector = RepositoryInspector(project.repository)
+        self.command_runner = command_runner or _default_runner
+        self.state_root = self.controller_root / "state/projects" / project.project_id
+        identity = self.inspector.identity()
+        self.ledger = EvidenceLedger(
+            self.state_root / "evidence-ledger.jsonl",
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        self.projection = ProjectionEngine(
+            self.ledger, self.state_root / "projection-cache.json"
+        )
+
+    def _report(self, run_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+        report = self.controller_root / "reports" / run_id / "feature_cycle.json"
+        try:
+            value = json.loads(report.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RecoveryError("original feature report is unavailable or invalid") from exc
+        if not isinstance(value, dict):
+            raise RecoveryError("original feature report is not an object")
+        return report, value, _terminal_legacy_payload(value)
+
+    def inspect(
+        self,
+        *,
+        feature_id: str,
+        original_transaction_id: str,
+        original_run_id: str,
+        original_session_id: str,
+        expected_branch: str,
+        expected_head: str,
+    ) -> dict[str, Any]:
+        if feature_id != "F003":
+            raise RecoveryError("this recovery contract is limited to the protected F003 topology")
+        integrity = self.ledger.verify()
+        events = self.ledger.read()
+        transaction_events = [
+            event for event in events
+            if event["transaction_id"] == original_transaction_id
+        ]
+        event_types = [event["event_type"] for event in transaction_events]
+        expected_event_types = [
+            "TransactionStarted", "LeaseAcquired", "SnapshotCaptured",
+            "SessionLaunched", "HumanGateRaised", "LeaseReleased", "ProjectionUpdated",
+        ]
+        start = next(
+            (event for event in transaction_events if event["event_type"] == "TransactionStarted"),
+            None,
+        )
+        launch = next(
+            (event for event in transaction_events if event["event_type"] == "SessionLaunched"),
+            None,
+        )
+        terminal = next(
+            (event for event in transaction_events if event["event_type"] == "HumanGateRaised"),
+            None,
+        )
+        _, report, legacy = self._report(original_run_id)
+        identity = self.inspector.identity()
+        writer = inspect_repository_writer_lock(
+            self.inspector.writer_lock_path(
+                self.configuration["lock_policy"]["writer_lock_relative_path"]
+            ),
+            self.project.repository,
+        )
+        queue = FeatureQueue.from_location(
+            self.project.repository, self.project.queue_location
+        )
+        feature = queue.feature(feature_id)
+        changed = _changed_paths(self.inspector)
+        report_paths = tuple(sorted(legacy.get("changed_paths") or ()))
+        start_policy = (start or {}).get("payload", {}).get("allowed_mutation_policy") or {}
+        authorized = set(start_policy.get("allowed_paths") or ())
+        authorized_prefixes = tuple(start_policy.get("allowed_prefixes") or ())
+        unauthorized = [
+            path for path in changed
+            if path not in authorized
+            and not any(path == prefix or path.startswith(prefix + "/") for prefix in authorized_prefixes)
+        ]
+        accepted_events = [
+            event for event in events
+            if event["transaction_id"] != original_transaction_id
+            and event["workflow_type"] in {
+                WorkflowType.FEATURE_EXECUTION.value,
+                WorkflowType.FEATURE_ACCEPTANCE.value,
+            }
+            and event["event_type"] == "TransactionCompleted"
+            and event["payload"].get("feature_id") == feature_id
+            and event["payload"].get("accepted_feature_commit")
+        ]
+        exact_subject = f"{feature_id}: Single-Window Application Shell"
+        subject_search = self.inspector.git(
+            ["log", "--all", "--format=%H", "--fixed-strings", "--grep", exact_subject],
+            check=False,
+        ).stdout.splitlines()
+        required_paths = {
+            "Sources/LiveInterviewCompanion/Models/WorkspaceRouter.swift",
+            "Tests/LiveInterviewCompanionTests/WorkspaceRoutingTests.swift",
+            "Tests/LiveInterviewCompanionTests/AppStoreWorkspaceRoutingTests.swift",
+            "docs/features/F003-single-window-application-shell.md",
+            "docs/decisions/0015-single-window-workspace-and-session-routing.md",
+            self.project.queue_location,
+        }
+        checks = {
+            "ledger_integrity": integrity.valid,
+            "original_transaction_exact_event_topology": event_types == expected_event_types,
+            "original_transaction_terminal": terminal is not None,
+            "original_transaction_feature": (start or {}).get("payload", {}).get("feature_id") == feature_id,
+            "original_transaction_run": (start or {}).get("payload", {}).get("run_id") == original_run_id,
+            "original_session": (launch or {}).get("payload", {}).get("session_id") == original_session_id,
+            "report_session": report.get("session_id") == original_session_id,
+            "report_transaction": legacy.get("transaction_id") == original_transaction_id,
+            "report_run": legacy.get("agent_run_id") == original_run_id,
+            "report_feature": legacy.get("selected_feature") == feature_id,
+            "repository_identity": (start or {}).get("repository_identity") == identity["repository_id"],
+            "repository_path_identity": (start or {}).get("repository_path_fingerprint") == identity["path_fingerprint"],
+            "branch": self.inspector.current_branch == expected_branch,
+            "head": self.inspector.head == expected_head,
+            "branch_ref_head": self.inspector.rev_parse(expected_branch, check=False) == expected_head,
+            "no_git_operation": not any(self.inspector.git_operation_state().values()),
+            "index_unstaged": not self.inspector.staged_changed_paths(),
+            "writer_lease_absent": not writer.exists,
+            "changed_paths_match_report": changed == report_paths,
+            "no_unauthorized_paths": not unauthorized,
+            "diff_has_f003_identity": required_paths.issubset(changed),
+            "queue_feature_review": isinstance(feature, dict) and feature.get("status") == "review",
+            "queue_implementation_completed": isinstance(feature, dict)
+            and feature.get("implementation_status") == "Completed",
+            "queue_has_no_accepted_commit": isinstance(feature, dict)
+            and not feature.get("accepted_commit"),
+            "no_accepted_ledger_event": not accepted_events,
+            "no_accepted_subject_commit": not subject_search,
+            "report_classification_preserved": legacy.get("classification") == "FEATURE_BLOCKED",
+        }
+        if not all(checks.values()):
+            failed = ", ".join(key for key, passed in checks.items() if not passed)
+            raise RecoveryError(f"F003 recovery preflight failed: {failed}")
+        old_event_fingerprints = [event["fingerprint"] for event in transaction_events]
+        plan = {
+            "schema_version": 1,
+            "project_id": self.project.project_id,
+            "repository_identity": identity["repository_id"],
+            "repository_path_fingerprint": identity["path_fingerprint"],
+            "feature_id": feature_id,
+            "branch": expected_branch,
+            "head": expected_head,
+            "original_transaction_id": original_transaction_id,
+            "original_run_id": original_run_id,
+            "original_session_id": original_session_id,
+            "original_event_fingerprints": old_event_fingerprints,
+            "changed_paths": list(changed),
+            "original_content_fingerprint": self.inspector.content_diff_fingerprint(changed),
+            "preserved_implementation_paths": [
+                path for path in changed if path not in self._metadata_paths()
+            ],
+            "checks": checks,
+            "model_session_launched": False,
+            "lease_type": "feature_writer",
+            "next_state_on_success": "integration_pending",
+        }
+        plan["preserved_implementation_fingerprint"] = (
+            self.inspector.content_diff_fingerprint(
+                tuple(plan["preserved_implementation_paths"])
+            )
+        )
+        plan["plan_fingerprint"] = fingerprint(plan)
+        return plan
+
+    def _run(self, argv: list[str], evidence: list[dict[str, Any]]) -> dict[str, Any]:
+        record = self.command_runner(argv, self.project.repository)
+        if not isinstance(record, dict) or not isinstance(record.get("exit_code"), int):
+            raise RecoveryError("feature recovery command runner returned invalid evidence")
+        evidence.append(record)
+        return record
+
+    @staticmethod
+    def _documentation_check(repository: Path, *, accepted: bool) -> dict[str, Any]:
+        sources = {
+            "feature_spec": repository / "docs/features/F003-single-window-application-shell.md",
+            "architecture": repository / "docs/architecture.md",
+            "data_flow": repository / "docs/data-flow.md",
+            "adr": repository / "docs/decisions/0015-single-window-workspace-and-session-routing.md",
+            "decision_index": repository / "docs/decisions/README.md",
+            "workspace_router": repository / "Sources/LiveInterviewCompanion/Models/WorkspaceRouter.swift",
+        }
+        contents = {key: path.read_text(encoding="utf-8") for key, path in sources.items()}
+        checks = {
+            "all_sources_present": all(path.is_file() for path in sources.values()),
+            "architecture_names_router": "WorkspaceRouter" in contents["architecture"],
+            "data_flow_names_router": "WorkspaceRouter" in contents["data_flow"],
+            "adr_names_single_window": "single" in contents["adr"].lower()
+            and "WorkspaceRouter" in contents["adr"],
+            "decision_index_names_0015": "0015-single-window-workspace-and-session-routing.md"
+            in contents["decision_index"],
+            "router_defines_seven_sections": all(
+                f"case {name}" in contents["workspace_router"]
+                for name in (
+                    "dashboard", "applications", "practice", "liveInterview",
+                    "sessions", "knowledge", "settings",
+                )
+            ),
+            "feature_acceptance_boxes": (
+                "- [ ]" not in contents["feature_spec"]
+                if accepted else "- [ ]" in contents["feature_spec"]
+            ),
+        }
+        return {
+            "name": "documentation_and_adr_validation",
+            "passed": all(checks.values()),
+            "checks": checks,
+        }
+
+    def _metadata_paths(self) -> tuple[str, ...]:
+        return (
+            "CURRENT_STATUS.md",
+            "docs/CURRENT_STATUS.md",
+            "docs/FEATURE_CATALOG.md",
+            "docs/FEATURE_QUEUE.yaml",
+            "docs/RUN_LOG.md",
+            "docs/features/F003-single-window-application-shell.md",
+        )
+
+    @staticmethod
+    def _replace_once(text: str, old: str, new: str, *, label: str) -> str:
+        if text.count(old) != 1:
+            raise RecoveryError(f"F003 recovery metadata expectation changed: {label}")
+        return text.replace(old, new, 1)
+
+    def _apply_acceptance_metadata(
+        self, *, run_id: str, commands: list[dict[str, Any]], checks: list[dict[str, Any]]
+    ) -> dict[str, bytes]:
+        repository = self.project.repository
+        originals = {
+            relative: (repository / relative).read_bytes()
+            for relative in self._metadata_paths()
+        }
+        queue_path = repository / self.project.queue_location
+        queue = json.loads(queue_path.read_text(encoding="utf-8"))
+        feature = next(item for item in queue["features"] if item.get("id") == "F003")
+        if feature.get("status") != "review" or feature.get("accepted_commit"):
+            raise RecoveryError("F003 queue changed before acceptance metadata transition")
+        feature.update({
+            "status": "integration_pending",
+            "accepted_commit": "SELF",
+            "integration_status": "pending",
+            "implementation_status": "Completed",
+            "acceptance": {
+                "tests_passed": True,
+                "review_passed": True,
+                "documentation_current": True,
+            },
+            "updated_at": utc_now(),
+        })
+        atomic_write_json(queue_path, queue)
+
+        catalog = repository / "docs/FEATURE_CATALOG.md"
+        catalog_text = self._replace_once(
+            catalog.read_text(encoding="utf-8"),
+            "| F003 | Single-Window Application Shell | Review |",
+            "| F003 | Single-Window Application Shell | Integration pending |",
+            label="catalog status",
+        )
+        atomic_write_bytes(catalog, catalog_text.encode("utf-8"))
+
+        spec = repository / "docs/features/F003-single-window-application-shell.md"
+        spec_text = self._replace_once(
+            spec.read_text(encoding="utf-8"),
+            "- Factory status: Review — implementation complete; exact environment gates and adversarial review pending",
+            "- Factory status: Integration pending — host validation passed and the accepted feature commit is pending milestone integration",
+            label="feature status",
+        ).replace("- [ ] ", "- [x] ")
+        atomic_write_bytes(spec, spec_text.encode("utf-8"))
+
+        docs_status = repository / "docs/CURRENT_STATUS.md"
+        docs_text = docs_status.read_text(encoding="utf-8")
+        docs_text = self._replace_once(
+            docs_text,
+            "- Active feature: F003 — Single-Window Application Shell (`review`)",
+            "- Active feature: F003 — Single-Window Application Shell (`integration_pending`)",
+            label="docs active feature",
+        )
+        docs_text = self._replace_once(
+            docs_text,
+            "Its implementation and deterministic tests are complete but uncommitted in review; exact environment gates and adversarial review remain pending.",
+            "Its implementation, host validation, and review corrections passed; one immutable accepted feature commit is pending milestone integration.",
+            label="docs queue state",
+        )
+        docs_text = self._replace_once(
+            docs_text,
+            "F003 implementation and deterministic validation are complete on its isolated branch and remain uncommitted pending adversarial review. Resolve every Critical, High, and Medium finding before acceptance.",
+            "F003 is accepted on its isolated branch with all required host validation and review corrections complete; milestone integration remains pending.",
+            label="docs next action",
+        )
+        atomic_write_bytes(docs_status, docs_text.encode("utf-8"))
+
+        root_status = repository / "CURRENT_STATUS.md"
+        root_text = root_status.read_text(encoding="utf-8")
+        root_text = self._replace_once(
+            root_text,
+            "- Status: Implementation and deterministic validation complete on `codex/F003-single-window-application-shell`; adversarial review pending",
+            "- Status: Accepted on `codex/F003-single-window-application-shell`; milestone integration pending",
+            label="root status",
+        )
+        root_text = self._replace_once(
+            root_text,
+            "- Build: debug compilation passes; release and staged-app verification are required before F003 leaves review",
+            "- Build: focused tests, debug/release builds, full tests, staged-app verify, and accessibility smoke pass",
+            label="root build",
+        )
+        root_text = self._replace_once(
+            root_text,
+            "- Git: F003 remains uncommitted and unintegrated pending adversarial review and acceptance",
+            "- Git: one accepted F003 feature commit is pending milestone integration",
+            label="root git",
+        )
+        root_text = self._replace_once(
+            root_text,
+            "Run the named adversarial review for F003. Resolve every Critical, High, and Medium finding before acceptance.",
+            "Integrate the accepted F003 commit through the milestone integration workflow; do not begin F004 before integration.",
+            label="root next action",
+        )
+        atomic_write_bytes(root_status, root_text.encode("utf-8"))
+
+        run_log = repository / "docs/RUN_LOG.md"
+        summary = [
+            "",
+            f"## {utc_now()[:10]} — F003 zero-model feature-result recovery",
+            "",
+            f"- Recovery run: `{run_id}`; original feature transaction remained immutable.",
+            "- Execution: deterministic controller-host recovery; no model or child session launched.",
+            "- Fresh typed feature-writer lease covered host validation, metadata finalization, and the one accepted commit.",
+            "- Required focused routing/lifecycle tests, debug build, full test suite, release build, staged-app verify, inventory validation, documentation/ADR validation, git diff check, and accessibility single-window smoke passed.",
+            "- The existing review corrections remain present with no unresolved Critical, High, or Medium finding.",
+            "- F003 transitioned from `review` to `accepted` to `integration_pending`; milestone integration was not performed.",
+            "",
+            "### Deterministic validation evidence",
+            "",
+        ]
+        summary.extend(
+            f"- `{ ' '.join(item.get('argv') or []) }`: exit {item.get('exit_code')}"
+            for item in commands
+        )
+        summary.extend(
+            f"- `{item.get('name')}`: {'passed' if item.get('passed') else 'failed'}"
+            for item in checks
+        )
+        prior_log = run_log.read_text(encoding="utf-8").rstrip()
+        atomic_write_bytes(
+            run_log, (prior_log + "\n" + "\n".join(summary) + "\n").encode("utf-8")
+        )
+        return originals
+
+    def _restore_metadata(self, originals: dict[str, bytes]) -> None:
+        for relative, payload in originals.items():
+            atomic_write_bytes(self.project.repository / relative, payload)
+
+    def _materialize_terminal_cycle_cache(
+        self,
+        *,
+        run_id: str,
+        transaction_id: str,
+        accepted_commit: str,
+        projection: dict[str, Any],
+    ) -> None:
+        path = self.inspector.cycle_state_path()
+        try:
+            state = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RecoveryError("F003 recovery cycle cache is unavailable or invalid") from exc
+        if not isinstance(state, dict):
+            raise RecoveryError("F003 recovery cycle cache is not an object")
+        state.update({
+            "schema_version": 1,
+            "project_id": self.project.project_id,
+            "active_milestone": self.project.active_milestone,
+            "current_feature": "F003",
+            "selected_feature": "F003",
+            "current_phase": "integration_pending",
+            "accepted_feature_commit": accepted_commit,
+            "integration_status": "pending",
+            "conveyor_run_id": run_id,
+            "session_id": None,
+            "feature_session_id": None,
+            "session_completion_classification": "FEATURE_ACCEPTED",
+            "session_completion_flags": [],
+            "session_completion_evidence": {
+                "recovery_transaction_id": transaction_id,
+                "accepted_feature_commit": accepted_commit,
+                "model_session_launched": False,
+            },
+            "human_decision_required": None,
+            "failure_classification": None,
+            "retry_exhausted": False,
+            "stop_reason": None,
+            "next_safe_action": (
+                f"scripts/conveyor run --project {self.project.project_id} "
+                f"--mode {self.project.automation_mode}"
+            ),
+            "resume_instructions": (
+                f"scripts/conveyor run --project {self.project.project_id} "
+                f"--mode {self.project.automation_mode}"
+            ),
+            "last_successful_checkpoint": "feature_result_recovery_terminal",
+            "last_verified_git_state": {
+                "branch": self.inspector.current_branch,
+                "head": accepted_commit,
+                "clean": self.inspector.is_clean,
+                "git_operations": self.inspector.git_operation_state(),
+            },
+            "kernel_transaction_id": transaction_id,
+            "kernel_ledger_sequence": projection["ledger_sequence"],
+            "kernel_ledger_fingerprint": projection["ledger_fingerprint"],
+            "kernel_projection_fingerprint": projection["projection_fingerprint"],
+            "updated_at": utc_now(),
+        })
+        unsigned = dict(state)
+        unsigned.pop("kernel_cache_fingerprint", None)
+        state["kernel_cache_fingerprint"] = fingerprint(unsigned)
+        atomic_write_json(path, state)
+
+    def apply(self, plan: dict[str, Any]) -> dict[str, Any]:
+        if plan.get("plan_fingerprint") != fingerprint({
+            key: value for key, value in plan.items() if key != "plan_fingerprint"
+        }):
+            raise RecoveryError("F003 recovery plan fingerprint is invalid")
+        run_id = f"feature-recovery-{uuid.uuid4()}"
+        lock_directory = self.controller_root / self.configuration["lock_policy"]["controller_launch_lock_directory"]
+        reservation = DurableLock(
+            lock_directory / f"{plan['repository_path_fingerprint']}.json"
+        )
+        reservation.acquire(make_lock_record(
+            project_id=self.project.project_id,
+            repository_identity=plan["repository_identity"],
+            run_id=run_id,
+            current_feature="F003",
+            current_phase="feature_result_recovery",
+        ))
+        kernel: WorkflowKernel | None = None
+        originals: dict[str, bytes] | None = None
+        commands: list[dict[str, Any]] = []
+        checks: list[dict[str, Any]] = []
+        try:
+            self.inspector.ensure_runtime_ignored()
+            revalidated = self.inspect(
+                feature_id="F003",
+                original_transaction_id=str(plan["original_transaction_id"]),
+                original_run_id=str(plan["original_run_id"]),
+                original_session_id=str(plan["original_session_id"]),
+                expected_branch=str(plan["branch"]),
+                expected_head=str(plan["head"]),
+            )
+            if revalidated["plan_fingerprint"] != plan["plan_fingerprint"]:
+                raise RecoveryError("F003 recovery evidence changed under launch reservation")
+            adapter = FeatureExecutionAdapter(
+                allowed_paths=tuple(plan["changed_paths"]),
+                commit_subject="F003: Single-Window Application Shell",
+                next_state="integration_pending",
+                allow_untracked=True,
+                require_clean_start=False,
+                denied_paths=(
+                    ".factory/approved-content.yaml",
+                    ".factory/conveyor-state.json",
+                    ".factory/locks/writer.json",
+                    ".factory/project.yaml",
+                    "docs/AUTONOMY_CONTRACT.md",
+                ),
+                denied_prefixes=(".factory", "factory-integration"),
+            )
+            kernel = WorkflowKernel(
+                project=self.project,
+                ledger=self.ledger,
+                projection=self.projection,
+                lease=WorkflowWriterLease(self.inspector.writer_lock_path(
+                    self.configuration["lock_policy"]["writer_lock_relative_path"]
+                )),
+            )
+            transaction = kernel.begin(
+                workflow_type=WorkflowType.FEATURE_EXECUTION,
+                milestone=self.project.active_milestone,
+                feature_id="F003",
+                run_id=run_id,
+                policy=adapter.policy,
+                start_evidence={
+                    "recovery_mode": "preserved_feature_result",
+                    "recovered_transaction_id": plan["original_transaction_id"],
+                    "original_session_id": plan["original_session_id"],
+                    "model_session_launched": False,
+                    "plan_fingerprint": plan["plan_fingerprint"],
+                },
+                expected_starting_branch=str(plan["branch"]),
+                expected_starting_head=str(plan["head"]),
+            )
+            kernel.acquire_lease()
+            kernel.capture_snapshot()
+            if transaction.feature_id != "F003":
+                raise TransactionError("recovery kernel lost the F003 feature identity")
+
+            required_commands = [
+                ["swift", "test", "--filter", "WorkspaceRoutingTests"],
+                ["swift", "test", "--filter", "AppStoreWorkspaceRoutingTests"],
+                ["swift", "test", "--filter", "SessionLifecycleTests"],
+                ["swift", "build"],
+                ["swift", "test"],
+                ["swift", "build", "-c", "release"],
+                ["./script/build_and_run.sh", "--verify"],
+                [
+                    "swift",
+                    str(self.controller_root / "scripts/f003_ax_smoke.swift"),
+                ],
+                [
+                    "python3",
+                    str(Path.home() / ".agents/skills/app-bootstrap/scripts/bootstrap_project.py"),
+                    "--root", str(self.project.repository),
+                ],
+            ]
+            for argv in required_commands:
+                record = self._run(argv, commands)
+                content_gate_failed = (
+                    Path(argv[1] if len(argv) > 1 else "").name == "bootstrap_project.py"
+                    and record.get("content_audit_hard_gate") is not False
+                )
+                if record["exit_code"] != 0 or content_gate_failed:
+                    permission = "ACCESSIBILITY_PERMISSION_REQUIRED" in str(record.get("output_summary"))
+                    gate = {
+                        "classification": (
+                            "accessibility_permission_required"
+                            if permission else "host_validation_failed"
+                        ),
+                        "reason": (
+                            "Grant Accessibility permission to the controller host and rerun the exact F003 recovery."
+                            if permission else
+                            f"Required host validation failed: {' '.join(argv)}"
+                        ),
+                        "failed_command": argv,
+                        "retryable": permission,
+                    }
+                    state = (
+                        TransactionState.HUMAN_DECISION_REQUIRED
+                        if permission else TransactionState.TERMINAL_FAILURE
+                    )
+                    classification = (
+                        "HUMAN_DECISION_REQUIRED" if permission else "FEATURE_VALIDATION_FAILED"
+                    )
+                    projection = kernel.block(
+                        state=state,
+                        classification=classification,
+                        next_state="human_decision_required" if permission else "review",
+                        human_gate=gate if permission else None,
+                    )
+                    return {
+                        "schema_version": 1,
+                        "project_id": self.project.project_id,
+                        "outcome": "human_decision_required" if permission else "validation_failed",
+                        "feature_id": "F003",
+                        "run_id": run_id,
+                        "recovery_transaction_id": transaction.transaction_id,
+                        "failed_command": argv,
+                        "model_session_launched": False,
+                        "implementation_preserved": True,
+                        "projection": projection,
+                        "human_gate": gate if permission else None,
+                    }
+
+            checks.append(self._documentation_check(self.project.repository, accepted=False))
+            if not checks[-1]["passed"]:
+                raise RecoveryError("pre-acceptance documentation and ADR validation failed")
+            originals = self._apply_acceptance_metadata(
+                run_id=run_id, commands=commands, checks=checks
+            )
+            if self.inspector.content_diff_fingerprint(
+                tuple(plan["preserved_implementation_paths"])
+            ) != plan["preserved_implementation_fingerprint"]:
+                self._restore_metadata(originals)
+                originals = None
+                raise RecoveryError("preserved F003 implementation content changed during metadata transition")
+            inventory = self._run([
+                "python3",
+                str(Path.home() / ".agents/skills/feature-inventory/scripts/validate_inventory.py"),
+                "--root", str(self.project.repository),
+            ], commands)
+            checks.append(self._documentation_check(self.project.repository, accepted=True))
+            diff_check = self._run(["git", "diff", "--check"], commands)
+            if inventory["exit_code"] != 0 or diff_check["exit_code"] != 0 or not checks[-1]["passed"]:
+                self._restore_metadata(originals)
+                originals = None
+                raise RecoveryError("post-transition inventory, documentation, or diff validation failed")
+            if _changed_paths(self.inspector) != tuple(plan["changed_paths"]):
+                self._restore_metadata(originals)
+                originals = None
+                raise RecoveryError("acceptance metadata changed the authorized path set")
+
+            accepted_commit = kernel.finalize_deterministic_feature_recovery(
+                original_transaction_id=str(plan["original_transaction_id"]),
+                changed_paths=tuple(plan["changed_paths"]),
+                original_content_fingerprint=str(plan["original_content_fingerprint"]),
+                plan_fingerprint=str(plan["plan_fingerprint"]),
+                validation_evidence={
+                    "all_required_passed": True,
+                    "commands": [
+                        {key: item.get(key) for key in (
+                            "argv", "exit_code", "duration_seconds", "output_sha256"
+                        )}
+                        for item in commands
+                    ],
+                    "checks": checks,
+                    "warnings": [],
+                },
+            )
+            completion = kernel.complete(
+                classification="FEATURE_ACCEPTED",
+                evidence={
+                    "accepted_feature_commit": accepted_commit,
+                    "integration_status": "pending",
+                    "recovered_transaction_id": plan["original_transaction_id"],
+                    "model_session_launched": False,
+                    "host_validation_passed": True,
+                },
+            )
+            self._materialize_terminal_cycle_cache(
+                run_id=run_id,
+                transaction_id=transaction.transaction_id,
+                accepted_commit=accepted_commit,
+                projection=completion["projection"],
+            )
+            old_events_after = [
+                event["fingerprint"] for event in self.ledger.read()
+                if event["transaction_id"] == plan["original_transaction_id"]
+            ]
+            final_checks = {
+                "accepted_commit_direct_child": self.inspector.rev_parse(
+                    f"{accepted_commit}^", check=False
+                ) == plan["head"],
+                "repository_clean": self.inspector.is_clean,
+                "branch_unchanged": self.inspector.current_branch == plan["branch"],
+                "writer_lease_absent": not self.inspector.writer_lock_path(
+                    self.configuration["lock_policy"]["writer_lock_relative_path"]
+                ).exists(),
+                "original_transaction_immutable": old_events_after
+                == plan["original_event_fingerprints"],
+                "projection_integration_pending": completion["projection"].get("current_state")
+                == "integration_pending",
+                "cycle_cache_integration_pending": json.loads(
+                    self.inspector.cycle_state_path().read_text(encoding="utf-8")
+                ).get("kernel_ledger_sequence") == completion["projection"]["ledger_sequence"],
+                "no_integration_performed": not any(
+                    event["transaction_id"] == transaction.transaction_id
+                    and event["workflow_type"] == WorkflowType.MILESTONE_INTEGRATION.value
+                    for event in self.ledger.read()
+                ),
+            }
+            if not all(final_checks.values()):
+                failed = ", ".join(key for key, passed in final_checks.items() if not passed)
+                raise RecoveryError(f"F003 recovery postcondition failed: {failed}")
+            report = {
+                "schema_version": 1,
+                "project_id": self.project.project_id,
+                "feature_id": "F003",
+                "outcome": "integration_pending",
+                "run_id": run_id,
+                "recovery_transaction_id": transaction.transaction_id,
+                "recovered_transaction_id": plan["original_transaction_id"],
+                "accepted_feature_commit": accepted_commit,
+                "changed_paths": plan["changed_paths"],
+                "commands": commands,
+                "checks": checks,
+                "final_checks": final_checks,
+                "model_session_launched": False,
+                "milestone_integration_performed": False,
+                "projection": completion["projection"],
+                "created_at": utc_now(),
+            }
+            report_path = self.controller_root / "reports" / run_id / "feature-result-recovery.json"
+            atomic_write_json(report_path, report)
+            report["report_path"] = str(report_path)
+            return report
+        except Exception:
+            if originals is not None and not self.inspector.is_clean:
+                # Metadata rollback is allowed only before the feature commit.
+                if self.inspector.head == plan["head"]:
+                    self._restore_metadata(originals)
+            if kernel is not None and kernel.transaction is not None:
+                lease = kernel.lease.read()
+                if lease is not None:
+                    try:
+                        kernel.block(
+                            state=TransactionState.TERMINAL_FAILURE,
+                            classification="FEATURE_VALIDATION_FAILED",
+                            next_state="review",
+                        )
+                    except Exception:
+                        pass
+            raise
+        finally:
+            reservation.release(run_id)

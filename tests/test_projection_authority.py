@@ -515,10 +515,46 @@ class ProjectionAuthorityTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(TransactionError, "planned transaction start"):
                     engine._execute_feature(
-                        project, "one_feature", "stale-feature-dispatch", state
+                        project,
+                        "one_feature",
+                        "stale-feature-dispatch",
+                        state,
+                        expected_feature_id=str(planned["selected_feature"]),
                     )
             self.assertEqual(ledger_before, migrator.ledger.path.read_bytes())
             self.assertEqual(advanced_tree, [git(repository, "rev-parse", "HEAD^{tree}")])
+            self.assertFalse((repository / ".factory/locks/writer.json").exists())
+
+    def test_feature_dispatch_rejects_feature_identity_mismatch_before_transaction(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, project = synthetic_repository(root)
+            configuration = controller_configuration(root, project)
+            migrator = LegacyStateMigrator(
+                controller_root=configuration.root, project=project
+            )
+            migrator.apply()
+            engine = CycleEngine(configuration, SyntheticLauncher())
+            ledger_before = migrator.ledger.path.read_bytes()
+            state = engine._project_document(
+                project,
+                "feature-identity-mismatch",
+                RepositoryInspector(repository).identity()["path_fingerprint"],
+            )
+
+            with self.assertRaisesRegex(
+                ProjectionError,
+                "queue selection disagrees with the authoritative feature identity",
+            ):
+                engine._execute_feature(
+                    project,
+                    "one_feature",
+                    "feature-identity-mismatch",
+                    state,
+                    expected_feature_id="F999",
+                )
+
+            self.assertEqual(ledger_before, migrator.ledger.path.read_bytes())
             self.assertFalse((repository / ".factory/locks/writer.json").exists())
 
     def test_integration_dispatch_rejects_post_validation_milestone_advance(self):

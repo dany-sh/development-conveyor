@@ -274,7 +274,10 @@ def build_run_plan(plan: dict[str, Any], root: Path, *, project: Any | None = No
         else "status" if action in deterministic_actions or deterministic_queue_selection
         else "controller_repair"
     )
-    risk = "medium" if application_feature else "low"
+    # A repository-writing application feature owns production correctness and
+    # must use the pinned primary-writer policy. Cost awareness reduces context
+    # and duplicate validation; it does not downgrade the writer model.
+    risk = "high" if application_feature else "low"
     selection = select_model(task=task, risk=risk)
     changed: list[str] = []
     selected_feature = None

@@ -2214,7 +2214,7 @@ class CycleEngine:
         path = self._report_path(report_root, request.run_id, f"{request.action}{suffix}.json")
         invoked = {
             "queue_reconciliation": "product-architect planning-only and feature-inventory",
-            "feature_cycle": "feature-factory",
+            "feature_cycle": "direct-feature-session",
             "milestone_integration": "milestone-integrator",
             "milestone_gate": "milestone-gate",
             "human_decision_report": "human-decision-report",
@@ -2258,6 +2258,7 @@ class CycleEngine:
             "planned_reasoning": result.plan.planned_reasoning,
             "launched_model": result.plan.launched_model,
             "launched_reasoning": result.plan.launched_reasoning,
+            "collaboration_tools_removed": result.plan.collaboration_tools_removed,
             "codex_executable": result.plan.codex_executable,
             "compatibility": result.plan.compatibility,
             "safe_resume_command": f"scripts/conveyor resume --project {request.project.project_id}",
@@ -2957,16 +2958,28 @@ class CycleEngine:
         project_state: dict[str, Any],
         *,
         reservation_held: bool = False,
+        expected_execution_plan: ExecutionPlan | None = None,
+        expected_feature_id: str | None = None,
     ) -> dict[str, Any]:
         inspector = RepositoryInspector(project.repository)
         authoritative_context = self._authoritative_execution_context(project)
-        expected_execution_plan: ExecutionPlan | None = None
         if authoritative_context is not None:
             projected, executable, _ = authoritative_context
             if executable.workflow_type != WorkflowType.FEATURE_EXECUTION.value:
                 raise ProjectionError("authoritative execution plan does not permit a feature session")
             executable.validate_against(projected)
+            if (
+                expected_execution_plan is not None
+                and expected_execution_plan.to_dict() != executable.to_dict()
+            ):
+                raise ProjectionError("feature execution plan changed before preflight")
             expected_execution_plan = executable
+        bound_feature_id = (
+            expected_execution_plan.feature_id
+            if expected_execution_plan is not None else expected_feature_id
+        )
+        if not isinstance(bound_feature_id, str) or not bound_feature_id:
+            raise ProjectionError("feature execution lacks an authoritative selected feature")
         if not inspector.is_clean:
             raise ConveyorError("feature execution requires a clean repository")
         compatibility = self._compatibility_snapshot(project, "feature_cycle")
@@ -3100,6 +3113,10 @@ class CycleEngine:
             selection = queue.select_next(project.active_milestone or "")
             if selection is None:
                 raise QueueError("no dependency-ready feature exists after queue reconciliation")
+            if selection.feature_id != bound_feature_id:
+                raise ProjectionError(
+                    "queue selection disagrees with the authoritative feature identity"
+                )
             cycle_path = inspector.cycle_state_path()
             state = self._new_cycle_state(
                 project, run_id, inspector, selection.feature, compatibility=compatibility
@@ -3252,6 +3269,8 @@ class CycleEngine:
                 run_id=run_id,
                 policy=feature_adapter.policy,
             )
+            if feature_transaction.feature_id != bound_feature_id:
+                raise TransactionError("kernel feature identity differs from the execution plan")
             feature_kernel.acquire_lease()
             feature_kernel.capture_snapshot()
             cost_plan = build_run_plan(
@@ -3281,7 +3300,10 @@ class CycleEngine:
                 planned_model=str(cost_plan["selected_model"]),
                 planned_reasoning=str(cost_plan["selected_reasoning_effort"]),
                 model_plan_source="cost_aware_execution_plan",
+                context_files=tuple(cost_plan["context_pack"]["files"]),
             )
+            if request.feature != bound_feature_id:
+                raise SessionError("session request feature differs from the execution plan")
             result, repairs, retry_status = self._launch_with_retries(
                 request, inspector, "feature_in_progress", "implementation_repairs",
                 reservation_held=True, on_session_started=feature_kernel.session_launched,
@@ -7085,7 +7107,13 @@ class CycleEngine:
                     effective, mode, run_id, reloaded_executable
                 )
             if action == "feature_cycle":
-                evidence = self._execute_feature(effective, mode, run_id, project_state)
+                evidence = self._execute_feature(
+                    effective,
+                    mode,
+                    run_id,
+                    project_state,
+                    expected_execution_plan=reloaded_executable,
+                )
                 return {
                     "project_id": project.project_id,
                     "outcome": evidence.get("outcome") or (
@@ -7275,6 +7303,7 @@ class CycleEngine:
                         run_id,
                         project_state,
                         reservation_held=True,
+                        expected_feature_id=str(plan.get("selected_feature") or ""),
                     )
                     if evidence.get("outcome") == "human_decision_required":
                         return {"project_id": project.project_id, **evidence}

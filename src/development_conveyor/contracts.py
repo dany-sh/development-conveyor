@@ -453,6 +453,15 @@ class SessionResultEnvelope:
         feature = value.get("feature_id")
         if feature is not None and (not isinstance(feature, str) or not feature):
             raise SchemaValidationError("session-result feature_id must be null or a non-empty string")
+        if workflow in {
+            WorkflowType.FEATURE_PREPARATION,
+            WorkflowType.FEATURE_EXECUTION,
+            WorkflowType.FEATURE_ACCEPTANCE,
+            WorkflowType.MILESTONE_INTEGRATION,
+        } and not feature:
+            raise SchemaValidationError(
+                f"session-result feature_id is required for {workflow.value}"
+            )
         return cls(
             schema_version=1,
             workflow_type=workflow,

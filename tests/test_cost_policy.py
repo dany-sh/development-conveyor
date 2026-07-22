@@ -9,8 +9,14 @@ from development_conveyor.cost_policy import (
     ChildSessionBudget, build_run_plan, contain_command_output, context_pack, reusable_evidence,
     select_model, ValidationEvidenceCache, validation_identity, verification_plan,
 )
-from development_conveyor.sessions import SessionLauncher, SessionRequest
-from tests.helpers import REPOSITORY_ROOT, synthetic_repository, write_json
+from development_conveyor.sessions import (
+    SessionLauncher,
+    SessionRequest,
+    feature_execution_terminal_schema,
+    validate_feature_execution_result,
+)
+from development_conveyor.repository import RepositoryInspector
+from tests.helpers import REPOSITORY_ROOT, git, synthetic_repository, write_json
 
 
 class CostPolicyTests(unittest.TestCase):
@@ -58,8 +64,8 @@ class CostPolicyTests(unittest.TestCase):
             (repository / "docs/features/F003.md").write_text("# F003\n", encoding="utf-8")
             write_json(queue_path, queue)
             plan = build_run_plan({"proposed_next_action": "feature_cycle", "selected_feature": "F003", "application_mutation_expected": True}, Path.cwd(), project=project)
-            self.assertEqual((plan["task_classification"], plan["risk_classification"]), ("application_feature", "medium"))
-            self.assertEqual((plan["selected_model"], plan["selected_reasoning_effort"]), ("gpt-5.6-terra", "medium"))
+            self.assertEqual((plan["task_classification"], plan["risk_classification"]), ("application_feature", "high"))
+            self.assertEqual((plan["selected_model"], plan["selected_reasoning_effort"]), ("gpt-5.6-sol", "high"))
             self.assertGreater(plan["context_pack"]["file_count"], 0)
             self.assertIn("Tests/LiveInterviewCompanionTests/SessionLifecycleTests.swift", plan["selected_tests"])
             self.assertTrue(plan["final_feature_acceptance_gates"])
@@ -153,6 +159,102 @@ class CostPolicyTests(unittest.TestCase):
                 with self.assertRaisesRegex(Exception, "planned/launched model binding mismatch"):
                     launcher.launch(request)
             popen.assert_not_called()
+
+    def test_direct_feature_session_is_identity_bound_and_removes_collaboration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            launcher = SessionLauncher(
+                REPOSITORY_ROOT,
+                {"codex": {"executable": "codex", "session_timeout_seconds": 60}},
+            )
+            identity = RepositoryInspector(repository).identity()["repository_id"]
+            request = SessionRequest(
+                "feature_cycle",
+                project,
+                "run-direct",
+                "one_feature",
+                feature="F001",
+                transaction_id="transaction-direct",
+                repository_identity=identity,
+                starting_branch="codex/m0-foundation",
+                starting_commit=git(repository, "rev-parse", "HEAD"),
+                child_session_budget=0,
+                planned_model="gpt-5.6-sol",
+                planned_reasoning="high",
+                model_plan_source="cost_aware_execution_plan",
+                context_files=("docs/features/F001.md",),
+            )
+            compatible = CompatibilityResult(
+                classification="compatible",
+                executable="codex",
+                detected_version="1.0.0",
+                required_minimum_version=None,
+                effective_model="gpt-5.6-sol",
+                effective_reasoning="high",
+                policy_source="cost_aware_execution_plan",
+                policy_role="direct-feature-session",
+                compatible=True,
+                diagnostic="ok",
+                remediation="none",
+                validation_command="scripts/conveyor doctor",
+            )
+            with (
+                patch.object(launcher, "compatibility", return_value=compatible),
+                patch.object(launcher, "_verify_zero_child_capability") as capability,
+            ):
+                plan = launcher.plan(request)
+            capability.assert_called_once()
+            self.assertIn("--disable", plan.argv)
+            self.assertIn("multi_agent", plan.argv)
+            self.assertIn("multi_agent_v2", plan.argv)
+            self.assertTrue(plan.collaboration_tools_removed)
+            self.assertIn('"feature_id": {', plan.prompt)
+            self.assertIn('"const": "F001"', plan.prompt)
+            self.assertIn("printenv CODEX_THREAD_ID", plan.prompt)
+            self.assertNotIn("$feature-factory", plan.prompt)
+            self.assertNotIn("Use the existing `feature-factory`", plan.prompt)
+
+            schema = feature_execution_terminal_schema(request)
+            self.assertEqual(schema["properties"]["feature_id"], {"const": "F001"})
+            self.assertEqual(
+                schema["properties"]["transaction_id"], {"const": "transaction-direct"}
+            )
+
+    def test_direct_feature_result_rejects_null_or_mismatched_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            inspector = RepositoryInspector(repository)
+            identity = inspector.identity()["repository_id"]
+            starting = inspector.head
+            request = SessionRequest(
+                "feature_cycle", project, "run-direct", "one_feature",
+                feature="F001", transaction_id="transaction-direct",
+                repository_identity=identity,
+                starting_branch="codex/m0-foundation", starting_commit=starting,
+                child_session_budget=0, planned_model="gpt-5.6-sol",
+                planned_reasoning="high", context_files=("docs/features/F001.md",),
+            )
+            value = {
+                "schema_version": 1, "workflow_type": "feature_execution",
+                "classification": "FEATURE_ACCEPTED", "project_id": project.project_id,
+                "repository_identity": identity, "transaction_id": "transaction-direct",
+                "run_id": "run-direct", "session_id": "wrong-session",
+                "starting_branch": "codex/m0-foundation", "starting_commit": starting,
+                "current_commit": starting, "feature_id": "F001", "changed_paths": [],
+                "evidence": {"implementation_complete": True, "focused_validation": [],
+                             "controller_acceptance_pending": True},
+                "next_state": "feature_accepted",
+            }
+            failures = validate_feature_execution_result(
+                value, request, observed_session_id="actual-session"
+            )
+            self.assertIn("session_id_matches_launcher", failures)
+            value["session_id"] = "actual-session"
+            value["feature_id"] = None
+            failures = validate_feature_execution_result(
+                value, request, observed_session_id="actual-session"
+            )
+            self.assertIn("feature_id_matches_execution_plan", failures)
 
     def test_context_pack_is_focused_and_high_risk_contracts_are_added(self):
         with tempfile.TemporaryDirectory() as temporary:

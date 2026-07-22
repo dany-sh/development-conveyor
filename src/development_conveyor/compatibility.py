@@ -16,7 +16,7 @@ from .redaction import redact_text
 
 ACTION_POLICY_ROLES = {
     "queue_reconciliation": "feature-inventory-lead",
-    "feature_cycle": "feature-factory-orchestrator",
+    "feature_cycle": "direct-feature-session",
     "milestone_integration": "milestone-integrator",
     "milestone_gate": "release-auditor",
     "human_decision_report": "development-conveyor",

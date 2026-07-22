@@ -1,23 +1,63 @@
-# Feature cycle session
+# Direct bounded feature implementation session
 
 Repository: `{repository}`
 Project: `{project_id}`
 Active milestone: `{milestone}`
 Selected feature: `{feature}`
-Conveyor run / agent run: `{run_id}`
+Conveyor run: `{run_id}`
 Mode: `{mode}`
 Transaction: `{transaction_id}`
 Repository identity: `{repository_identity}`
 Starting branch: `{starting_branch}`
 Starting commit: `{starting_commit}`
 Authorized paths: `{allowed_paths}`
+Child-session budget: `0`
 
-Use the existing `$feature-factory` workflow to complete exactly this dependency-ready feature. Use Conveyor run ID `{run_id}` as the repository writer `agent-run` identity so durable lock and checkpoint evidence agree. Require `repository-explorer`, one primary `feature-worker`, `test-engineer`, `adversarial-reviewer`, and all repository-required checks. Correct every Critical, High, and Medium finding within scope.
+Implement exactly the selected feature directly in this parent session. Do not
+read or invoke Feature Factory, Milestone Integrator, Product Architect,
+Repository Explorer, Feature Worker, Test Engineer, Adversarial Reviewer, or
+any named agent. Do not use collaboration, delegation, fan-out, or child-agent
+tools. The launcher has mechanically removed those tools for this session.
 
-The controller has already created and verified the feature branch and holds the matching repository writer lease under agent-run identity `{run_id}`. Verify the existing matching lease; do not acquire a second lease and do not release the controller-owned lease. Treat the controller-selected `ready` feature as assigned to this session. Reconcile its queue branch and integration-base fields to the exact values in `.factory/conveyor-state.json`, transition it through the required implementation states, and keep those metadata edits in the single accepted feature commit rather than making a separate preparation commit.
+The controller already created and verified the feature branch and holds the
+matching typed writer lease. Do not acquire, replace, heartbeat, or release a
+lease. Do not stage or commit. Leave acceptance, the one immutable feature
+commit, and milestone integration to the controller.
 
-Implement and validate exactly this feature, including required queue and documentation updates, but leave every authorized change uncommitted. Do not stage or commit. The controller kernel validates the exact changed paths and starting HEAD and creates the one immutable accepted feature commit. Do not run the legacy `queuectl preflight` or `git_transition.py acceptance-preflight`: those commands require, respectively, no active writer lease and an already-clean accepted commit, so they are incompatible with this kernel-owned uncommitted phase. Instead verify the exact existing typed lease read-only, run the content audit, queue checks, configured validation commands, tests, and adversarial review, then return the typed uncommitted result. The kernel performs equivalent accepted-commit checks after its commit. Stop on the feature branch. Do not invoke milestone integration or switch to `{milestone_branch}` in this session. Do not implement another feature.
+Use only the focused context pack below plus files directly required to
+implement `{feature}`. Preserve existing behavior outside the feature contract.
+Run focused implementation-loop tests that can execute inside this model
+sandbox. Do not run staged-application, LaunchServices, accessibility, signing,
+notarization, release, or other host-level checks here; the controller runs all
+final acceptance gates directly on the host after the session returns.
 
-Your final assistant message must end with exactly one line `CONVEYOR_TRANSACTION_RESULT=` followed immediately by a compact JSON object matching the session-result schema. Bind it to transaction `{transaction_id}`, repository `{repository_identity}`, run `{run_id}`, the actual session ID, starting branch `{starting_branch}`, starting commit `{starting_commit}`, unchanged current commit `{starting_commit}`, selected feature `{feature}`, exact sorted changed paths, classification `FEATURE_ACCEPTED`, and next state `feature_accepted`. The marker must be the final nonblank line. Tool output, prose, another marker, a commit, a changed HEAD, or a mismatched identity cannot authorize acceptance.
+Keep HEAD exactly `{starting_commit}` and remain on `{starting_branch}`. The
+final changed path array must be sorted, unique, and exactly match the live
+tracked and untracked implementation diff. Record focused validation command,
+exit status, and concise evidence in `evidence.focused_validation`. Set
+`evidence.implementation_complete` and
+`evidence.controller_acceptance_pending` to `true`.
 
-Preserve interruptions, existing branches, worktrees, commits, and conflicts. Never merge into the default branch, push, force-push, tag, publish, deploy, release, notarize, reset, clean, auto-stash, force-checkout, delete unintegrated work, or resolve a semantic conflict automatically. Stop at a documented human-decision condition. Record role-pinned model evidence without hidden reasoning or secrets.
+Obtain the actual session UUID from `printenv CODEX_THREAD_ID` in this session.
+It must equal the launcher's `thread.started` identity. Never return a null,
+placeholder, inherited controller ID, or guessed session ID.
+
+Your final assistant message must end with exactly one line
+`CONVEYOR_TRANSACTION_RESULT=` followed immediately by one compact JSON object
+matching this exact schema. The marker must be the final nonblank line. A
+legacy payload, extra key, missing identity, placeholder, null feature/session,
+changed HEAD, or mismatched path set is rejected.
+
+```json
+{terminal_schema}
+```
+
+Preserve interruptions, existing branches, worktrees, commits, and conflicts.
+Never merge into the default branch, push, force-push, tag, publish, deploy,
+release, notarize, reset, clean, auto-stash, force-checkout, delete
+unintegrated work, or resolve a semantic conflict automatically. Stop at a
+documented human-decision condition.
+
+## Focused application context
+
+{focused_context}

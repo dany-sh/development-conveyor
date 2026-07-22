@@ -614,7 +614,7 @@ def build_project_plan(
     session_actions = {
         "queue_reconciliation": ["product-architect (planning-only)", "$feature-inventory"],
         "planning_refinement": ["product-architect (planning-only)", "$feature-inventory (read-only validation)"],
-        "feature_cycle": ["$feature-factory"],
+        "feature_cycle": ["direct bounded parent feature session (child budget 0)"],
         "resume_existing_factory_work": ["resume repository-scoped Codex session"],
         "milestone_gate": ["$milestone-gate", "release-auditor (read-only)"],
         "resume": ["resume persisted Conveyor cycle"],

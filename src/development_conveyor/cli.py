@@ -21,6 +21,7 @@ from .validation import SafetyPolicy
 from .consistency import ConsistencyChecker
 from .migration import LegacyStateMigrator
 from .integration_executor import execute_integration_plan
+from .feature_result_recovery import FeatureResultRecovery
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
 
@@ -116,6 +117,20 @@ def _parser() -> argparse.ArgumentParser:
     )
     recover_planning.add_argument("--apply", action="store_true")
     recover_planning.add_argument("--dry-run", action="store_true")
+    recover_feature_result = subparsers.add_parser(
+        "recover-feature-result",
+        help="validate and finalize one exact terminal feature-session implementation without a model",
+    )
+    recover_feature_result.add_argument("--project", required=True)
+    recover_feature_result.add_argument("--feature", required=True)
+    recover_feature_result.add_argument("--original-transaction-id", required=True)
+    recover_feature_result.add_argument("--original-run-id", required=True)
+    recover_feature_result.add_argument("--original-session-id", required=True)
+    recover_feature_result.add_argument("--expected-branch", required=True)
+    recover_feature_result.add_argument("--expected-head", required=True)
+    mode = recover_feature_result.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
     verify = subparsers.add_parser(
         "verify-consistency", help="verify ledger, projection, Git, queue, lease, and legacy evidence"
     )
@@ -281,6 +296,26 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
             expected_session_id=args.session_id,
             dry_run=not args.apply,
         )
+
+    if args.command == "recover-feature-result":
+        recovery = FeatureResultRecovery(
+            controller_root=controller_root,
+            configuration=configuration.conveyor,
+            project=registry.get(args.project),
+        )
+        plan = recovery.inspect(
+            feature_id=args.feature,
+            original_transaction_id=args.original_transaction_id,
+            original_run_id=args.original_run_id,
+            original_session_id=args.original_session_id,
+            expected_branch=args.expected_branch,
+            expected_head=args.expected_head,
+        )
+        return recovery.apply(plan) if args.apply else {
+            **plan,
+            "outcome": "recovery_ready",
+            "application_repository_written": False,
+        }
 
     if args.command == "run":
         mode = args.mode or configuration.conveyor["default_mode"]

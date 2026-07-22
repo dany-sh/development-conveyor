@@ -658,3 +658,23 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `fresh_application_feature_execution_planning`
 - Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-22T19:11:16+00:00
+
+- Agent role: `development-conveyor`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `direct_feature_session_recovery`
+- Safety and autonomy contracts unchanged: `true`
+
+### Direct feature-session repair and F003 result recovery — 2026-07-22
+
+- Controller repair: `feature_cycle` no longer invokes Feature Factory or any named child role. The authoritative selected feature is checked through plan reload, queue selection, kernel transaction, `SessionRequest`, focused prompt, exact terminal schema, launcher-observed session UUID, live branch/HEAD/path validation, session report, ledger, and projection.
+- Zero-child enforcement: direct application mutation plans one `gpt-5.6-sol`/`high` parent and zero children. Launcher preflight proves both multi-agent feature surfaces are disabled, applies strict CLI configuration, and fails before launch if collaboration removal is unsupported.
+- Recovery preflight: original F003 transaction `8e45c566-49eb-452e-b5cc-c10f40e762fa`, run `2d129697-ee84-4815-936c-2dc691bc7f08`, session `019f8add-bd2b-7662-aca1-a15fe0da1cf1`, branch `codex/F003-single-window-application-shell`, base `e55e8773da8028e728d221ba677ac4336dfb44d7`, exact seven-event topology, 25 changed paths, review/Completed queue state, absent accepted commit, absent accepted ledger evidence, and absent writer lease all matched. Dry-run wrote nothing.
+- Transparent failed gate: recovery transaction `6a7ef5e4-8620-4c72-9564-286e5a4dc35a` stopped at the first Accessibility selector, recorded terminal failure at ledger sequences 94-99, released its lease, and preserved every F003 byte. Native macOS AX selection replaced the incompatible System Events row selector; no application production file changed during that correction.
+- Successful recovery: zero-model transaction `a41c79c4-a3b3-45ab-923c-5a0bacdc6cfa` occupies sequences 100-112 and has no `SessionLaunched` event. It used a fresh `feature_writer` lease, preserved the non-metadata implementation fingerprint, created exactly one direct-child commit `543615bd0cd70e8cd56d70e4a508c076954e6cb9`, terminalized `FEATURE_ACCEPTED`, released the lease, refreshed the compatibility cycle cache, and projected `integration_pending`. The original transaction fingerprints remain unchanged and milestone integration did not run.
+- Application gates: `WorkspaceRoutingTests` passed 9 selected tests including its AppStore overlap, `AppStoreWorkspaceRoutingTests` passed 4, `SessionLifecycleTests` passed 8, `swift build` passed, all 112 tests passed, `swift build -c release` passed, `./script/build_and_run.sh --verify` passed, and the native Accessibility smoke passed all seven destinations with one resizable standard window. The profile-aware audit scanned 242 files with no hard gate; inventory, documentation/ADR, and diff checks passed.
+- Controller gates: 105 focused tests passed across `test_cost_policy`, `test_feature_result_recovery`, `test_projection_authority`, `test_cli_compatibility_repair`, `test_post_integration_finalization`, and `test_milestone_integration_result_contract`. Relevant Python compilation, Swift script typecheck, `scripts/conveyor validate-config`, and `git diff --check` passed. The complete controller suite, real `resume`, subagents, push, tag, publication, deployment, release, and milestone integration were not run.
