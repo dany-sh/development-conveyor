@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .contracts import ConsistencyClassification, WorkflowType, fingerprint
-from .errors import CorruptEvidenceError, ProjectionError, QueueError
+from .errors import CorruptEvidenceError, ProjectionError, QueueError, RecoveryError
 from .ledger import EvidenceLedger, TERMINAL_EVENT_TYPES
 from .locks import inspect_repository_writer_lock
 from .migration import LegacyStateMigrator
@@ -26,6 +26,7 @@ from .execution_plan import (
     integrated_feature_execution_checks,
 )
 from .feature_branches import canonical_feature_branch
+from .cycle_cache import validated_canonical_projection_binding
 
 
 SEVERITY_ORDER = {
@@ -98,15 +99,17 @@ class ConsistencyChecker:
 
         ledger_exists = self.ledger.path.exists()
         ledger_projection: dict[str, Any] | None = None
-        cache_projection: dict[str, Any] | None = None
+        canonical_projection: dict[str, Any] | None = None
+        observed_projection: dict[str, Any] | None = None
+        queue_bound_projection: dict[str, Any] | None = None
         integrity = None
         ledger_events: list[dict[str, Any]] = []
         if ledger_exists:
             try:
                 integrity = self.ledger.verify()
                 ledger_events = self.ledger.read()
-                ledger_projection = self.projection.rebuild(persist_cache=False)
-                cache_projection = ledger_projection
+                canonical_projection = self.projection.rebuild(persist_cache=False)
+                ledger_projection = canonical_projection
                 add("ledger_integrity", True, evidence=integrity.to_dict())
             except CorruptEvidenceError as exc:
                 add(
@@ -239,17 +242,18 @@ class ConsistencyChecker:
                 lease_valid=lease_matches,
                 live_session_id=writer_record.get("session_id"),
             )
-            ledger_projection = self.projection.rebuild(
+            observed_projection = self.projection.rebuild(
                 persist_cache=False, observations=observations,
             )
+            ledger_projection = observed_projection
             active_transaction = ledger_projection.get("active_transaction")
             if queue is not None:
-                ledger_projection = bind_projection_to_queue(
-                    ledger_projection,
+                queue_bound_projection = bind_projection_to_queue(
+                    observed_projection,
                     queue,
                     str(self.project.active_milestone or ""),
                 )
-                cache_projection = ledger_projection
+                ledger_projection = queue_bound_projection
 
         active_transactions = [
             item for item in (ledger_projection or {}).get("transactions", [])
@@ -655,6 +659,7 @@ class ConsistencyChecker:
                 if present and present != keys:
                     raise ValueError("cycle cache has a partial kernel binding")
                 if present:
+                    canonical_binding = None
                     unsigned = dict(cycle)
                     claimed_cache = unsigned.pop("kernel_cache_fingerprint")
                     if claimed_cache != fingerprint(unsigned):
@@ -668,21 +673,50 @@ class ConsistencyChecker:
                     elif cycle["kernel_ledger_fingerprint"] != integrity.fingerprint:
                         cycle_binding_failure = "cycle cache contradicts the ledger fingerprint"
                         cycle_binding_classification = ConsistencyClassification.CORRUPT_EVIDENCE
-                    elif ledger_projection is None or cycle["kernel_projection_fingerprint"] != ledger_projection.get("projection_fingerprint"):
-                        cycle_binding_failure = "cycle cache contradicts the projection fingerprint"
-                        cycle_binding_classification = ConsistencyClassification.CORRUPT_EVIDENCE
-                    elif (
-                        cycle.get("current_phase") != ledger_projection.get("current_state")
+                    if cycle_binding_failure is None:
+                        canonical_binding = validated_canonical_projection_binding(
+                            ledger=self.ledger,
+                            projection_engine=self.projection,
+                            transaction_id=str(cycle["kernel_transaction_id"]),
+                        )
+                        if (
+                            cycle["kernel_ledger_sequence"]
+                            != canonical_binding.ledger_sequence
+                            or cycle["kernel_ledger_fingerprint"]
+                            != canonical_binding.ledger_fingerprint
+                            or cycle["kernel_projection_fingerprint"]
+                            != canonical_binding.projection_fingerprint
+                        ):
+                            cycle_binding_failure = (
+                                "cycle cache contradicts the canonical projection binding"
+                            )
+                            cycle_binding_classification = (
+                                ConsistencyClassification.CORRUPT_EVIDENCE
+                            )
+                    canonical_cycle_projection = (
+                        canonical_binding.canonical_projection
+                        if canonical_binding is not None
+                        else canonical_projection
+                    )
+                    if cycle_binding_failure is None and (
+                        canonical_cycle_projection is None
+                        or cycle.get("current_phase")
+                        != canonical_cycle_projection.get("current_state")
                         or cycle.get("current_feature") not in {
-                            ledger_projection.get("selected_next_feature"), ledger_projection.get("current_feature"),
+                            canonical_cycle_projection.get("selected_next_feature"),
+                            canonical_cycle_projection.get("current_feature"),
                         }
                     ):
-                        cycle_binding_failure = "cycle cache semantic state disagrees with the projection"
+                        cycle_binding_failure = (
+                            "cycle cache semantic state disagrees with the canonical projection"
+                        )
                         cycle_binding_classification = ConsistencyClassification.CORRUPT_EVIDENCE
-                    elif cycle["kernel_transaction_id"] not in {event["transaction_id"] for event in ledger_events}:
+                    if cycle_binding_failure is None and cycle["kernel_transaction_id"] not in {
+                        event["transaction_id"] for event in ledger_events
+                    }:
                         cycle_binding_failure = "cycle cache names an unknown kernel transaction"
                         cycle_binding_classification = ConsistencyClassification.CORRUPT_EVIDENCE
-                    elif not any(
+                    if cycle_binding_failure is None and not any(
                         event["transaction_id"] == cycle["kernel_transaction_id"]
                         and event["event_type"] in TERMINAL_EVENT_TYPES
                         and event["sequence"] <= cycle["kernel_ledger_sequence"]
@@ -691,7 +725,7 @@ class ConsistencyChecker:
                         cycle_binding_failure = "cycle cache is bound to a nonterminal kernel transaction"
                         cycle_binding_classification = ConsistencyClassification.CORRUPT_EVIDENCE
                     cycle_binding.update({key: cycle.get(key) for key in sorted(keys)})
-            except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            except (OSError, json.JSONDecodeError, TypeError, ValueError, RecoveryError) as exc:
                 cycle_binding_failure = str(exc)
                 cycle_binding_classification = ConsistencyClassification.CORRUPT_EVIDENCE
         add(
@@ -701,26 +735,22 @@ class ConsistencyChecker:
         )
 
         cache_path = self.projection.cache_path
-        if ledger_exists and cache_path is not None and cache_path.exists() and ledger_projection is not None:
+        if ledger_exists and cache_path is not None and cache_path.exists() and canonical_projection is not None:
             try:
                 cache = self.projection.load_cache()
                 agreement = bool(
                     cache is not None
-                    and cache.get("ledger_sequence")
-                    == ledger_projection.get("ledger_sequence")
-                    and cache.get("ledger_fingerprint")
-                    == ledger_projection.get("ledger_fingerprint")
+                    and cache_agrees(cache, canonical_projection)
                 )
                 add(
                     "projection_cache_agreement", agreement,
                     ConsistencyClassification.RECOVERABLE_INCONSISTENCY,
                     evidence={
                         "cache_sequence": (cache or {}).get("ledger_sequence"),
-                        "ledger_sequence": ledger_projection.get("ledger_sequence"),
+                        "ledger_sequence": canonical_projection.get("ledger_sequence"),
                         "semantic_cache_match": bool(
                             cache is not None
-                            and cache_projection is not None
-                            and cache_agrees(cache, cache_projection)
+                            and cache_agrees(cache, canonical_projection)
                         ),
                     },
                     diagnostic="projection cache is stale",
@@ -738,7 +768,12 @@ class ConsistencyChecker:
                 diagnostic="projection cache has not been built",
             )
 
-        routing_projection = cache_projection or ledger_projection
+        routing_projection = (
+            queue_bound_projection
+            or observed_projection
+            or canonical_projection
+            or ledger_projection
+        )
         if routing_projection is not None:
             projected_feature = (
                 routing_projection.get("current_feature")

@@ -101,7 +101,10 @@ from .integration_executor import (
 )
 from .workflow_lease import WorkflowWriterLease
 from .command_authority import CommandAuthority
-from .cycle_cache import bind_terminal_cycle_cache, write_terminal_cycle_cache
+from .cycle_cache import (
+    validated_canonical_projection_binding,
+    write_terminal_cycle_cache,
+)
 from .workflow_recovery import RecoveryPlanner
 from .validation import SafetyPolicy
 from .cost_policy import build_run_plan
@@ -1957,12 +1960,15 @@ class CycleEngine:
         completion: dict[str, Any],
         ledger: EvidenceLedger,
     ) -> None:
-        finalized = bind_terminal_cycle_cache(
-            state, ledger=ledger, projection=completion["projection"],
+        write_terminal_cycle_cache(
+            path, state, ledger=ledger,
+            projection_engine=ProjectionEngine(
+                ledger, ledger.path.parent / "projection-cache.json"
+            ),
             transaction_id=transaction_id,
             expected_feature=state.get("current_feature"),
+            require_semantic_state=False,
         )
-        self.cycle_store.write(path, finalized)
 
     def _write_cycle_cache(
         self,
@@ -2981,6 +2987,10 @@ class CycleEngine:
         )
         if not isinstance(bound_feature_id, str) or not bound_feature_id:
             raise ProjectionError("feature execution lacks an authoritative selected feature")
+        if expected_feature_id is not None and expected_feature_id != bound_feature_id:
+            raise ProjectionError(
+                "queue selection disagrees with the authoritative feature identity"
+            )
         if not inspector.is_clean:
             raise ConveyorError("feature execution requires a clean repository")
         compatibility = self._compatibility_snapshot(project, "feature_cycle")
@@ -3341,10 +3351,13 @@ class CycleEngine:
                     classification="HUMAN_DECISION_REQUIRED",
                     next_state="human_decision_required", human_gate=gate,
                 )
-                self._bind_terminal_cycle_cache(
-                    state, feature_transaction.transaction_id, terminal_projection
+                self._materialize_terminal_cycle_cache(
+                    cycle_path,
+                    state,
+                    feature_transaction.transaction_id,
+                    {"projection": terminal_projection},
+                    phase_ledger,
                 )
-                self.cycle_store.write(cycle_path, state)
                 self._transition_project(
                     project, project_state, "human_decision_required", run_id=run_id,
                     checkpoint="session_terminal_failure", feature=selection.feature_id,
@@ -3504,10 +3517,13 @@ class CycleEngine:
                 for item in reversed(integration_projection["transactions"])
                 if item.get("workflow_type") == "milestone_integration"
             )
-            self._bind_terminal_cycle_cache(
-                state, integration_transaction_id, integration_projection
+            self._materialize_terminal_cycle_cache(
+                cycle_path,
+                state,
+                integration_transaction_id,
+                {"projection": integration_projection},
+                phase_ledger,
             )
-            self.cycle_store.write(cycle_path, state)
             summary_after = FeatureQueue.from_location(
                 project.repository, project.queue_location
             ).summary(project.active_milestone or "")
@@ -4641,8 +4657,7 @@ class CycleEngine:
         projection_engine = ProjectionEngine(ledger, state_root / "projection-cache.json")
         try:
             integrity = ledger.verify()
-            projection = projection_engine.rebuild(persist_cache=False)
-            cached_projection = projection_engine.load_cache()
+            canonical_projection = projection_engine.rebuild(persist_cache=False)
             cycle_path = inspector.cycle_state_path()
             cycle = json.loads(cycle_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, json.JSONDecodeError, ProjectionError):
@@ -4655,27 +4670,18 @@ class CycleEngine:
             not isinstance(claimed_fingerprint, str)
             or claimed_fingerprint != fingerprint(unsigned)
         )
-        if not fingerprint_invalid:
-            return None
-        if (
-            cached_projection is None
-            or cached_projection.get("ledger_sequence") != integrity.sequence
-            or cached_projection.get("ledger_fingerprint") != integrity.fingerprint
-            or projection.get("ledger_sequence") != integrity.sequence
-            or projection.get("ledger_fingerprint") != integrity.fingerprint
-            or projection.get("projection_fingerprint") != projection_fingerprint(projection)
-        ):
-            return None
         queue = FeatureQueue.from_location(project.repository, project.queue_location)
-        selected = projection.get("selected_next_feature") or projection.get("current_feature")
+        selected = canonical_projection.get(
+            "selected_next_feature"
+        ) or canonical_projection.get("current_feature")
         selection = queue.select_next(project.active_milestone or "")
         writer = inspect_repository_writer_lock(
             inspector.writer_lock_path(self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]),
             project.repository,
         )
         if (
-            projection.get("active_transaction") is not None
-            or projection.get("current_state") != "feature_ready"
+            canonical_projection.get("active_transaction") is not None
+            or canonical_projection.get("current_state") != "feature_ready"
             or not isinstance(selected, str)
             or selection is None
             or selection.feature_id != selected
@@ -4697,7 +4703,7 @@ class CycleEngine:
                 lease_transaction=None, lease_valid=True, live_session_id=None,
             ),
         )
-        projection = bind_projection_to_queue(
+        queue_bound_projection = bind_projection_to_queue(
             observed_projection, queue, str(project.active_milestone or "")
         )
         terminals = [
@@ -4711,6 +4717,35 @@ class CycleEngine:
         source_transaction = source["transaction_id"]
         if ledger.terminal_event(source_transaction) != source:
             return None
+        try:
+            canonical_binding = validated_canonical_projection_binding(
+                ledger=ledger,
+                projection_engine=projection_engine,
+                transaction_id=source_transaction,
+                plan_stale_cache_rebuild=True,
+            )
+        except RecoveryError:
+            return None
+        if canonical_binding.canonical_projection != canonical_projection:
+            return None
+        durable_binding_invalid = any(
+            cycle.get(key) != expected
+            for key, expected in {
+                "kernel_transaction_id": source_transaction,
+                "kernel_ledger_sequence": canonical_binding.ledger_sequence,
+                "kernel_ledger_fingerprint": canonical_binding.ledger_fingerprint,
+                "kernel_projection_fingerprint": canonical_binding.projection_fingerprint,
+            }.items()
+        )
+        if not fingerprint_invalid and not durable_binding_invalid:
+            return None
+        if (
+            cycle.get("current_phase") != "feature_ready"
+            or cycle.get("current_feature") != selected
+            or queue_bound_projection.get("current_state") != "feature_ready"
+            or queue_bound_projection.get("selected_next_feature") != selected
+        ):
+            return None
         queue_path = resolve_queue_path(project.repository, project.queue_location)
         return {
             "project_id": project.project_id,
@@ -4721,9 +4756,13 @@ class CycleEngine:
             "current_state": "feature_ready",
             "selected_feature": selected,
             "source_transaction": source_transaction,
-            "ledger_sequence": integrity.sequence,
-            "ledger_fingerprint": integrity.fingerprint,
-            "projection_fingerprint": projection["projection_fingerprint"],
+            "ledger_sequence": canonical_binding.ledger_sequence,
+            "ledger_fingerprint": canonical_binding.ledger_fingerprint,
+            "projection_fingerprint": canonical_binding.projection_fingerprint,
+            "canonical_projection_fingerprint": canonical_binding.projection_fingerprint,
+            "observed_projection_fingerprint": observed_projection["projection_fingerprint"],
+            "queue_bound_projection_fingerprint": queue_bound_projection["projection_fingerprint"],
+            "canonical_cache_rebuild_required": canonical_binding.cache_rebuild_required,
             "repository_branch": inspector.current_branch,
             "repository_head": inspector.head,
             "queue_fingerprint": hashlib.sha256(queue_path.read_bytes()).hexdigest(),
@@ -4792,7 +4831,17 @@ class CycleEngine:
                 repository_identity=identity["repository_id"],
                 repository_path_fingerprint=identity["path_fingerprint"],
             )
-            projection = ProjectionEngine(ledger, state_root / "projection-cache.json").rebuild(
+            projection_engine = ProjectionEngine(
+                ledger, state_root / "projection-cache.json"
+            )
+            canonical_binding = validated_canonical_projection_binding(
+                ledger=ledger,
+                projection_engine=projection_engine,
+                transaction_id=str(plan["source_transaction"]),
+                repair_stale_cache=True,
+            )
+            canonical_projection = canonical_binding.canonical_projection
+            observed_projection = projection_engine.rebuild(
                 persist_cache=False,
                 observations=build_projection_observations(
                     branch=inspector.current_branch, head=inspector.head, clean=inspector.is_clean,
@@ -4802,16 +4851,28 @@ class CycleEngine:
                     lease_transaction=None, lease_valid=True, live_session_id=None,
                 ),
             )
-            projection = bind_projection_to_queue(
-                projection, queue, str(project.active_milestone or "")
+            queue_bound_projection = bind_projection_to_queue(
+                observed_projection, queue, str(project.active_milestone or "")
             )
+            if (
+                canonical_projection.get("current_state") != "feature_ready"
+                or canonical_projection.get("selected_next_feature")
+                != plan["selected_feature"]
+                or queue_bound_projection.get("current_state") != "feature_ready"
+                or queue_bound_projection.get("selected_next_feature")
+                != plan["selected_feature"]
+            ):
+                raise RecoveryError(
+                    "planning projections disagree with the canonical recovery binding"
+                )
             # A final pre-write comparison catches queue, branch, ledger, and
             # projection drift after the short-lived reservation was acquired.
             final_plan = self._cache_binding_recovery_plan(project)
             if final_plan is None or any(final_plan.get(key) != plan.get(key) for key in immutable):
                 raise RecoveryError("cache-binding recovery evidence changed before atomic write")
             write_terminal_cycle_cache(
-                inspector.cycle_state_path(), state, ledger=ledger, projection=projection,
+                inspector.cycle_state_path(), state, ledger=ledger,
+                projection_engine=projection_engine,
                 transaction_id=str(plan["source_transaction"]),
                 expected_feature=str(plan["selected_feature"]),
             )
@@ -5527,11 +5588,13 @@ class CycleEngine:
                 "updated_at": utc_now(),
             })
             inspector.ensure_runtime_ignored()
-            finalized = bind_terminal_cycle_cache(
-                cycle, ledger=ledger, projection=completed["projection"],
+            finalized = write_terminal_cycle_cache(
+                cycle_path, cycle, ledger=ledger,
+                projection_engine=ProjectionEngine(
+                    ledger, ledger.path.parent / "projection-cache.json"
+                ),
                 transaction_id=transaction.transaction_id, expected_feature=selected_feature,
             )
-            self.cycle_store.write(cycle_path, finalized)
             return {
                 "project_id": project.project_id,
                 "outcome": "planning_recovery_committed",

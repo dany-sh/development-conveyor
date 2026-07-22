@@ -688,3 +688,25 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `user_directed_parent_only_cache_recovery`
 - Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-22T22:48:22+00:00
+
+- Agent role: `standalone_controller_recovery`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `canonical_projection_cache_binding_repair`
+- Safety and autonomy contracts unchanged: `true`
+
+### Canonical projection cycle-cache binding repair — 2026-07-22
+
+- Scope and execution: one direct parent `gpt-5.6-sol`/`high` controller-maintenance session; no Feature Factory, Milestone Integrator, named agent, child session, delegated skill, real Conveyor resume, F004 implementation, complete controller suite, or application test ran.
+- Durable authority: `CanonicalProjectionBinding` and `validated_canonical_projection_binding` now validate the current ledger, persisted projection-cache signature and ledger identity, unchanged canonical rebuild, and terminal source transaction. Missing/stale caches may be planned read-only and rebuilt once from the valid ledger; corrupt or semantically divergent canonical evidence blocks the write.
+- Projection separation: standalone recovery retains distinct `canonical_projection`, `observed_projection`, and `queue_bound_projection` roles. Compatibility feature/phase fields remain separate, while `kernel_projection_fingerprint` is sourced only from the canonical persisted projection.
+- Post-write gate: terminal cycle-cache materialization atomically writes, reads back, verifies the cache signature, revalidates the canonical ledger/projection binding and terminal source transaction, and stops before dispatch on any disagreement. Consistency now verifies cycle and persisted projection caches against the same canonical helper.
+- Focused validation: 33/33 tests passed in `67.236s` across `test_projection_authority`, `test_cache_binding_recovery`, `test_recovery`, and `test_feature_result_recovery`. The seven cache-binding tests cover divergent observed/queue-bound fingerprints, unchanged-cache byte stability, stale-cache rebuilding, corrupt canonical projection/ledger rejection, shared consistency/recovery authority, successful `CONSISTENT`/`feature_ready`/F004 recovery with no dispatch or branch, and the exact `dfc1c4ff9e2ebb5ea75c6f2721c9a970dc4fee622a258bc5c41d19ea453a5fb8` rather than `7e17ae8e2a9996b944a8724cc25f07162aa70a52c094f06dc71e17249db791e1` binding.
+- Requested commands: `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, `scripts/conveyor verify-consistency --project case-manager --json`, `scripts/conveyor resume --project interview-companion --dry-run`, and `git diff --check` all exited zero. Config validation reported both projects valid.
+- Live dry-run evidence: Interview Companion selected deterministic `cache_binding_recovery`, `feature_ready`, F004, source transaction `11a0e09a-9f38-4207-9665-3d202feba2cc`, ledger sequence 166/fingerprint `729a9a2bf40a7f58c749e1e1739e77eaf56a08a50969fc35bdbabc97360216e8`, canonical projection `dfc1c4ff9e2ebb5ea75c6f2721c9a970dc4fee622a258bc5c41d19ea453a5fb8`, queue-bound projection `7e17ae8e2a9996b944a8724cc25f07162aa70a52c094f06dc71e17249db791e1`, zero models, zero children, zero application content commits, and no feature-branch creation.
+- Consistency evidence: Case Manager remained read-only and reported `RECOVERABLE_INCONSISTENCY` because its sequence-19 persisted projection cache is semantically different from the canonical unchanged-ledger rebuild; the stricter shared canonical check no longer masks that cache mismatch.
+- Isolation evidence: Case Manager remained clean on `codex/p0-foundation` at `f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0`; Interview Companion remained clean on `codex/m0-foundation` at `7a754a4b4741b85ac51b8b516cebd25cae1eec69`. Their head-ref fingerprints, cycle-cache hashes, controller ledger hashes, and controller projection-cache hashes were byte-identical before and after all validation, and neither application had a writer lease.

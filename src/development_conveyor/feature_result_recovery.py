@@ -535,7 +535,7 @@ class FeatureResultRecovery:
             "updated_at": utc_now(),
         })
         write_terminal_cycle_cache(
-            path, state, ledger=self.ledger, projection=projection,
+            path, state, ledger=self.ledger, projection_engine=self.projection,
             transaction_id=transaction_id, expected_feature="F003",
         )
 
