@@ -737,6 +737,12 @@ class PlanningTransactionTests(unittest.TestCase):
                 1,
             )
             self.assertTrue(any(event["event_type"] == "RecoveryApplied" for event in recovery_events))
+            self.assertTrue(any(event["event_type"] == "TransactionCompleted" for event in recovery_events))
+            cycle = json.loads((repository / ".factory/conveyor-state.json").read_text())
+            self.assertEqual(result["recovery_transaction_id"], cycle["kernel_transaction_id"])
+            self.assertEqual("P0-003", cycle["current_feature"])
+            self.assertEqual("feature_ready", cycle["current_phase"])
+            self.assertEqual("committed_queue_reconciliation_recovery_terminal", cycle["last_successful_checkpoint"])
             report = json.loads(Path(result["report"]).read_text())
             self.assertEqual(report["nonfatal_warnings"], warnings)
             with self.assertRaisesRegex(RecoveryError, "projection disappeared|evidence changed"):

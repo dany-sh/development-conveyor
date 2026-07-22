@@ -28,3 +28,8 @@ class RepositoryTests(unittest.TestCase):
             self.assertIn(".factory/conveyor-state.json", additions)
             self.assertTrue(inspector.is_clean)
 
+    def test_recovery_runtime_artifacts_are_root_anchored_ignored(self):
+        root_ignore = Path(__file__).resolve().parents[1] / ".gitignore"
+        patterns = root_ignore.read_text(encoding="utf-8").splitlines()
+        self.assertIn("/state/projects/*/.recovery-takeover.lock", patterns)
+        self.assertIn("/state/projects/*/recovered-leases/", patterns)

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .contracts import TransactionState, WorkflowType, fingerprint
+from .cycle_cache import write_terminal_cycle_cache
 from .errors import RecoveryError, TransactionError
 from .kernel import FeatureExecutionAdapter, WorkflowKernel
 from .ledger import EvidenceLedger
@@ -533,10 +534,10 @@ class FeatureResultRecovery:
             "kernel_projection_fingerprint": projection["projection_fingerprint"],
             "updated_at": utc_now(),
         })
-        unsigned = dict(state)
-        unsigned.pop("kernel_cache_fingerprint", None)
-        state["kernel_cache_fingerprint"] = fingerprint(unsigned)
-        atomic_write_json(path, state)
+        write_terminal_cycle_cache(
+            path, state, ledger=self.ledger, projection=projection,
+            transaction_id=transaction_id, expected_feature="F003",
+        )
 
     def apply(self, plan: dict[str, Any]) -> dict[str, Any]:
         if plan.get("plan_fingerprint") != fingerprint({

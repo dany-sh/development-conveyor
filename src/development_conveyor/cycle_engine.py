@@ -101,6 +101,7 @@ from .integration_executor import (
 )
 from .workflow_lease import WorkflowWriterLease
 from .command_authority import CommandAuthority
+from .cycle_cache import bind_terminal_cycle_cache
 from .workflow_recovery import RecoveryPlanner
 from .validation import SafetyPolicy
 from .cost_policy import build_run_plan
@@ -1940,29 +1941,20 @@ class CycleEngine:
         unsigned.pop("kernel_cache_fingerprint", None)
         state["kernel_cache_fingerprint"] = fingerprint(unsigned)
 
-    @staticmethod
-    def _bind_terminal_cycle_cache(
-        state: dict[str, Any], transaction_id: str, projection: dict[str, Any]
-    ) -> None:
-        state.update({
-            "kernel_transaction_id": transaction_id,
-            "kernel_ledger_sequence": projection["ledger_sequence"],
-            "kernel_ledger_fingerprint": projection["ledger_fingerprint"],
-            "kernel_projection_fingerprint": projection["projection_fingerprint"],
-        })
-        unsigned = dict(state)
-        unsigned.pop("kernel_cache_fingerprint", None)
-        state["kernel_cache_fingerprint"] = fingerprint(unsigned)
-
     def _materialize_terminal_cycle_cache(
         self,
         path: Path,
         state: dict[str, Any],
         transaction_id: str,
         completion: dict[str, Any],
+        ledger: EvidenceLedger,
     ) -> None:
-        self._bind_terminal_cycle_cache(state, transaction_id, completion["projection"])
-        self.cycle_store.write(path, state)
+        finalized = bind_terminal_cycle_cache(
+            state, ledger=ledger, projection=completion["projection"],
+            transaction_id=transaction_id,
+            expected_feature=state.get("current_feature"),
+        )
+        self.cycle_store.write(path, finalized)
 
     def _write_cycle_cache(
         self,
@@ -3214,7 +3206,7 @@ class CycleEngine:
             )
             self._materialize_terminal_cycle_cache(
                 cycle_path, state, preparation_transaction.transaction_id,
-                preparation_completion,
+                preparation_completion, phase_ledger,
             )
             branch_evidence = self._verify_feature_branch_runtime(
                 project, inspector, state, require_starting_head=True
@@ -3395,7 +3387,7 @@ class CycleEngine:
                 evidence={"accepted_feature_commit": accepted, "integration_status": "pending"}
             )
             self._materialize_terminal_cycle_cache(
-                cycle_path, state, feature_transaction.transaction_id, feature_completion
+                cycle_path, state, feature_transaction.transaction_id, feature_completion, phase_ledger
             )
 
             acceptance_adapter = FeatureAcceptanceAdapter(
@@ -3450,7 +3442,7 @@ class CycleEngine:
             })
             self._materialize_terminal_cycle_cache(
                 cycle_path, state, acceptance_transaction.transaction_id,
-                acceptance_completion,
+                acceptance_completion, phase_ledger,
             )
 
             integration_context = self._validate_projected_dispatch(
@@ -4262,7 +4254,7 @@ class CycleEngine:
                 "human_merge_gate": gate,
             })
             self._materialize_terminal_cycle_cache(
-                cycle_path, state, transaction.transaction_id, completed
+                cycle_path, state, transaction.transaction_id, completed, kernel.ledger
             )
             if project_state["current_state"] != "milestone_gate":
                 self._transition_project(
@@ -5295,16 +5287,29 @@ class CycleEngine:
                 kernel_projection=projection_evidence,
             )
             cycle_path = inspector.cycle_state_path()
-            cycle = self.cycle_store.read(cycle_path) or {}
+            cycle = self.cycle_store.read(cycle_path)
+            if cycle is None:
+                cycle = self._new_cycle_state(
+                    project, recovery_run_id, inspector,
+                    FeatureQueue.from_location(project.repository, project.queue_location).feature(selected_feature),
+                )
             cycle.update({
                 "current_feature": selected_feature,
                 "current_phase": "feature_ready",
+                "conveyor_run_id": recovery_run_id,
+                "kernel_transaction_id": transaction.transaction_id,
                 "kernel_ledger_sequence": completed["projection"]["ledger_sequence"],
                 "kernel_ledger_fingerprint": completed["projection"]["ledger_fingerprint"],
                 "kernel_projection_fingerprint": completed["projection"]["projection_fingerprint"],
-                "latest_recovery_transaction_id": transaction.transaction_id,
+                "last_successful_checkpoint": "committed_queue_reconciliation_recovery_terminal",
+                "updated_at": utc_now(),
             })
-            self.cycle_store.write(cycle_path, cycle)
+            inspector.ensure_runtime_ignored()
+            finalized = bind_terminal_cycle_cache(
+                cycle, ledger=ledger, projection=completed["projection"],
+                transaction_id=transaction.transaction_id, expected_feature=selected_feature,
+            )
+            self.cycle_store.write(cycle_path, finalized)
             return {
                 "project_id": project.project_id,
                 "outcome": "planning_recovery_committed",

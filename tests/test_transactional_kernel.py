@@ -24,6 +24,7 @@ from development_conveyor.contracts import (
     TransactionState,
     WorkflowType,
     extract_terminal_envelope,
+    fingerprint,
 )
 from development_conveyor.errors import (
     CorruptEvidenceError,
@@ -1304,7 +1305,14 @@ if dirty:
             engine._advance_cycle(Path("cycle.json"), state, "feature_review", RepositoryInspector(repository), "after_commit", kernel=kernel)
             self.assertEqual([], store.writes)
             completion = kernel.complete()
-            engine._materialize_terminal_cycle_cache(Path("cycle.json"), state, transaction.transaction_id, completion)
+            state.update({
+                "current_feature": completion["projection"].get("selected_feature") or completion["projection"].get("current_feature"),
+                "current_phase": completion["projection"]["current_state"],
+                "conveyor_run_id": "cache-order",
+                "last_successful_checkpoint": "terminal",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            })
+            engine._materialize_terminal_cycle_cache(Path("cycle.json"), state, transaction.transaction_id, completion, kernel.ledger)
             self.assertEqual(1, len(store.writes))
             terminal_sequence = next(
                 event["sequence"] for event in kernel.ledger.read()
@@ -1312,6 +1320,15 @@ if dirty:
                 and event["event_type"] == "TransactionCompleted"
             )
             self.assertGreaterEqual(store.writes[0][1]["kernel_ledger_sequence"], terminal_sequence)
+            signed = store.writes[0][1]
+            self.assertEqual(transaction.transaction_id, signed["kernel_transaction_id"])
+            self.assertEqual(signed["kernel_cache_fingerprint"], fingerprint({
+                key: value for key, value in signed.items() if key != "kernel_cache_fingerprint"
+            }))
+            signed["current_feature"] = "F999"
+            self.assertNotEqual(signed["kernel_cache_fingerprint"], fingerprint({
+                key: value for key, value in signed.items() if key != "kernel_cache_fingerprint"
+            }))
 
     def test_terminal_completion_evidence_cannot_override_canonical_fields(self):
         with tempfile.TemporaryDirectory() as temporary:

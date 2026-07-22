@@ -10,6 +10,8 @@ dist/
 /state/projects/*/evidence-ledger.jsonl.head
 /state/projects/*/evidence-ledger.jsonl.lock
 /state/projects/*/projection-cache.json
+/state/projects/*/.recovery-takeover.lock
+/state/projects/*/recovered-leases/
 /state/projects/*/integration-plans/*.json
 state/launch-locks/*.json
 state/sessions/

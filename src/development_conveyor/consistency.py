@@ -668,6 +668,17 @@ class ConsistencyChecker:
                     elif cycle["kernel_ledger_fingerprint"] != integrity.fingerprint:
                         cycle_binding_failure = "cycle cache contradicts the ledger fingerprint"
                         cycle_binding_classification = ConsistencyClassification.CORRUPT_EVIDENCE
+                    elif ledger_projection is None or cycle["kernel_projection_fingerprint"] != ledger_projection.get("projection_fingerprint"):
+                        cycle_binding_failure = "cycle cache contradicts the projection fingerprint"
+                        cycle_binding_classification = ConsistencyClassification.CORRUPT_EVIDENCE
+                    elif (
+                        cycle.get("current_phase") != ledger_projection.get("current_state")
+                        or cycle.get("current_feature") not in {
+                            ledger_projection.get("selected_next_feature"), ledger_projection.get("current_feature"),
+                        }
+                    ):
+                        cycle_binding_failure = "cycle cache semantic state disagrees with the projection"
+                        cycle_binding_classification = ConsistencyClassification.CORRUPT_EVIDENCE
                     elif cycle["kernel_transaction_id"] not in {event["transaction_id"] for event in ledger_events}:
                         cycle_binding_failure = "cycle cache names an unknown kernel transaction"
                         cycle_binding_classification = ConsistencyClassification.CORRUPT_EVIDENCE
