@@ -92,10 +92,14 @@ class SessionRequest:
     starting_commit: str | None = None
     accepted_commit: str | None = None
     allowed_paths: tuple[str, ...] = ()
+    session_kind: str = "parent"
+    child_session_budget: int | None = None
 
     def __post_init__(self) -> None:
         if self.action == "milestone_integration" and self.accepted_commit == "SELF":
             raise SessionError("milestone integration requires a normalized accepted commit")
+        if self.session_kind not in {"parent", "child"}:
+            raise SessionError("session kind must be parent or child")
 
 
 @dataclass(frozen=True)
@@ -1029,6 +1033,8 @@ class SessionLauncher:
         request: SessionRequest,
         on_session_started: Callable[[str], None] | None = None,
     ) -> SessionResult:
+        if request.session_kind == "child" and (request.child_session_budget is None or request.child_session_budget <= 0):
+            raise SessionError("child session budget exhausted or prohibited before Codex launch")
         plan = self.plan(request)
         environment = dict(os.environ)
         environment.update({

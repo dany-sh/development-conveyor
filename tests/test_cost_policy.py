@@ -3,9 +3,11 @@ import unittest
 from pathlib import Path
 
 from development_conveyor.cost_policy import (
-    ChildSessionBudget, contain_command_output, context_pack, reusable_evidence,
+    ChildSessionBudget, build_run_plan, contain_command_output, context_pack, reusable_evidence,
     select_model, ValidationEvidenceCache, validation_identity, verification_plan,
 )
+from development_conveyor.sessions import SessionLauncher, SessionRequest
+from tests.helpers import synthetic_repository
 
 
 class CostPolicyTests(unittest.TestCase):
@@ -31,6 +33,26 @@ class CostPolicyTests(unittest.TestCase):
         self.assertEqual(budget.launched, 0)
         allowed = ChildSessionBudget(1, "ordinary_feature")
         self.assertEqual(allowed.launch("one_question", "unresolved semantic question", lambda: "ok"), "ok")
+
+    def test_queue_reconciliation_routes_by_ready_selection(self):
+        semantic = build_run_plan({"proposed_next_action": "queue_reconciliation"}, Path.cwd())
+        self.assertEqual(semantic["queue_reconciliation_route"], "semantic_queue_reconciliation")
+        self.assertEqual((semantic["selected_model"], semantic["selected_reasoning_effort"]), ("gpt-5.6-terra", "medium"))
+        self.assertEqual((semantic["usage_accounting"]["parent_sessions_planned"], semantic["usage_accounting"]["child_sessions_planned"]), (1, 0))
+        self.assertFalse(semantic["usage_accounting"]["deterministic_only"])
+        self.assertEqual((semantic["execution"]["models_planned"], semantic["dry_run"]["models"]), (1, 0))
+        deterministic = build_run_plan({"proposed_next_action": "queue_reconciliation", "selected_feature": "F001"}, Path.cwd())
+        self.assertEqual(deterministic["queue_reconciliation_route"], "deterministic_queue_selection")
+        self.assertIsNone(deterministic["selected_model"])
+        self.assertEqual(deterministic["execution"]["models_planned"], 0)
+
+    def test_zero_child_budget_blocks_at_session_launcher_before_planning(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            request = SessionRequest("queue_reconciliation", project, "run", "one_feature", session_kind="child", child_session_budget=0)
+            launcher = SessionLauncher(Path(temporary), {"codex": {"executable": "definitely-not-called"}})
+            with self.assertRaisesRegex(Exception, "child session budget exhausted"):
+                launcher.launch(request)
 
     def test_context_pack_is_focused_and_high_risk_contracts_are_added(self):
         with tempfile.TemporaryDirectory() as temporary:

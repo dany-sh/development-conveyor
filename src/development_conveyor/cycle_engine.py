@@ -1103,7 +1103,7 @@ class CycleEngine:
                 },
             })
             self._attach_milestone_integration_contract(plan, project)
-            plan["cost_aware_run_plan"] = build_run_plan(plan, self.root)
+            plan["cost_aware_run_plan"] = build_run_plan(plan, self.root, project=project)
             return plan
         planning_transaction = None
         persisted_evidence = (
@@ -1241,7 +1241,7 @@ class CycleEngine:
             plan["expected_stop_condition"] = compatibility.get("diagnostic")
             plan["sessions_that_would_launch"] = []
             plan["compatibility_human_gate"] = compatibility
-        plan["cost_aware_run_plan"] = build_run_plan(plan, self.root)
+        plan["cost_aware_run_plan"] = build_run_plan(plan, self.root, project=project)
         return plan
 
     def _reconcile_projection_compatibility_cache(
@@ -1847,6 +1847,10 @@ class CycleEngine:
         reservation_held: bool = False,
         on_session_started: Callable[[str], None] | None = None,
     ) -> SessionResult:
+        # The common controller launch boundary enforces child budgets before a
+        # repository writer lease, Codex process, or mutation can be reached.
+        if request.session_kind == "child" and (request.child_session_budget is None or request.child_session_budget <= 0):
+            raise SessionError("child session budget exhausted or prohibited before session, lease, or mutation")
         writer = inspect_repository_writer_lock(
             inspector.writer_lock_path(self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]),
             request.project.repository,

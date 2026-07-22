@@ -533,6 +533,14 @@ def authoritative_status_fields(
         ),
         "session_resume_eligible": executable.session_resume_eligible,
         "old_session_will_resume": executable.session_resume_eligible,
+        # Transaction descriptions are deliberately distinct from actual model
+        # launches: a transaction may be deterministic.
+        "transactions_that_would_start": executable.sessions_that_would_launch,
+        "model_sessions_that_would_launch": (
+            ["queue reconciliation parent session"]
+            if workflow == WorkflowType.QUEUE_RECONCILIATION else executable.sessions_that_would_launch
+        ),
+        "child_sessions_that_would_launch": [],
         "sessions_that_would_launch": executable.sessions_that_would_launch,
         "fresh_transaction": executable.transaction_mode == "fresh",
         "ordinary_resume_allowed": ordinary_resume_allowed,
@@ -544,7 +552,7 @@ def authoritative_status_fields(
         "milestone_integrator_would_launch": False,
         "deterministic_integration_executor_would_run": workflow
         == WorkflowType.MILESTONE_INTEGRATION,
-        "model_session_would_launch": bool(executable.sessions_that_would_launch),
+        "model_session_would_launch": workflow == WorkflowType.QUEUE_RECONCILIATION or bool(executable.sessions_that_would_launch),
         "dry_run_writes_application_repository": False,
         "state_consistency": "projection_authoritative",
         "repair_transition_path": [],

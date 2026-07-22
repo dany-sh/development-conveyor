@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .queue import FeatureQueue
+
 
 POLICY_VERSION = 1
 
@@ -169,14 +171,61 @@ def contain_command_output(command: list[str], *, cwd: Path, report_path: Path) 
             "failure_excerpt": output[-1000:] if result.returncode else None}
 
 
-def build_run_plan(plan: dict[str, Any], root: Path) -> dict[str, Any]:
+def _queue_reconciliation_context_pack(project: Any) -> dict[str, Any]:
+    """Return the small planning context needed by one reconciliation parent."""
+    repository = project.repository
+    queue = FeatureQueue.from_location(repository, project.queue_location)
+    milestone = project.active_milestone or ""
+    selected = queue.select_next(milestone)
+    candidates = [] if selected is not None else queue.features_for_milestone(milestone)
+    paths = [project.queue_location, "docs/CURRENT_STATUS.md", "docs/FEATURE_CATALOG.md"]
+    # Candidate specs carry the only feature-level semantic context permitted.
+    paths.extend(
+        item.get("spec") or item.get("specification") or item.get("spec_path")
+        for item in candidates
+        if isinstance(item.get("spec") or item.get("specification") or item.get("spec_path"), str)
+    )
+    paths.extend(path for path in ("docs/roadmap/DEVELOPMENT_ROADMAP.md", "docs/roadmap/IMPLEMENTATION_TASKS.md") if (repository / path).is_file())
+    files = list(dict.fromkeys(path for path in paths if (repository / path).is_file()))
+    sizes = {path: (repository / path).stat().st_size for path in files}
+    return {
+        "files": files,
+        "file_count": len(files),
+        "approximate_bytes_estimate": sum(sizes.values()),
+        "included_reasons": {
+            project.queue_location: "compact validated queue and active milestone metadata",
+            **{path: "candidate specification or roadmap ordering constraint" for path in files if path != project.queue_location},
+        },
+        "excluded_categories": ["all milestones", "unrelated feature specifications", "full Git history", "global memory", "application source"],
+        "output_contract": "queue reconciliation terminal result contract",
+    }
+
+
+def build_run_plan(plan: dict[str, Any], root: Path, *, project: Any | None = None) -> dict[str, Any]:
     action = str(plan.get("proposed_next_action") or "status")
-    deterministic_actions = {"verify_consistency", "milestone_integration", "queue_reconciliation"}
-    selection = select_model(task="integration" if action == "milestone_integration" else ("status" if action in deterministic_actions else "controller_repair"), risk="low")
+    ready_feature = plan.get("selected_feature")
+    deterministic_queue_selection = action == "queue_reconciliation" and isinstance(ready_feature, str) and bool(ready_feature)
+    semantic_queue_reconciliation = action == "queue_reconciliation" and not deterministic_queue_selection
+    deterministic_actions = {"verify_consistency", "milestone_integration"}
+    task = (
+        "queue_reconciliation" if semantic_queue_reconciliation
+        else "status" if action in deterministic_actions or deterministic_queue_selection
+        else "controller_repair"
+    )
+    selection = select_model(task=task, risk="low")
     changed: list[str] = []
     verify = verification_plan(changed)
-    pack = context_pack(root, changed, verify["tests"])
+    pack = (
+        _queue_reconciliation_context_pack(project)
+        if semantic_queue_reconciliation and project is not None
+        else context_pack(root, changed, verify["tests"])
+    )
+    parent_sessions_planned = 1 if selection.model is not None else 0
     return {"schema_version": POLICY_VERSION, "workflow_type": action, "task_classification": selection.task_classification,
+            "queue_reconciliation_route": (
+                "deterministic_queue_selection" if deterministic_queue_selection
+                else "semantic_queue_reconciliation" if semantic_queue_reconciliation else None
+            ),
             "risk_classification": selection.risk_classification, "deterministic_alternative_considered": selection.deterministic_alternative,
             "selected_model": selection.model, "selected_reasoning_effort": selection.reasoning,
             "parent_session_budget": 1, "child_session_budget": 0, "child_agent_justification": None,
@@ -186,7 +235,8 @@ def build_run_plan(plan: dict[str, Any], root: Path) -> dict[str, Any]:
             "application_builds_planned": verify["builds"], "expected_application_mutations": bool(plan.get("application_mutation_expected")),
             "expected_cost_class": "low", "escalation_triggers": list(selection.escalation_triggers),
             "stopping_criteria": ["selected validations pass", "no unresolved safety risk", "acceptance criteria are proven"],
-            "usage_accounting": {"deterministic_only": selection.model is None, "parent_sessions_planned": 1,
+            "execution": {"models_planned": parent_sessions_planned},
+            "usage_accounting": {"deterministic_only": selection.model is None, "parent_sessions_planned": parent_sessions_planned,
                 "parent_sessions_launched": 0, "child_sessions_planned": 0, "child_sessions_launched": 0,
                 "context_pack_file_count": pack["file_count"], "context_bytes_estimate": pack["approximate_bytes_estimate"],
                 "builds_run": [], "elapsed_time_seconds": None, "report_files": [], "escalated": False,
