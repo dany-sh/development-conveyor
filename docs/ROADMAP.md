@@ -2,7 +2,7 @@
 
 ## Current milestone
 
-M1 replaces phase-specific mutable-state authority with an append-only transaction ledger and rebuildable projections. M1-001 is the sole accepted scope.
+M1 replaces phase-specific mutable-state authority with an append-only transaction ledger and rebuildable projections. M1-001 is the sole integrated feature; its post-integration repair/finalization commits remain distinct from the immutable accepted feature commit.
 
 ## Later milestones
 

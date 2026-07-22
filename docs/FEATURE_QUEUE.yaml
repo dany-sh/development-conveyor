@@ -6,9 +6,11 @@
       "name": "Transactional workflow kernel",
       "status": "active",
       "base_commit": "eb9a0198f8d1a69db2b7e4099ebd17c3bed9550b",
-      "integration_branch": "codex/m1-transactional-workflow-kernel",
-      "integrated_features": [],
-      "last_validated_commit": null,
+      "integration_branch": "codex/development-conveyor",
+      "integrated_features": [
+        "M1-001"
+      ],
+      "last_validated_commit": "96c5c4a85f54b183e7c6b798890b947bd1de782f",
       "human_gate": true
     }
   ],
@@ -16,7 +18,7 @@
     {
       "id": "M1-001",
       "title": "Transactional workflow kernel and evidence ledger",
-      "status": "accepted",
+      "status": "integrated",
       "priority": 1,
       "milestone": "M1",
       "dependencies": [],
@@ -29,9 +31,9 @@
       "requires_human_decision": false,
       "branch": "codex/m1-transactional-workflow-kernel",
       "integration_base_commit": "eb9a0198f8d1a69db2b7e4099ebd17c3bed9550b",
-      "accepted_commit": "SELF",
-      "integrated_commit": null,
-      "integration_status": "pending",
+      "accepted_commit": "6f97dcca8cb1c1e4b1560bda1b617f260995a9e0",
+      "integrated_commit": "6f97dcca8cb1c1e4b1560bda1b617f260995a9e0",
+      "integration_status": "passed",
       "integration_fix_commits": []
     }
   ]

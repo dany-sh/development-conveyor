@@ -511,3 +511,41 @@ This log records model configuration and deterministic deployment evidence. It n
 - Immutable scenario: the replacement fixture is entirely temporary and explicitly records F005 `integration_pending`, accepted commit `a1f2c8dd47aaa68580cd7dfc3dc6923e04469857`, milestone start `e07d8803fbe56bbbfb7430aeb19e888f3d7d06a7`, the `codex/F005-persistent-data-store` feature ref identity, a terminal `VALIDATION_FAILED` integration transaction, a matching projection cache, no active transaction, no successful integration, and a non-resumable old session. Migration projects `integration_ready` with a fresh `milestone_integration` action.
 - Targeted evidence: each regression passed independently in 2.050 and 0.587 seconds, then both passed together in 2.510 seconds. The existing focused suites passed 17/17 in 35.088 seconds, 4/4 in 12.848 seconds, and 6/6 in 0.844 seconds.
 - Isolation: all new fixture repositories, queues, controller project state, ledgers, caches, refs, and terminal events live under `TemporaryDirectory`. No registered application repository or real controller `state/projects` input is read or mutated by these tests.
+
+### M1-001 canonical-history reconciliation — 2026-07-21
+
+- Immutable feature identity: `codex/m1-transactional-workflow-kernel` remains fixed at accepted commit `6f97dcca8cb1c1e4b1560bda1b617f260995a9e0`; no feature ref was moved and no commit was replayed.
+- Exact integration ancestry: the accepted commit is an ancestor of canonical `codex/development-conveyor` head `96c5c4a85f54b183e7c6b798890b947bd1de782f`. The queue therefore records M1-001 as integrated with both accepted and integrated commit identity `6f97dcca8cb1c1e4b1560bda1b617f260995a9e0`, and records the validated milestone head separately as `96c5c4a85f54b183e7c6b798890b947bd1de782f`.
+- Post-integration history: `164d361c77a3b6adacdd7acf0fd934f2b6b6b045`, `c04a262dc796d5c34004d2287e24eb23e598cabd`, `01f3ddf0f724537013b45177431427f4eca2b256`, and `96c5c4a85f54b183e7c6b798890b947bd1de782f` are post-integration repair/finalization commits, not feature commits.
+- Branch topology: milestone metadata identifies `codex/development-conveyor` as the canonical integration history. This reconciliation does not move the canonical branch, immutable feature branch, or any application ref.
+- Writer coordination: the generic queue-bound writer preflight cannot represent an already-accepted post-integration repair. After exact branch, HEAD, cleanliness, Git-operation, and lease checks, agent run `m1-f005-two-ref-recovery-repair-20260721` acquired `.factory/locks/writer.json` atomically with `O_EXCL`; the lease remains held through implementation and review.
+
+### Model execution — 2026-07-22T01:13:04+00:00
+
+- Agent role: `repository-explorer`
+- Effective model: `gpt-5.6-terra`
+- Effective reasoning effort: `medium`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_f005_two_ref_recovery_evidence_map`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-22T01:13:04+00:00
+
+- Agent role: `product-architect`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `xhigh`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_f005_two_ref_recovery_contract`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-22T01:13:04+00:00
+
+- Agent role: `feature-worker`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_f005_two_ref_recovery_repair`
+- Safety and autonomy contracts unchanged: `true`
