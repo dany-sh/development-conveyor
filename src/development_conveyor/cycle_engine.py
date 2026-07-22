@@ -90,8 +90,11 @@ from .execution_plan import (
 from .integration_executor import (
     build_integration_plan,
     execute_integration_plan,
+    inspect_integration_finalization_recovery,
     inspect_two_refs,
+    load_integration_plan,
     persist_integration_plan,
+    resume_integration_finalization,
 )
 from .workflow_lease import WorkflowWriterLease
 from .command_authority import CommandAuthority
@@ -4341,10 +4344,180 @@ class CycleEngine:
             ),
         }
 
+    def _integration_finalization_recovery_context(
+        self, project: Project
+    ) -> dict[str, Any] | None:
+        projection = self._authoritative_projection(project)
+        if not isinstance(projection, dict) or projection.get("current_state") != "validation_failed":
+            return None
+        identity = RepositoryInspector(project.repository).identity()
+        state_root = self.root / "state/projects" / project.project_id
+        ledger = EvidenceLedger(
+            state_root / "evidence-ledger.jsonl",
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        for event in reversed(ledger.read()):
+            if (
+                event.get("event_type") == "TransactionBlocked"
+                and event.get("workflow_type") == WorkflowType.MILESTONE_INTEGRATION.value
+                and (event.get("payload") or {}).get("classification")
+                == "VALIDATION_FAILED"
+                and (event.get("payload") or {}).get("reference") == "SafetyViolation"
+            ):
+                plan_path = (
+                    state_root / "integration-plans" / f"{event['transaction_id']}.json"
+                )
+                if not plan_path.exists():
+                    raise RecoveryError(
+                        "pre-validation integration failure lacks its immutable plan"
+                    )
+                evidence = inspect_integration_finalization_recovery(plan_path)
+                return {"plan_path": plan_path, "evidence": evidence}
+        return None
+
+    def _recover_integration_finalization(
+        self, project: Project, run_id: str, context: dict[str, Any]
+    ) -> dict[str, Any]:
+        plan_path = Path(context["plan_path"])
+        initial = context["evidence"]
+        plan = load_integration_plan(plan_path)
+        inspector = RepositoryInspector(project.repository)
+        identity = inspector.identity()
+        state_root = self.root / "state/projects" / project.project_id
+        ledger = EvidenceLedger(
+            state_root / "evidence-ledger.jsonl",
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        lease = WorkflowWriterLease(
+            inspector.writer_lock_path(
+                self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
+            )
+        )
+        adapter = MilestoneIntegrationAdapter(
+            allowed_paths=tuple(plan["metadata_paths"]),
+            commit_subject=f"factory: record {plan['feature_id']} integration passed",
+            next_state="feature_ready",
+        )
+        kernel = WorkflowKernel(
+            project=project,
+            ledger=ledger,
+            projection=ProjectionEngine(ledger, state_root / "projection-cache.json"),
+            lease=lease,
+        )
+        reservation = self._launch_lock(project, inspector)
+        reservation.acquire(
+            make_lock_record(
+                project_id=project.project_id,
+                repository_identity=identity["repository_id"],
+                run_id=run_id,
+                current_feature=plan["feature_id"],
+                current_phase="integration_finalization_recovery",
+            )
+        )
+        try:
+            reserved = inspect_integration_finalization_recovery(plan_path)
+            immutable_fields = (
+                "topology_fingerprint",
+                "controller_project_id",
+                "adapter_project_id",
+                "repository_identity",
+                "repository_path_fingerprint",
+                "resulting_feature_commit",
+                "integrating_metadata_commit",
+            )
+            changed = [
+                field for field in immutable_fields if reserved.get(field) != initial.get(field)
+            ]
+            if changed:
+                raise RecoveryError(
+                    "integration recovery identity changed under reservation: "
+                    + ", ".join(changed)
+                )
+            transaction = kernel.begin_for_branch(
+                workflow_type=WorkflowType.MILESTONE_INTEGRATION,
+                target_branch=plan["milestone_branch"],
+                milestone=plan["milestone_id"],
+                feature_id=plan["feature_id"],
+                run_id=run_id,
+                policy=adapter.policy,
+                expected_starting_branch=plan["milestone_branch"],
+                expected_starting_head=str(reserved["integrating_metadata_commit"]),
+            )
+            kernel.acquire_lease()
+            kernel.prepare_starting_branch()
+            kernel.capture_snapshot()
+            lease_record = lease.bind_controller_plan(
+                transaction_id=transaction.transaction_id,
+                repository_identity=identity["repository_id"],
+                controller_project_id=project.project_id,
+                adapter_project_id=str(reserved["adapter_project_id"]),
+                feature_branch=plan["feature_branch"],
+                accepted_commit=plan["accepted_commit"],
+            )
+            if lease_record is None:
+                raise LockError("integration recovery lease disappeared")
+            result = resume_integration_finalization(plan_path)
+            kernel.accept_deterministic_integration_result(plan, result)
+            if result["classification"] == "VALIDATION_FAILED":
+                blocked = kernel.block(
+                    state=TransactionState.TERMINAL_FAILURE,
+                    classification="VALIDATION_FAILED",
+                    next_state="validation_failed",
+                    reference="deterministic_recovery_validation_failed",
+                )
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "validation_failed",
+                    "kernel_projection": blocked,
+                    "model_session_launched": False,
+                }
+            integrated = str(result["resulting_feature_commit"])
+            completion = kernel.complete(
+                classification="INTEGRATED",
+                evidence={
+                    "accepted_feature_commit": plan["accepted_commit"],
+                    "integrated_commit": integrated,
+                    "integration_status": "passed",
+                    "integration_plan_fingerprint": plan["plan_fingerprint"],
+                    "recovered_transaction_id": plan["transaction_id"],
+                    "integration_runtime": result["runtime"],
+                    "model_session_launched": False,
+                },
+            )
+            return {
+                "project_id": project.project_id,
+                "outcome": "feature_integrated",
+                "feature": plan["feature_id"],
+                "accepted_commit": plan["accepted_commit"],
+                "integrated_commit": integrated,
+                "recovered_transaction_id": plan["transaction_id"],
+                "kernel_projection": completion["projection"],
+                "next_action": (
+                    "milestone_gate"
+                    if result.get("milestone_complete") is True
+                    else "feature_ready"
+                ),
+                "model_session_launched": False,
+            }
+        except (ConveyorError, ValueError) as exc:
+            self._terminalize_handled_kernel_failure(kernel, adapter, exc)
+            raise
+        finally:
+            reservation.release(run_id)
+
     def resume_project(self, project: Project, run_id: str | None = None) -> dict[str, Any]:
         kernel_recovery = self._kernel_recovery_preflight(project, apply=True)
         if kernel_recovery is not None:
             return kernel_recovery
+        finalization_recovery = self._integration_finalization_recovery_context(project)
+        if finalization_recovery is not None:
+            return self._recover_integration_finalization(
+                project, run_id or str(uuid.uuid4()), finalization_recovery
+            )
         context = self._authoritative_execution_context(project)
         if context is not None:
             projection, executable, _ = context
@@ -6385,6 +6558,26 @@ class CycleEngine:
         )
         if kernel_recovery is not None:
             return kernel_recovery
+        if mode == "resume":
+            finalization_recovery = self._integration_finalization_recovery_context(project)
+            if finalization_recovery is not None:
+                evidence = finalization_recovery["evidence"]
+                if dry_run:
+                    return {
+                        "project_id": project.project_id,
+                        "proposed_next_action": "integration_finalization_recovery",
+                        "feature": evidence["feature_id"],
+                        "recovered_transaction_id": evidence["blocked_transaction_id"],
+                        "resulting_feature_commit": evidence["resulting_feature_commit"],
+                        "integrating_metadata_commit": evidence[
+                            "integrating_metadata_commit"
+                        ],
+                        "model_session_launched": False,
+                        "application_repository_written": False,
+                    }
+                return self._recover_integration_finalization(
+                    project, str(uuid.uuid4()), finalization_recovery
+                )
         context = self._authoritative_execution_context(project)
         if context is not None and not dry_run and mode != "audit":
             authoritative, executable, _ = context

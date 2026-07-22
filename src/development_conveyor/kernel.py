@@ -647,6 +647,19 @@ class WorkflowKernel:
             )
         self._revalidate_lease()
         validate_integration_result(plan, result)
+        recovery = result.get("recovery")
+        if recovery is not None:
+            if (
+                not isinstance(recovery, dict)
+                or recovery.get("blocked_transaction_id") != plan["transaction_id"]
+                or recovery.get("integrating_metadata_commit")
+                != transaction.starting_head
+                or recovery.get("pre_integration_head")
+                != plan["pre_integration_head"]
+            ):
+                raise TransactionError(
+                    "deterministic integration recovery identity is inconsistent"
+                )
         transaction.transition(TransactionState.RESULT_PENDING)
         self.ledger.append(
             event_type="DeterministicExecutionStarted",
@@ -656,6 +669,10 @@ class WorkflowKernel:
                 "plan_fingerprint": plan["plan_fingerprint"],
                 "plan_path": plan.get("controller_plan_path"),
                 "model_session_launched": False,
+                "recovered_transaction_id": (
+                    recovery.get("blocked_transaction_id")
+                    if isinstance(recovery, dict) else None
+                ),
             },
         )
         transaction.transition(TransactionState.VALIDATING)
@@ -727,6 +744,7 @@ class WorkflowKernel:
         self.final_commit = final_commit
         self.prepared_integration_accepted_commit = plan["accepted_commit"]
         final_paths = tuple(sorted(self.inspector.changed_paths(final_commit)))
+        transaction.allowed_mutation_policy.validate(final_paths)
         self.ledger.append(
             event_type="CommitFinalized",
             transaction_id=transaction.transaction_id,
@@ -738,8 +756,19 @@ class WorkflowKernel:
                 "diff_fingerprint": self.inspector.patch_fingerprint(final_commit),
                 "accepted_commit": plan["accepted_commit"],
                 "resulting_feature_commit": resulting_feature_commit,
+                "integration_execution_mode": (
+                    "controller_plan_recovery"
+                    if isinstance(recovery, dict) else "controller_plan"
+                ),
+                "recovered_transaction_id": (
+                    recovery.get("blocked_transaction_id")
+                    if isinstance(recovery, dict) else None
+                ),
+                "recovered_pre_integration_head": (
+                    recovery.get("pre_integration_head")
+                    if isinstance(recovery, dict) else None
+                ),
                 "integrating_metadata_commit": result.get("integrating_metadata_commit"),
-                "integration_execution_mode": "controller_plan",
                 "integration_once": True,
                 "plan_fingerprint": plan["plan_fingerprint"],
             },
@@ -1155,13 +1184,30 @@ class WorkflowKernel:
             accepted_commit = payload.get("accepted_commit")
             if not accepted_commit or not changed_paths:
                 raise TransactionError("integration terminal evidence lacks nonempty accepted diff")
-            if payload.get("integration_execution_mode") == "controller_plan":
+            execution_mode = payload.get("integration_execution_mode")
+            if execution_mode in {"controller_plan", "controller_plan_recovery"}:
                 resulting = payload.get("resulting_feature_commit")
                 if not isinstance(resulting, str):
                     raise TransactionError(
                         "controller-plan integration lacks its resulting feature commit"
                     )
-                if self.inspector.rev_parse(f"{resulting}^", check=False) != transaction.starting_head:
+                expected_feature_parent = transaction.starting_head
+                if execution_mode == "controller_plan_recovery":
+                    expected_feature_parent = payload.get("recovered_pre_integration_head")
+                    integrating = payload.get("integrating_metadata_commit")
+                    if (
+                        not isinstance(expected_feature_parent, str)
+                        or not isinstance(integrating, str)
+                        or transaction.starting_head != integrating
+                        or self.inspector.rev_parse(f"{integrating}^", check=False)
+                        != resulting
+                        or self.inspector.rev_parse(f"{expected_head}^", check=False)
+                        != integrating
+                    ):
+                        raise TransactionError(
+                            "controller-plan recovery chain differs from the reserved topology"
+                        )
+                if self.inspector.rev_parse(f"{resulting}^", check=False) != expected_feature_parent:
                     raise TransactionError(
                         "controller-plan feature commit is not a direct child of the milestone start"
                     )

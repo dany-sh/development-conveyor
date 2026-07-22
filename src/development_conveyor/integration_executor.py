@@ -1330,6 +1330,217 @@ def execute_integration_plan(path: Path) -> dict[str, Any]:
     return result
 
 
+def inspect_integration_finalization_recovery(path: Path) -> dict[str, Any]:
+    """Reconstruct an interrupted post-cherry-pick topology without mutation."""
+
+    plan = load_integration_plan(path)
+    root = Path(plan["repository"]).expanduser().resolve()
+    inspector = RepositoryInspector(root)
+    identity = inspector.identity()
+    if (
+        identity["repository_id"] != plan["repository_identity"]
+        or identity["path_fingerprint"] != plan["repository_path_fingerprint"]
+    ):
+        raise IntegrationPlanError("recovery repository identity or path changed")
+    if (
+        not inspector.is_clean
+        or any(inspector.git_operation_state().values())
+        or inspector.current_branch != plan["milestone_branch"]
+    ):
+        raise IntegrationPlanError(
+            "integration finalization recovery requires the clean milestone branch"
+        )
+
+    try:
+        events = [
+            json.loads(line)
+            for line in Path(plan["controller_ledger_path"])
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line
+        ]
+    except (OSError, json.JSONDecodeError) as exc:
+        raise IntegrationPlanError("controller ledger is unavailable for recovery") from exc
+    if len(events) < plan["ledger_sequence"]:
+        raise IntegrationPlanError("controller ledger predates the immutable plan")
+    bound = events[plan["ledger_sequence"] - 1]
+    if (
+        bound.get("sequence") != plan["ledger_sequence"]
+        or bound.get("fingerprint") != plan["ledger_fingerprint"]
+        or any(event.get("project_id") != _controller_project_id(plan) for event in events)
+    ):
+        raise IntegrationPlanError("recovery plan does not match the controller ledger")
+    transaction_events = [
+        event for event in events if event.get("transaction_id") == plan["transaction_id"]
+    ]
+    expected_events = [
+        "TransactionStarted",
+        "LeaseAcquired",
+        "SnapshotCaptured",
+        "TransactionBlocked",
+        "LeaseReleased",
+        "ProjectionUpdated",
+    ]
+    if [event.get("event_type") for event in transaction_events] != expected_events:
+        raise IntegrationPlanError(
+            "interrupted integration transaction has unexpected durable events"
+        )
+    blocked = transaction_events[3].get("payload") or {}
+    if (
+        blocked.get("classification") != "VALIDATION_FAILED"
+        or blocked.get("terminal_state") != "terminal_failure"
+        or blocked.get("reference") != "SafetyViolation"
+    ):
+        raise IntegrationPlanError(
+            "integration transaction is not an exact pre-validation failure"
+        )
+
+    integrating_commit = inspector.rev_parse(plan["milestone_branch"], check=False)
+    if not isinstance(integrating_commit, str) or integrating_commit != inspector.head:
+        raise IntegrationPlanError("milestone ref changed before finalization recovery")
+    resulting_feature_commit = inspector.rev_parse(
+        f"{integrating_commit}^", check=False
+    )
+    recovered_pre_head = inspector.rev_parse(
+        f"{resulting_feature_commit}^", check=False
+    ) if isinstance(resulting_feature_commit, str) else None
+    topology_checks = {
+        "pre_integration_head": recovered_pre_head == plan["pre_integration_head"],
+        "accepted_ref": inspector.rev_parse(plan["feature_branch"], check=False)
+        == plan["accepted_commit"],
+        "accepted_patch": isinstance(resulting_feature_commit, str)
+        and inspector.patch_fingerprint(resulting_feature_commit)
+        == inspector.patch_fingerprint(plan["accepted_commit"]),
+        "integrating_subject": inspector.commit_subject(integrating_commit)
+        == f"factory: mark {plan['feature_id']} integrating",
+        "integrating_paths": bool(inspector.changed_paths(integrating_commit))
+        and plan["queue_path"] in inspector.changed_paths(integrating_commit)
+        and set(inspector.changed_paths(integrating_commit))
+        <= set(plan["metadata_paths"]),
+    }
+    failed = [field for field, passed in topology_checks.items() if not passed]
+    if failed:
+        raise IntegrationPlanError(
+            "interrupted integration Git topology mismatch: " + ", ".join(failed)
+        )
+
+    live_adapter = _load_worktree_json(root, ".factory/project.yaml")
+    accepted_adapter, _ = _json_at(root, plan["accepted_commit"], ".factory/project.yaml")
+    if (
+        _adapter_project_id(live_adapter, source="live") != plan["adapter_project_id"]
+        or _adapter_project_id(accepted_adapter, source="accepted-commit")
+        != plan["adapter_project_id"]
+    ):
+        raise IntegrationPlanError("adapter project identity changed before recovery")
+    queue = _load_worktree_json(root, plan["queue_path"])
+    feature = _one(queue, "features", plan["feature_id"])
+    queue_checks = {
+        "status": feature.get("status") == "integrating",
+        "integration_status": feature.get("integration_status") == "integrating",
+        "accepted_commit": feature.get("accepted_commit") == plan["accepted_commit"],
+        "feature_branch": feature.get("branch") == plan["feature_branch"],
+        "integration_base": feature.get("integration_base_commit")
+        == plan["pre_integration_head"],
+        "integrated_commit_absent": feature.get("integrated_commit") is None,
+    }
+    failed = [field for field, passed in queue_checks.items() if not passed]
+    if failed:
+        raise IntegrationPlanError(
+            "interrupted integration queue topology mismatch: " + ", ".join(failed)
+        )
+
+    try:
+        runtime = json.loads(
+            (_runtime_directory(root) / "latest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise IntegrationPlanError("integration runtime is unavailable for recovery") from exc
+    if not isinstance(runtime, dict):
+        raise IntegrationPlanError("integration runtime must be an object for recovery")
+    runtime_identity = runtime.get("runtime_identity") if isinstance(runtime, dict) else None
+    runtime_evidence = runtime.get("evidence") if isinstance(runtime, dict) else None
+    runtime_checks = {
+        "phase": runtime.get("phase") == "integrating",
+        "plan_fingerprint": runtime.get("plan_fingerprint") == plan["plan_fingerprint"],
+        "controller_project_id": isinstance(runtime_identity, dict)
+        and runtime_identity.get("controller_project_id") == _controller_project_id(plan),
+        "adapter_project_id": isinstance(runtime_identity, dict)
+        and runtime_identity.get("adapter_project_id") == plan["adapter_project_id"],
+        "transaction_id": isinstance(runtime_identity, dict)
+        and runtime_identity.get("transaction_id") == plan["transaction_id"],
+        "resulting_feature_commit": not isinstance(runtime_evidence, dict)
+        or runtime_evidence.get("resulting_feature_commit") in {None, resulting_feature_commit},
+        "integrating_metadata_commit": not isinstance(runtime_evidence, dict)
+        or runtime_evidence.get("integrating_metadata_commit") in {None, integrating_commit},
+    }
+    failed = [field for field, passed in runtime_checks.items() if not passed]
+    if failed:
+        raise IntegrationPlanError(
+            "integration runtime identity changed before recovery: " + ", ".join(failed)
+        )
+
+    evidence = {
+        "plan_fingerprint": plan["plan_fingerprint"],
+        "blocked_transaction_id": plan["transaction_id"],
+        "controller_project_id": _controller_project_id(plan),
+        "adapter_project_id": plan["adapter_project_id"],
+        "repository_identity": plan["repository_identity"],
+        "repository_path_fingerprint": plan["repository_path_fingerprint"],
+        "feature_id": plan["feature_id"],
+        "accepted_commit": plan["accepted_commit"],
+        "pre_integration_head": plan["pre_integration_head"],
+        "resulting_feature_commit": resulting_feature_commit,
+        "integrating_metadata_commit": integrating_commit,
+    }
+    evidence["topology_fingerprint"] = fingerprint(evidence)
+    return evidence
+
+
+def resume_integration_finalization(path: Path) -> dict[str, Any]:
+    """Run only validation and terminal metadata for an exact recovered topology."""
+
+    plan = load_integration_plan(path)
+    root = Path(plan["repository"]).expanduser().resolve()
+    recovery = inspect_integration_finalization_recovery(path)
+    _audit_accepted_commit(root, plan)
+    validation = _run_validation(root, plan)
+    final = _record_final_metadata(
+        root, plan, validation, str(recovery["resulting_feature_commit"])
+    )
+    classification = "INTEGRATED" if validation["ok"] else "VALIDATION_FAILED"
+    current_commit = _git_output(root, "rev-parse", "HEAD")
+    result = {
+        **_result_base(plan, classification),
+        "current_commit": current_commit,
+        "resulting_feature_commit": recovery["resulting_feature_commit"],
+        "integrating_metadata_commit": recovery["integrating_metadata_commit"],
+        "evidence_commit": final["evidence_commit"],
+        "changed_paths": sorted(
+            set(
+                _git_output(
+                    root, "diff", "--name-only", plan["pre_integration_head"], current_commit
+                ).splitlines()
+            )
+        ),
+        "validation": validation,
+        "milestone_complete": final["milestone_complete"],
+        "stop_reason": final["stop_reason"],
+        "runtime": {},
+        "human_gate": None,
+        "recovery": recovery,
+    }
+    result["runtime"] = _write_runtime(
+        root,
+        plan,
+        "complete" if validation["ok"] else "validation_failed",
+        result,
+    )
+    if not RepositoryInspector(root).is_clean:
+        raise IntegrationPlanError("integration finalization recovery left a dirty worktree")
+    validate_integration_result(plan, result)
+    return result
+
+
 def validate_integration_result(
     plan: dict[str, Any], result: dict[str, Any]
 ) -> None:

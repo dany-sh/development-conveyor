@@ -8,7 +8,7 @@ from unittest import mock
 
 from development_conveyor import cycle_engine as cycle_engine_module
 from development_conveyor import integration_executor as executor_module
-from development_conveyor.errors import IntegrationPlanError, RepositoryError
+from development_conveyor.errors import IntegrationPlanError, RepositoryError, SafetyViolation
 from development_conveyor.integration_executor import (
     LEASE_IDENTITY_FIELDS,
     PLAN_REQUIRED_FIELDS,
@@ -130,6 +130,86 @@ class DeterministicIntegrationHandoffTests(unittest.TestCase):
             self.assertEqual(
                 "live-interview-companion",
                 plan["lease_identity"]["adapter_project_id"],
+            )
+
+    def test_prevalidation_failure_recovers_existing_two_commit_topology_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                repository,
+                project,
+                _,
+                engine,
+                launcher,
+                ledger,
+                milestone_start,
+                _,
+                accepted,
+                _,
+            ) = self._fixture(
+                Path(temporary),
+                controller_project_id="interview-companion",
+                adapter_project_id="live-interview-companion",
+            )
+            with mock.patch.object(
+                executor_module,
+                "_run_validation",
+                side_effect=SafetyViolation("synthetic pre-validation classification"),
+            ):
+                with self.assertRaises(SafetyViolation):
+                    engine.run_project(project, "milestone")
+
+            integrating_commit = git(repository, "rev-parse", "HEAD")
+            resulting_feature_commit = git(repository, "rev-parse", "HEAD^")
+            self.assertEqual(milestone_start, git(repository, "rev-parse", "HEAD^^"))
+            self.assertEqual(
+                executor_module.RepositoryInspector(repository).patch_fingerprint(accepted),
+                executor_module.RepositoryInspector(repository).patch_fingerprint(
+                    resulting_feature_commit
+                ),
+            )
+            runtime_path = (
+                repository / ".factory/runtime/milestone-integration/latest.json"
+            )
+            runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+            for absent in (
+                "pre_integration_head",
+                "post_integration_head",
+                "resulting_feature_commit",
+                "validation",
+            ):
+                self.assertNotIn(absent, runtime)
+            ledger_after_failure = ledger.path.read_bytes()
+            dry_run = engine.run_project(project, "resume", dry_run=True)
+            self.assertEqual(
+                "integration_finalization_recovery", dry_run["proposed_next_action"]
+            )
+            self.assertEqual(integrating_commit, git(repository, "rev-parse", "HEAD"))
+            self.assertEqual(ledger_after_failure, ledger.path.read_bytes())
+
+            result = engine.run_project(project, "resume")
+
+            self.assertEqual("feature_integrated", result["outcome"])
+            self.assertEqual(resulting_feature_commit, result["integrated_commit"])
+            self.assertEqual([], launcher.requests)
+            self.assertFalse((repository / ".factory/locks/writer.json").exists())
+            subjects = git(
+                repository,
+                "log",
+                "--reverse",
+                "--format=%s",
+                f"{milestone_start}..HEAD",
+            ).splitlines()
+            self.assertEqual(
+                [
+                    "F001: accepted two-ref behavior",
+                    "factory: mark F001 integrating",
+                    "factory: record F001 integration passed",
+                ],
+                subjects,
+            )
+            self.assertEqual(
+                resulting_feature_commit,
+                git(repository, "rev-parse", f"{integrating_commit}^"),
             )
 
     def test_mismatched_accepted_adapter_fails_before_transaction_started(self):

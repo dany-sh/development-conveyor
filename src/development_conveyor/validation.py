@@ -119,6 +119,15 @@ class SafetyPolicy:
         contextvars.ContextVar("conveyor_subprocess_observation_sink", default=None)
     )
 
+    @staticmethod
+    def _is_swift_release_build(executable: str, lowered: list[str]) -> bool:
+        """Recognize Swift's build configuration without authorizing releases."""
+
+        return executable == "swift" and lowered in (
+            ["build", "-c", "release"],
+            ["build", "--configuration", "release"],
+        )
+
     @classmethod
     @contextmanager
     def observe_command_attempts(cls) -> Iterator[list[dict[str, Any]]]:
@@ -158,6 +167,11 @@ class SafetyPolicy:
         categories.update(
             category for token, category in category_tokens.items() if token in tokens
         )
+        if (
+            authority == "configured_validation"
+            and cls._is_swift_release_build(executable, lowered)
+        ):
+            categories.discard("release")
         sink.append({
             "authority": authority,
             "executable": executable,
@@ -232,6 +246,8 @@ class SafetyPolicy:
             for part in re.split(r"[^a-z0-9_-]+", item)
             if part
         }
+        if cls._is_swift_release_build(executable, lowered):
+            tokens.discard("release")
         if cls.PROHIBITED_WORDS & tokens or "notarytool" in tokens:
             raise SafetyViolation(
                 "configured release, publication, deployment, and notarization operations are prohibited"

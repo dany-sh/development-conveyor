@@ -60,3 +60,24 @@ class ProhibitedActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
             with self.assertRaises(SafetyViolation):
                 SafetyPolicy.validate_controller_command(["git", "status"], cwd=Path(first), registered_repository=Path(second))
+
+    def test_swift_release_build_configuration_is_validation_not_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with SafetyPolicy.observe_command_attempts() as observed:
+                SafetyPolicy.validate_configured_command(
+                    ["swift", "build", "-c", "release"],
+                    cwd=root,
+                    registered_repository=root,
+                )
+            self.assertEqual(observed[0]["prohibited_categories"], [])
+
+    def test_actual_configured_release_operation_remains_prohibited(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaises(SafetyViolation):
+                SafetyPolicy.validate_configured_command(
+                    ["gh", "release", "create", "v1"],
+                    cwd=root,
+                    registered_repository=root,
+                )
