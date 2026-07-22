@@ -586,3 +586,22 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `m1_f005_two_ref_bounded_medium_recheck`
 - Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-22T01:56:29+00:00
+
+- Agent role: `milestone_integrator`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_post_acceptance_integration_reconciliation`
+- Safety and autonomy contracts unchanged: `true`
+
+### M1 post-acceptance integration reconciliation evidence — 2026-07-21
+
+- Classification: post-acceptance Factory integration evidence and finalization only; this record is not a feature commit and does not change M1-001 behavior, source, tests, queue state, or application state.
+- Exact accepted and canonical identity: immutable accepted feature commit `6f97dcca8cb1c1e4b1560bda1b617f260995a9e0` is an exact ancestor of canonical `codex/development-conveyor` head `96c5c4a85f54b183e7c6b798890b947bd1de782f`. The separate repair branch remained at `f2494b41a2c42b18d71b39da91bc9aef657d4e0b` during validation; no ref was moved and no integration action or commit replay occurred.
+- Deterministic discovery: `python3 ~/.agents/skills/milestone-integrator/scripts/discover-integration.py --root . --feature M1-001` stopped with the expected zero-candidate result, `expected exactly one accepted feature awaiting integration, found 0`; M1 has no pending accepted integration candidate.
+- Combined-tree validation: the four focused suites passed 33/33 tests in `56.754s`; the relevant changed Python files compiled in memory; `scripts/conveyor validate-config` returned `valid: true` for both registered projects; `git diff --check`, worktree-diff, and index-diff checks were clean.
+- Application isolation: Interview Companion remained clean on `codex/m0-foundation` at `e07d8803fbe56bbbfb7430aeb19e888f3d7d06a7`; its immutable F005 feature ref remained `a1f2c8dd47aaa68580cd7dfc3dc6923e04469857`. The controller ledger remained 21 lines with SHA-256 `87ec706e8df320e5f0203501e1e8179342246732d3a975890a9d6db4e3e9b520`. The real F005 integration remained unperformed.
+- Safety boundary: canonical `codex/development-conveyor` remained fixed at `96c5c4a85f54b183e7c6b798890b947bd1de782f`; no default-branch merge, push, tag, release, deployment, publication, branch deletion, destructive reset, rebase, amend, application write, or ledger write was performed.
