@@ -20,7 +20,7 @@ class SyntheticIntegrationTests(unittest.TestCase):
             self.assertEqual(result["outcome"], "milestone_ready_for_merge")
             self.assertEqual(
                 launcher.actions,
-                ["feature_cycle", "milestone_integration", "milestone_gate"],
+                ["feature_cycle", "milestone_gate"],
             )
             self.assertEqual(git(repository, "rev-parse", "main"), baseline)
             self.assertNotEqual(git(repository, "rev-parse", project.milestone_branch), baseline)
@@ -41,7 +41,7 @@ class SyntheticIntegrationTests(unittest.TestCase):
             self.assertEqual(result["human_gate"], rerun["human_gate"])
             self.assertEqual(
                 launcher.actions,
-                ["feature_cycle", "milestone_integration", "milestone_gate"],
+                ["feature_cycle", "milestone_gate"],
             )
 
     def test_resume_after_verified_integration_does_not_repeat_feature(self):
@@ -62,5 +62,5 @@ class SyntheticIntegrationTests(unittest.TestCase):
             self.assertEqual(result["outcome"], "milestone_ready_for_merge")
             self.assertEqual(
                 launcher.actions,
-                ["feature_cycle", "milestone_integration", "milestone_gate"],
+                ["feature_cycle", "milestone_gate"],
             )

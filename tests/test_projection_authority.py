@@ -43,22 +43,26 @@ class ProjectionAuthorityTests(unittest.TestCase):
         (repository / "app.txt").write_text(
             "baseline\nF001 accepted behavior\n", encoding="utf-8"
         )
-        git(repository, "add", "app.txt")
-        git(repository, "commit", "-m", "F001: accepted behavior")
-        accepted = git(repository, "rev-parse", "HEAD")
-        git(repository, "switch", project.milestone_branch)
         queue_path = repository / project.queue_location
         queue = json.loads(queue_path.read_text(encoding="utf-8"))
         queue["features"][0].update({
             "status": "integration_pending",
+            "implementation_status": "Completed",
             "branch": feature_branch,
             "integration_base_commit": milestone_start,
-            "accepted_commit": accepted,
+            "accepted_commit": "SELF",
             "integration_status": "pending",
+            "acceptance": {
+                "tests_passed": True,
+                "review_passed": True,
+                "documentation_current": True,
+            },
         })
         write_json(queue_path, queue)
-        git(repository, "add", project.queue_location)
-        git(repository, "commit", "-m", "factory: record F001 acceptance")
+        git(repository, "add", "app.txt", project.queue_location)
+        git(repository, "commit", "-m", "F001: accepted behavior")
+        accepted = git(repository, "rev-parse", "HEAD")
+        git(repository, "switch", project.milestone_branch)
 
         configuration = controller_configuration(root, project)
         engine = CycleEngine(configuration, SyntheticLauncher())
@@ -83,6 +87,82 @@ class ProjectionAuthorityTests(unittest.TestCase):
             controller_root=configuration.root, project=project
         ).apply()
         self.assertTrue(migration["migration_applied"])
+        state_root = configuration.root / "state/projects/synthetic"
+        ledger = EvidenceLedger(
+            state_root / "evidence-ledger.jsonl",
+            project_id=project.project_id,
+            repository_identity=inspector.identity()["repository_id"],
+            repository_path_fingerprint=inspector.identity()["path_fingerprint"],
+        )
+        failed_transaction = "failed-two-ref-integration"
+        failed_run = "failed-two-ref-run"
+        workflow = WorkflowType.MILESTONE_INTEGRATION
+        for event_type, payload in (
+            (
+                "TransactionStarted",
+                {
+                    "run_id": failed_run,
+                    "feature_id": "F001",
+                    "milestone": "M0",
+                    "starting_branch": project.milestone_branch,
+                    "starting_head": milestone_start,
+                    "allowed_mutation_policy": {},
+                },
+            ),
+            (
+                "LeaseAcquired",
+                {"lease_id": "old-integration-lease", "lease_type": "integration_writer"},
+            ),
+            (
+                "SnapshotCaptured",
+                {"snapshot": {"branch": project.milestone_branch, "head": milestone_start}},
+            ),
+            ("SessionLaunched", {"session_id": "legacy-session"}),
+            ("ValidationStarted", {}),
+            ("ValidationFailed", {"diagnostic": "synthetic pre-mutation failure"}),
+            (
+                "TransactionBlocked",
+                {
+                    "classification": "VALIDATION_FAILED",
+                    "reference": "SessionError",
+                    "terminal_state": "terminal_failure",
+                    "next_state": "validation_failed",
+                    "terminal_snapshot": {
+                        "branch": project.milestone_branch,
+                        "head": milestone_start,
+                        "clean": True,
+                    },
+                },
+            ),
+            ("LeaseReleased", {"lease_id": "old-integration-lease"}),
+        ):
+            ledger.append(
+                event_type=event_type,
+                transaction_id=failed_transaction,
+                workflow_type=workflow,
+                payload=payload,
+            )
+        ProjectionEngine(
+            ledger, state_root / "projection-cache.json"
+        ).rebuild(persist_cache=True)
+        write_json(
+            configuration.root / f"reports/{failed_run}/milestone_integration.json",
+            {
+                "schema_version": 1,
+                "project_id": project.project_id,
+                "run_id": failed_run,
+                "action": "milestone_integration",
+                "working_directory": str(repository),
+                "session_id": "legacy-session",
+                "accepted_commit": accepted,
+                "terminal_marker_found": True,
+                "structured_output_validation": "semantic_invalid",
+                "result_classification": "structured_output_invalid",
+                "post_integration_commands": [
+                    {"category": "status_observation", "exit_code": 0}
+                ],
+            },
+        )
         return repository, project, configuration, engine, accepted, inspector.cycle_state_path()
 
     def test_valid_projection_overrides_stale_project_and_repository_cycle(self):
@@ -105,28 +185,20 @@ class ProjectionAuthorityTests(unittest.TestCase):
             self.assertIsNone(plan["existing_active_cycle"])
             self.assertFalse(plan["old_session_will_resume"])
             self.assertFalse(plan["session_resume_eligible"])
-            self.assertEqual(
-                ["fresh milestone-integration transaction"],
-                plan["sessions_that_would_launch"],
-            )
+            self.assertEqual([], plan["sessions_that_would_launch"])
             self.assertEqual("integration_writer", plan["execution_plan"]["lease_type"])
             self.assertEqual("fresh", plan["execution_plan"]["transaction_mode"])
             self.assertFalse(plan["feature_factory_would_launch"])
-            self.assertTrue(plan["milestone_integrator_would_launch"])
+            self.assertFalse(plan["milestone_integrator_would_launch"])
             contract = plan["milestone_integration_contract"]
             self.assertEqual(
-                "~/.agents/skills/milestone-integrator/scripts/integrate-feature.sh --root . --feature F001",
+                "scripts/conveyor execute-integration-plan --plan <absolute-controller-owned-plan-path>",
                 contract["mutation_command"],
             )
-            self.assertEqual("CONVEYOR_TRANSACTION_RESULT=", contract["terminal_marker"])
-            self.assertEqual(
-                "milestone_integration",
-                contract["terminal_schema"]["properties"]["workflow_type"]["const"],
-            )
+            self.assertFalse(contract["model_session_required"])
             self.assertEqual(accepted, contract["accepted_commit"])
             self.assertEqual("fresh", contract["transaction_mode"])
-            self.assertEqual("legacy-session", plan["superseded_legacy_cycles"][0]["session_id"])
-            self.assertEqual("superseded", plan["superseded_legacy_cycles"][0]["classification"])
+            self.assertFalse(plan["old_session_will_resume"])
             self.assertIsNotNone(plan["legacy_observations"]["legacy_existing_cycle"])
             self.assertEqual(cycle_before, cycle_path.read_bytes())
             self.assertTrue(RepositoryInspector(repository).is_clean)
@@ -254,35 +326,9 @@ class ProjectionAuthorityTests(unittest.TestCase):
             root = Path(temporary)
             repository, project, _, engine, _, _ = self._integration_fixture(root)
             inspector = RepositoryInspector(repository)
-            state_root = root / "controller/state/projects/synthetic"
-            ledger = EvidenceLedger(
-                state_root / "evidence-ledger.jsonl",
-                project_id=project.project_id,
-                repository_identity=inspector.identity()["repository_id"],
-                repository_path_fingerprint=inspector.identity()["path_fingerprint"],
-            )
-            migration_transaction = next(
-                event["transaction_id"] for event in reversed(ledger.read())
-                if event["event_type"] == "ProjectionUpdated"
-            )
-            ledger.append(
-                event_type="ProjectionUpdated",
-                transaction_id=migration_transaction,
-                workflow_type=WorkflowType.RECOVERY,
-                payload={
-                    "current_state": "integration_ready",
-                    "current_feature": "F001",
-                    "projection_facts": {
-                        "selected_feature_starting_commit": inspector.head,
-                    },
-                },
-            )
-            ProjectionEngine(
-                ledger, state_root / "projection-cache.json"
-            ).rebuild(persist_cache=True)
-            projection = engine._authoritative_projection(project)
-            self.assertIsNotNone(projection)
-            planned = engine._execution_plan(project, projection)
+            context = engine._authoritative_execution_context(project)
+            self.assertIsNotNone(context)
+            _, planned, _ = context
             self.assertEqual(git(repository, "rev-parse", "HEAD"), planned.starting_commit)
             ledger_path = root / "controller/state/projects/synthetic/evidence-ledger.jsonl"
             ledger_before = ledger_path.read_bytes()
@@ -315,51 +361,20 @@ class ProjectionAuthorityTests(unittest.TestCase):
             root = Path(temporary)
             repository, project, _, engine, _, _ = self._integration_fixture(root)
             inspector = RepositoryInspector(repository)
-            state_root = root / "controller/state/projects/synthetic"
-            ledger = EvidenceLedger(
-                state_root / "evidence-ledger.jsonl",
-                project_id=project.project_id,
-                repository_identity=inspector.identity()["repository_id"],
-                repository_path_fingerprint=inspector.identity()["path_fingerprint"],
-            )
-            migration_transaction = next(
-                event["transaction_id"] for event in reversed(ledger.read())
-                if event["event_type"] == "ProjectionUpdated"
-            )
-            ledger.append(
-                event_type="ProjectionUpdated",
-                transaction_id=migration_transaction,
-                workflow_type=WorkflowType.RECOVERY,
-                payload={
-                    "current_state": "integration_ready",
-                    "current_feature": "F001",
-                    "projection_facts": {
-                        "selected_feature_starting_commit": inspector.head,
-                    },
-                },
-            )
-            projection = ProjectionEngine(
-                ledger, state_root / "projection-cache.json"
-            ).rebuild(persist_cache=True)
+            context = engine._authoritative_execution_context(project)
+            self.assertIsNotNone(context)
+            projection, execution_plan, _ = context
             git(repository, "switch", "codex/f001-authoritative")
-            git(
-                repository,
-                "checkout",
-                project.milestone_branch,
-                "--",
-                project.queue_location,
-            )
-            git(repository, "add", project.queue_location)
-            git(repository, "commit", "-m", "test: materialize accepted queue state")
             self.assertTrue(RepositoryInspector(repository).is_clean)
 
             result = engine._execute_projected_integration(
                 project,
                 "milestone",
                 "feature-checkout-integration",
-                engine._execution_plan(project, projection),
+                execution_plan,
             )
             self.assertEqual("feature_integrated", result["outcome"])
+            self.assertFalse(result["model_session_launched"])
             self.assertFalse((repository / ".factory/locks/writer.json").exists())
 
     def test_actual_integration_dispatch_uses_plan_commit_when_queue_contains_self(self):
@@ -367,55 +382,15 @@ class ProjectionAuthorityTests(unittest.TestCase):
             root = Path(temporary)
             repository, project, configuration, engine, accepted, _ = self._integration_fixture(root)
             inspector = RepositoryInspector(repository)
-            state_root = configuration.root / "state/projects/synthetic"
-            ledger = EvidenceLedger(
-                state_root / "evidence-ledger.jsonl",
-                project_id=project.project_id,
-                repository_identity=inspector.identity()["repository_id"],
-                repository_path_fingerprint=inspector.identity()["path_fingerprint"],
-            )
-            migration_transaction = next(
-                event["transaction_id"] for event in reversed(ledger.read())
-                if event["event_type"] == "ProjectionUpdated"
-            )
-            ledger.append(
-                event_type="ProjectionUpdated",
-                transaction_id=migration_transaction,
-                workflow_type=WorkflowType.RECOVERY,
-                payload={
-                    "current_state": "integration_ready",
-                    "current_feature": "F001",
-                    "projection_facts": {
-                        "selected_feature_starting_commit": inspector.head,
-                    },
-                },
-            )
-            ProjectionEngine(
-                ledger, state_root / "projection-cache.json"
-            ).rebuild(persist_cache=True)
-            git(repository, "switch", "codex/f001-authoritative")
-            queue_path = repository / project.queue_location
-            queue = json.loads(queue_path.read_text(encoding="utf-8"))
-            queue["features"][0].update({
-                "status": "integration_pending",
-                "branch": "codex/f001-authoritative",
-                "integration_base_commit": project.validated_baseline_commit,
-                "accepted_commit": "SELF",
-                "integration_status": "pending",
-            })
-            write_json(queue_path, queue)
-            git(repository, "add", project.queue_location)
-            git(repository, "commit", "-m", "test: preserve SELF queue sentinel")
-
-            projection = engine._authoritative_projection(project)
-            self.assertIsNotNone(projection)
-            execution_plan = engine._execution_plan(project, projection)
+            context = engine._authoritative_execution_context(project)
+            self.assertIsNotNone(context)
+            projection, execution_plan, _ = context
             self.assertEqual(accepted, execution_plan.accepted_commit)
-            self.assertEqual(
-                "SELF",
-                FeatureQueue.from_location(repository, project.queue_location)
-                .feature("F001")["accepted_commit"],
-            )
+            live_feature = FeatureQueue.from_location(
+                repository, project.queue_location
+            ).feature("F001")
+            self.assertEqual("ready", live_feature["status"])
+            self.assertIsNone(live_feature["accepted_commit"])
 
             class CapturingLauncher(SyntheticLauncher):
                 def __init__(self):
@@ -432,18 +407,13 @@ class ProjectionAuthorityTests(unittest.TestCase):
             engine.launcher = launcher
             result = engine.run_project(project, "resume")
             self.assertEqual(accepted, result["accepted_commit"])
-            self.assertEqual(accepted, launcher.requests[-1].accepted_commit)
-            prompt = SessionLauncher(
-                REPOSITORY_ROOT, configuration.conveyor
-            )._render_prompt(launcher.requests[-1])
-            self.assertIn(f"Accepted commit: `{accepted}`", prompt)
-            self.assertNotIn("Accepted commit: `SELF`", prompt)
-
-            report = json.loads((
-                configuration.root
-                / f"reports/{launcher.requests[-1].run_id}/milestone_integration.json"
-            ).read_text(encoding="utf-8"))
-            self.assertEqual(accepted, report["accepted_commit"])
+            self.assertEqual([], launcher.requests)
+            self.assertFalse(result["model_session_launched"])
+            persisted_plan = json.loads(
+                Path(result["integration_plan"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(accepted, persisted_plan["accepted_commit"])
+            self.assertEqual(accepted, persisted_plan["accepted_metadata_ref"])
             ledger_text = (
                 configuration.root / "state/projects/synthetic/evidence-ledger.jsonl"
             ).read_text(encoding="utf-8")
@@ -546,7 +516,7 @@ class ProjectionAuthorityTests(unittest.TestCase):
         expected = {
             "queue_reconciliation": ("queue_reconciliation", True, True),
             "feature_cycle": ("feature_execution", True, True),
-            "milestone_integration": ("milestone_integration", True, True),
+            "milestone_integration": ("milestone_integration", True, False),
             "milestone_gate": ("milestone_gate", True, True),
             "human_decision_resolution": (
                 "human_decision_resolution", False, False,
@@ -693,7 +663,7 @@ class ProjectionAuthorityTests(unittest.TestCase):
                 project, "one_feature"
             )
             self.assertEqual("one_feature_integrated", result["outcome"])
-            self.assertEqual(["feature_cycle", "milestone_integration"], launcher.actions)
+            self.assertEqual(["feature_cycle"], launcher.actions)
             integrity = migrator.ledger.verify()
             rebuilt = migrator.projection.rebuild(persist_cache=False)
             cache = migrator.projection.load_cache()
@@ -723,7 +693,6 @@ class ProjectionAuthorityTests(unittest.TestCase):
             self.assertEqual(
                 [
                     "feature_cycle",
-                    "milestone_integration",
                     "milestone_gate",
                 ],
                 launcher.actions,

@@ -54,8 +54,6 @@ from .sessions import (
     SessionPlan,
     SessionRequest,
     SessionResult,
-    milestone_integration_mutation_command,
-    milestone_integration_terminal_schema,
 )
 from .state_machine import CYCLE_MACHINE, PORTFOLIO_MACHINE
 from .legacy_adapter import LegacyTransitionAdapter
@@ -80,6 +78,12 @@ from .execution_plan import (
     ExecutionPlan,
     authoritative_status_fields,
     superseded_legacy_cycles,
+)
+from .integration_executor import (
+    build_integration_plan,
+    execute_integration_plan,
+    inspect_two_refs,
+    persist_integration_plan,
 )
 from .workflow_lease import WorkflowWriterLease
 from .command_authority import CommandAuthority
@@ -121,11 +125,21 @@ class CycleEngine:
         if plan.get("proposed_next_action") != "milestone_integration" or not plan.get("selected_feature"):
             return
         plan["milestone_integration_contract"] = {
-            "mutation_command": milestone_integration_mutation_command(
-                str(plan["selected_feature"])
+            "executor": "development_conveyor.integration_executor",
+            "mutation_command": (
+                "scripts/conveyor execute-integration-plan --plan "
+                "<absolute-controller-owned-plan-path>"
             ),
-            "terminal_marker": "CONVEYOR_TRANSACTION_RESULT=",
-            "terminal_schema": milestone_integration_terminal_schema(),
+            "model_session_required": False,
+            "terminal_marker": None,
+            "terminal_schema": {
+                "schema_version": 1,
+                "classifications": [
+                    "INTEGRATED",
+                    "VALIDATION_FAILED",
+                    "SEMANTIC_CONFLICT",
+                ],
+            },
             "accepted_commit": plan.get("accepted_feature_commit"),
             "starting_commit": (
                 (plan.get("execution_plan") or {}).get("starting_commit")
@@ -537,7 +551,11 @@ class CycleEngine:
     ) -> dict[str, Any]:
         """Recover one terminal pre-mutation integration as a fresh transaction plan."""
 
-        if projection.get("active_transaction") is not None or projection.get("current_state") != "validation_failed":
+        if (
+            projection.get("active_transaction") is not None
+            or projection.get("current_state")
+            not in {"validation_failed", "human_decision_required"}
+        ):
             return projection
         candidate = self._verified_failed_integration_recovery(project, projection)
         if candidate is None:
@@ -570,7 +588,8 @@ class CycleEngine:
             (
                 item for item in reversed(projection.get("transactions", []))
                 if item.get("workflow_type") == WorkflowType.MILESTONE_INTEGRATION.value
-                and item.get("state") == "terminal_failure"
+                and item.get("state")
+                in {"terminal_failure", "human_decision_required"}
             ),
             None,
         )
@@ -661,10 +680,45 @@ class CycleEngine:
             report.get("terminal_marker_found") is True
             or "CONVEYOR_TRANSACTION_RESULT=" in str(report.get("redacted_stdout") or "")
         )
+        parsed = report.get("parsed_structured_result")
+        parsed_evidence = parsed.get("evidence") if isinstance(parsed, dict) else None
+        parsed_gate = (
+            parsed_evidence.get("human_decision")
+            if isinstance(parsed_evidence, dict) else None
+        )
+        gate_categories = (
+            parsed_gate.get("blocker_categories")
+            if isinstance(parsed_gate, dict) else None
+        )
+        mechanical_gate = (
+            failed.get("state") == "human_decision_required"
+            and failed.get("terminal_classification") == "HUMAN_DECISION_REQUIRED"
+            and report.get("structured_output_validation") == "valid"
+            and report.get("result_classification") == "HUMAN_DECISION_REQUIRED"
+            and isinstance(parsed, dict)
+            and parsed.get("classification") == "HUMAN_DECISION_REQUIRED"
+            and parsed.get("changed_paths") == []
+            and parsed.get("current_commit") == milestone_head
+            and parsed.get("starting_branch") == milestone_branch
+            and parsed.get("starting_commit") == milestone_head
+            and parsed.get("transaction_id") == failed.get("transaction_id")
+            and isinstance(parsed_evidence, dict)
+            and parsed_evidence.get("accepted_commit") == accepted
+            and isinstance(parsed_gate, dict)
+            and parsed_gate.get("transaction_id") == failed.get("transaction_id")
+            and sorted(gate_categories or [])
+            == ["accepted_state_identity_mismatch", "runtime_ignore_policy"]
+        )
+        structured_failure = (
+            failed.get("state") == "terminal_failure"
+            and failed.get("terminal_classification")
+            in {"VALIDATION_FAILED", "TERMINAL_INTEGRATION_FAILURE"}
+            and report.get("structured_output_validation")
+            in {"invalid", "semantic_invalid"}
+            and report.get("result_classification") == "structured_output_invalid"
+        )
         checks = {
-            "terminal_failure": failed.get("terminal_classification") in {
-                "VALIDATION_FAILED", "TERMINAL_INTEGRATION_FAILURE"
-            },
+            "terminal_pre_mutation_outcome": structured_failure or mechanical_gate,
             "report_identity": report.get("project_id") == project.project_id
             and report.get("run_id") == run_id
             and report.get("action") == "milestone_integration",
@@ -678,16 +732,20 @@ class CycleEngine:
             "milestone_ref_head": isinstance(milestone_branch, str)
             and snapshot.get("branch") == milestone_branch
             and snapshot.get("head") == milestone_head,
-            "milestone_checkout": inspector.current_branch == milestone_branch
-            and inspector.head == milestone_head,
+            "known_clean_checkout": (
+                inspector.current_branch == milestone_branch
+                and inspector.head == milestone_head
+            ) or (
+                inspector.current_branch == snapshot_candidate["feature_branch"]
+                and inspector.head == accepted
+            ),
             "repository_clean": inspector.is_clean,
             "no_git_operation": not any(inspector.git_operation_state().values()),
             "no_writer_lease": not inspector.writer_lock_path(
                 self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
             ).exists(),
             "pre_mutation_failure": terminal_marker_found
-            and report.get("structured_output_validation") in {"invalid", "semantic_invalid"}
-            and report.get("result_classification") == "structured_output_invalid"
+            and (structured_failure or mechanical_gate)
             and not any(
                 isinstance(item, dict)
                 and item.get("category") == "required_evidence_finalization"
@@ -698,7 +756,11 @@ class CycleEngine:
         if not all(checks.values()):
             return None
         return {
-            "classification": "fresh_after_terminal_pre_mutation_failure",
+            "classification": (
+                "fresh_after_terminal_pre_mutation_gate"
+                if mechanical_gate
+                else "fresh_after_terminal_pre_mutation_failure"
+            ),
             "failed_transaction_id": failed.get("transaction_id"),
             "failed_run_id": run_id,
             "failed_session_id": old_sessions[0],
@@ -2952,7 +3014,6 @@ class CycleEngine:
             state["session_completion_evidence"] = {"prelaunch_branch": branch_evidence}
             tracked_paths = tuple(sorted(path for path in inspector.git(["ls-files", "-z"]).stdout.split("\0") if path))
             denied_feature_paths = tuple(sorted({
-                project.queue_location,
                 project.autonomy_contract_location,
                 project.validation_source,
                 ".factory/approved-content.yaml",
@@ -2968,6 +3029,10 @@ class CycleEngine:
                     for prefix in denied_feature_prefixes
                 )
             )
+            if project.queue_location not in feature_allowed_paths:
+                raise RecoveryError(
+                    "feature execution must authorize its tracked acceptance queue snapshot"
+                )
             top_level_prefixes = tuple(sorted(
                 item.name for item in project.repository.iterdir()
                 if item.is_dir()
@@ -3177,208 +3242,48 @@ class CycleEngine:
                     "feature acceptance disagrees with the fresh milestone-integration plan"
                 )
 
-            accepted_paths = tuple(sorted(inspector.git([
-                "diff-tree", "--no-commit-id", "--name-only", "-r", str(accepted)
-            ]).stdout.splitlines()))
-            integration_adapter = MilestoneIntegrationAdapter(
-                allowed_paths=accepted_paths, commit_subject=f"factory: integrate {selection.feature_id}",
-                next_state="feature_integrated",
+            integration_result = self._execute_projected_integration(
+                project,
+                mode,
+                run_id,
+                integration_execution_plan,
+                reservation_held=True,
             )
-            integration_kernel = WorkflowKernel(
-                project=project, ledger=phase_ledger,
-                projection=ProjectionEngine(phase_ledger, phase_root / "projection-cache.json"),
-                lease=WorkflowWriterLease(inspector.writer_lock_path(
-                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
-                )),
-            )
-            phase_kernels.append((integration_kernel, integration_adapter))
-            integration_transaction = integration_kernel.begin_for_branch(
-                workflow_type=WorkflowType.MILESTONE_INTEGRATION,
-                target_branch=str(project.milestone_branch),
-                milestone=project.active_milestone, feature_id=selection.feature_id,
-                run_id=run_id, policy=integration_adapter.policy,
-                expected_starting_branch=integration_execution_plan.milestone_branch,
-                expected_starting_head=integration_execution_plan.starting_commit,
-            )
-            integration_kernel.acquire_lease()
-            integration_kernel.prepare_starting_branch()
-            integration_kernel.capture_snapshot()
-            integration_request = SessionRequest(
-                action="milestone_integration", project=project, run_id=run_id, mode=mode,
-                feature=selection.feature_id,
-                transaction_id=integration_transaction.transaction_id,
-                repository_identity=identity["repository_id"],
-                starting_branch=integration_transaction.starting_branch,
-                starting_commit=integration_transaction.starting_head,
-                allowed_paths=accepted_paths,
-            )
-            integration_result, integration_repairs, _ = self._launch_with_retries(
-                integration_request, inspector, "integrating", "integration_repairs",
-                reservation_held=True, on_session_started=integration_kernel.session_launched,
-            )
-            state["integration_session_id"] = integration_result.session_id
-            if integration_result.transaction_envelope is None:
-                message = self._session_failure_message(
-                    project, run_id, integration_result, "integrating"
-                )
-                gate = {
-                    "reason": "milestone integration session cannot continue safely",
-                    "project": project.project_id, "run_id": run_id,
-                    "feature": selection.feature_id,
-                    "classification": integration_result.failure_classification or integration_result.result_classification,
-                    "accepted_feature_commit": accepted,
-                    "integration_session_id": integration_result.session_id,
-                    "retryable": False,
-                    "safe_continuation_command": f"scripts/conveyor doctor --project {project.project_id}",
-                    "resolved": False,
-                }
-                state.update({
-                    "current_phase": "human_decision_required",
-                    "last_successful_checkpoint": "integration_session_terminal_failure",
-                    "last_verified_git_state": self._git_checkpoint(inspector),
-                    "failure_classification": gate["classification"], "retry_exhausted": True,
-                    "next_safe_action": gate["safe_continuation_command"],
-                    "stop_reason": message, "human_decision_required": gate,
-                    "integration_gate": gate, "integration_status": "blocked",
-                    "updated_at": utc_now(),
-                })
-                terminal_projection = integration_kernel.block(
-                    state=TransactionState.HUMAN_DECISION_REQUIRED,
-                    classification="HUMAN_DECISION_REQUIRED",
-                    next_state="human_decision_required", human_gate=gate,
-                )
-                self._bind_terminal_cycle_cache(
-                    state, integration_transaction.transaction_id, terminal_projection
-                )
-                self.cycle_store.write(cycle_path, state)
-                self._transition_project(
-                    project, project_state, "human_decision_required", run_id=run_id,
-                    checkpoint="integration_session_terminal_failure",
-                    feature=selection.feature_id, stop_reason=message, human_gate=gate,
-                    kernel_owned=True,
-                    kernel_projection={
-                        "transaction_id": integration_transaction.transaction_id,
-                        **terminal_projection,
-                    },
-                )
-                raise SessionError(message)
-            integration_envelope = SessionResultEnvelope.from_dict(integration_result.transaction_envelope)
-            integration_blocked = self._route_kernel_result(
-                integration_kernel, integration_adapter, integration_envelope
-            )
-            if integration_blocked is not None:
-                self._transition_project(
-                    project, project_state, integration_envelope.next_state, run_id=run_id,
-                    checkpoint="kernel_integration_terminal", feature=selection.feature_id,
-                    stop_reason=integration_envelope.classification,
-                    human_gate=integration_envelope.evidence.get("human_decision"),
-                    kernel_owned=True,
-                    kernel_projection={"transaction_id": integration_transaction.transaction_id, **integration_blocked},
-                )
-                return {"outcome": integration_envelope.next_state, "classification": integration_envelope.classification}
-            prepared_paths = integration_kernel.prepare_integration_changes(str(accepted))
-            if prepared_paths != accepted_paths:
-                raise RecoveryError("prepared integration paths differ from accepted commit")
-            integration_authority, integration_commands = self._kernel_required_commands(project)
-            integration_kernel.record_file_mutation_boundary()
-            integration_kernel.validate(
-                authority=integration_authority, command_results=integration_commands,
-                semantic_validator=integration_adapter.semantic_validate,
-            )
-            integrated = integration_kernel.finalize()
+            if integration_result.get("outcome") != "feature_integrated":
+                return integration_result
+            integrated = integration_result["integrated_commit"]
+            state["integration_session_id"] = None
             self._advance_cycle(
-                cycle_path, state, "integrating", inspector, "kernel_integrated",
-                kernel=integration_kernel,
+                cycle_path, state, "integrating", inspector,
+                "deterministic_controller_plan_integrated",
             )
             self._advance_cycle(
                 cycle_path, state, "integration_validation", inspector,
-                "kernel_integration_validated", kernel=integration_kernel,
+                "deterministic_controller_plan_validated",
             )
             self._advance_cycle(
-                cycle_path, state, "feature_integrated", inspector, "kernel_feature_integrated",
-                kernel=integration_kernel,
+                cycle_path, state, "feature_integrated", inspector,
+                "deterministic_controller_plan_completed",
             )
-            state["milestone_post_integration_commit"] = integrated
-            integration_completion = integration_kernel.complete(evidence={
-                "accepted_feature_commit": accepted,
-                "integrated_commit": integrated,
-                "integration_status": "passed",
-            })
-            self._materialize_terminal_cycle_cache(
-                cycle_path, state, integration_transaction.transaction_id,
-                integration_completion,
+            state["milestone_post_integration_commit"] = inspector.head
+            integration_projection = integration_result["kernel_projection"]
+            integration_transaction_id = next(
+                item["transaction_id"]
+                for item in reversed(integration_projection["transactions"])
+                if item.get("workflow_type") == "milestone_integration"
             )
-
-            queue_path = resolve_queue_path(project.repository, project.queue_location)
-            post_adapter = QueueReconciliationAdapter(
-                allowed_paths=(project.queue_location,),
-                commit_subject=f"factory: record {selection.feature_id} integration",
-                next_state="milestone_gate",
+            self._bind_terminal_cycle_cache(
+                state, integration_transaction_id, integration_projection
             )
-            post_kernel = WorkflowKernel(
-                project=project, ledger=phase_ledger,
-                projection=ProjectionEngine(phase_ledger, phase_root / "projection-cache.json"),
-                lease=WorkflowWriterLease(inspector.writer_lock_path(
-                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
-                )),
-            )
-            phase_kernels.append((post_kernel, post_adapter))
-            post_transaction = post_kernel.begin(
-                workflow_type=WorkflowType.QUEUE_RECONCILIATION,
-                milestone=project.active_milestone, feature_id=selection.feature_id,
-                run_id=run_id, policy=post_adapter.policy,
-            )
-            post_kernel.acquire_lease()
-            post_kernel.capture_snapshot()
-            post_session = f"deterministic-post-integration:{post_transaction.transaction_id}"
-            post_kernel.session_launched(post_session)
-            queue_document = json.loads(queue_path.read_text(encoding="utf-8"))
-            queue_feature = next(item for item in queue_document["features"] if item["id"] == selection.feature_id)
-            queue_feature.update({
-                "status": "integrated", "accepted_commit": accepted,
-                "integrated_commit": integrated, "integration_status": "passed",
-            })
-            resolved_milestone = FeatureQueue.from_location(
+            self.cycle_store.write(cycle_path, state)
+            summary_after = FeatureQueue.from_location(
                 project.repository, project.queue_location
-            ).milestone(project.active_milestone or "")
-            if resolved_milestone is None:
-                raise QueueError("configured milestone disappeared during integration finalization")
-            queue_milestone = next(
-                item for item in queue_document["milestones"]
-                if item["id"] == resolved_milestone["id"]
-            )
-            if selection.feature_id not in queue_milestone["integrated_features"]:
-                queue_milestone["integrated_features"].append(selection.feature_id)
-            queue_milestone["last_validated_commit"] = integrated
-            queue_path.write_text(json.dumps(queue_document, indent=2) + "\n", encoding="utf-8")
-            summary_after = FeatureQueue.from_location(project.repository, project.queue_location).summary(project.active_milestone or "")
-            post_classification = "MILESTONE_COMPLETE" if summary_after["milestone_complete"] else "RECONCILED_READY_WORK"
+            ).summary(project.active_milestone or "")
             post_next = "milestone_gate" if summary_after["milestone_complete"] else "feature_ready"
-            post_envelope = SessionResultEnvelope.from_dict({
-                "schema_version": 1, "workflow_type": "queue_reconciliation",
-                "classification": post_classification, "project_id": project.project_id,
-                "repository_identity": identity["repository_id"],
-                "transaction_id": post_transaction.transaction_id, "run_id": run_id,
-                "session_id": post_session, "starting_branch": post_transaction.starting_branch,
-                "starting_commit": post_transaction.starting_head, "current_commit": post_transaction.starting_head,
-                "feature_id": selection.feature_id, "changed_paths": [project.queue_location],
-                "evidence": {"integrated_commit": integrated}, "next_state": post_next,
-            })
-            if self._route_kernel_result(post_kernel, post_adapter, post_envelope) is not None:
-                raise RecoveryError("deterministic post-integration reconciliation did not authorize success")
-            post_kernel.record_file_mutation_boundary()
-            post_kernel.validate(
-                authority=CommandAuthority(), command_results=(),
-                semantic_validator=post_adapter.semantic_validate,
-            )
-            post_kernel.finalize()
-            post_completion = post_kernel.complete(evidence={"planning_status": "passed"})
-            self._materialize_terminal_cycle_cache(
-                cycle_path, state, post_transaction.transaction_id, post_completion
-            )
             evidence = {
                 "feature": selection.feature_id, "accepted_commit": accepted,
-                "integrated_commit": integrated, "repair_attempts": repairs + integration_repairs,
+                "integrated_commit": integrated, "repair_attempts": repairs,
+                "model_session_launched_for_integration": False,
             }
             project_path = (
                 "feature_running", "feature_accepted", "integration_pending",
@@ -3391,10 +3296,10 @@ class CycleEngine:
                     feature=selection.feature_id if projected_state != "feature_ready" else None,
                     kernel_owned=True,
                     kernel_projection={
-                        "transaction_id": post_transaction.transaction_id,
-                        "ledger_sequence": post_completion["projection"]["ledger_sequence"],
-                        "ledger_fingerprint": post_completion["projection"]["ledger_fingerprint"],
-                        "projection_fingerprint": post_completion["projection"]["projection_fingerprint"],
+                        "transaction_id": integration_transaction_id,
+                        "ledger_sequence": integration_projection["ledger_sequence"],
+                        "ledger_fingerprint": integration_projection["ledger_fingerprint"],
+                        "projection_fingerprint": integration_projection["projection_fingerprint"],
                     },
                 )
             return evidence
@@ -4500,7 +4405,13 @@ class CycleEngine:
             "session_launched": False,
         }
     def _execute_projected_integration(
-        self, project: Project, mode: str, run_id: str, execution_plan: ExecutionPlan
+        self,
+        project: Project,
+        mode: str,
+        run_id: str,
+        execution_plan: ExecutionPlan,
+        *,
+        reservation_held: bool = False,
     ) -> dict[str, Any]:
         """Start a fresh exact integration transaction from canonical projection evidence."""
 
@@ -4517,19 +4428,9 @@ class CycleEngine:
         executable.validate_against(current_projection)
         projection = current_projection
         inspector = RepositoryInspector(project.repository)
-        queue = FeatureQueue.from_location(project.repository, project.queue_location)
-        selection = queue.select_integration(project.active_milestone or "")
-        recovery = projection.get("failed_integration_recovery")
-        verified_recovery = (
-            self._verified_failed_integration_recovery(project, projection)
-            if selection is None and isinstance(recovery, dict) else None
-        )
-        if selection is None and verified_recovery is None:
-            raise RecoveryError("projected integration has no unique active-milestone candidate")
-        feature_id = (
-            selection.feature_id if selection is not None
-            else str(verified_recovery["feature_id"])
-        )
+        feature_id = executable.feature_id
+        if not isinstance(feature_id, str) or not feature_id:
+            raise RecoveryError("projected integration has no exact feature identity")
         if projection.get("current_feature") not in {None, feature_id}:
             raise RecoveryError("projected feature contradicts the unique integration candidate")
         accepted = executable.accepted_commit
@@ -4559,13 +4460,23 @@ class CycleEngine:
         lease = WorkflowWriterLease(inspector.writer_lock_path(
             self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
         ))
-        accepted_paths = tuple(sorted(inspector.git([
-            "diff-tree", "--no-commit-id", "--name-only", "-r", accepted
-        ]).stdout.splitlines()))
-        if not accepted_paths:
-            raise RecoveryError("accepted integration commit has no changed paths")
+        two_ref = inspect_two_refs(
+            repository=project.repository,
+            project_id=project.project_id,
+            feature_id=feature_id,
+            feature_branch=str(executable.feature_branch),
+            accepted_commit=accepted,
+            milestone_id=str(project.active_milestone),
+            milestone_branch=str(project.milestone_branch),
+            pre_integration_head=str(executable.starting_commit),
+            queue_path=project.queue_location,
+        )
+        accepted_paths = tuple(two_ref["accepted_changed_paths"])
+        authorized_paths = tuple(
+            sorted(set(accepted_paths) | set(two_ref["metadata_paths"]))
+        )
         adapter = MilestoneIntegrationAdapter(
-            allowed_paths=accepted_paths,
+            allowed_paths=authorized_paths,
             commit_subject=f"factory: integrate {feature_id}",
             next_state="feature_integrated",
         )
@@ -4574,13 +4485,14 @@ class CycleEngine:
             projection=ProjectionEngine(ledger, state_root / "projection-cache.json"),
             lease=lease,
         )
-        reservation = self._launch_lock(project, inspector)
-        reservation.acquire(make_lock_record(
-            project_id=project.project_id,
-            repository_identity=identity["repository_id"], run_id=run_id,
-            current_feature=feature_id,
-            current_phase="projected_integration",
-        ))
+        reservation = None if reservation_held else self._launch_lock(project, inspector)
+        if reservation is not None:
+            reservation.acquire(make_lock_record(
+                project_id=project.project_id,
+                repository_identity=identity["repository_id"], run_id=run_id,
+                current_feature=feature_id,
+                current_phase="projected_integration",
+            ))
         try:
             reserved_context = self._validate_projected_dispatch(
                 project,
@@ -4593,6 +4505,14 @@ class CycleEngine:
             accepted = executable.accepted_commit
             if not isinstance(accepted, str) or accepted == "SELF":
                 raise ProjectionError("reserved integration plan lacks a normalized accepted commit")
+            gitignore = project.repository / ".gitignore"
+            gitignore_before = gitignore.read_bytes() if gitignore.exists() else None
+            exclusion = inspector.ensure_milestone_integration_runtime_ignored()
+            gitignore_after = gitignore.read_bytes() if gitignore.exists() else None
+            if gitignore_after != gitignore_before:
+                raise RecoveryError(
+                    "local integration-runtime exclusion changed tracked .gitignore"
+                )
             transaction = kernel.begin_for_branch(
                 workflow_type=WorkflowType.MILESTONE_INTEGRATION,
                 target_branch=str(project.milestone_branch),
@@ -4602,47 +4522,82 @@ class CycleEngine:
                 expected_starting_head=executable.starting_commit,
             )
             kernel.acquire_lease(); kernel.prepare_starting_branch(); kernel.capture_snapshot()
-            request = SessionRequest(
-                action="milestone_integration", project=project, run_id=run_id,
-                mode=mode, feature=feature_id,
+            integrity = ledger.verify()
+            lease_record = lease.bind_controller_plan(
                 transaction_id=transaction.transaction_id,
                 repository_identity=identity["repository_id"],
-                starting_branch=transaction.starting_branch,
-                starting_commit=transaction.starting_head,
+                project_id=project.project_id,
+                feature_branch=str(executable.feature_branch),
                 accepted_commit=accepted,
-                allowed_paths=accepted_paths,
             )
-            result = self._launch_session(
-                request, inspector, "integrating", reservation_held=True,
-                on_session_started=kernel.session_launched,
+            if lease_record is None:
+                raise LockError("controller integration lease disappeared before plan creation")
+            plan = build_integration_plan(
+                repository=project.repository,
+                project_id=project.project_id,
+                transaction_id=transaction.transaction_id,
+                run_id=run_id,
+                feature_id=feature_id,
+                feature_branch=str(executable.feature_branch),
+                accepted_commit=accepted,
+                milestone_id=str(project.active_milestone),
+                milestone_branch=str(project.milestone_branch),
+                pre_integration_head=str(executable.starting_commit),
+                queue_path=project.queue_location,
+                projection_fingerprint=str(projection["projection_fingerprint"]),
+                ledger_sequence=integrity.sequence,
+                ledger_fingerprint=integrity.fingerprint,
+                controller_ledger_path=ledger.path,
+                lease_identity=lease_record.to_dict(),
+                runtime_exclusion=exclusion,
             )
-            if result.transaction_envelope is None:
-                raise SessionError(self._session_failure_message(
-                    project, run_id, result, "integrating", feature_id
-                ))
-            envelope = SessionResultEnvelope.from_dict(result.transaction_envelope)
-            blocked = self._route_kernel_result(kernel, adapter, envelope)
-            if blocked is not None:
+            plan_path = persist_integration_plan(
+                state_root
+                / "integration-plans"
+                / f"{transaction.transaction_id}.json",
+                plan,
+            )
+            result = execute_integration_plan(plan_path)
+            kernel.accept_deterministic_integration_result(plan, result)
+            if result["classification"] == "SEMANTIC_CONFLICT":
+                gate = result.get("human_gate")
+                blocked = kernel.block(
+                    state=TransactionState.HUMAN_DECISION_REQUIRED,
+                    classification="SEMANTIC_CONFLICT",
+                    next_state="human_decision_required",
+                    human_gate=gate if isinstance(gate, dict) else None,
+                )
                 return {
                     "project_id": project.project_id,
-                    "outcome": envelope.next_state,
-                    "classification": envelope.classification,
+                    "outcome": "human_decision_required",
+                    "classification": "SEMANTIC_CONFLICT",
+                    "human_gate": gate,
                     "kernel_projection": blocked,
+                    "model_session_launched": False,
                 }
-            prepared = kernel.prepare_integration_changes(accepted)
-            if prepared != accepted_paths:
-                raise RecoveryError("prepared integration differs from the accepted commit")
-            authority, commands = self._kernel_required_commands(project)
-            kernel.record_file_mutation_boundary()
-            kernel.validate(
-                authority=authority, command_results=commands,
-                semantic_validator=adapter.semantic_validate,
-            )
-            integrated = kernel.finalize()
-            completion = kernel.complete(evidence={
+            if result["classification"] == "VALIDATION_FAILED":
+                blocked = kernel.block(
+                    state=TransactionState.TERMINAL_FAILURE,
+                    classification="VALIDATION_FAILED",
+                    next_state="validation_failed",
+                    reference="deterministic_validation_failed",
+                )
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "validation_failed",
+                    "classification": "VALIDATION_FAILED",
+                    "kernel_projection": blocked,
+                    "model_session_launched": False,
+                }
+            integrated = str(result["resulting_feature_commit"])
+            completion = kernel.complete(classification="INTEGRATED", evidence={
                 "accepted_feature_commit": accepted,
                 "integrated_commit": integrated,
                 "integration_status": "passed",
+                "integration_plan_fingerprint": plan["plan_fingerprint"],
+                "integration_plan_path": str(plan_path),
+                "integration_runtime": result["runtime"],
+                "model_session_launched": False,
             })
             return {
                 "project_id": project.project_id,
@@ -4651,13 +4606,20 @@ class CycleEngine:
                 "accepted_commit": accepted,
                 "integrated_commit": integrated,
                 "kernel_projection": completion["projection"],
-                "next_action": "queue_reconciliation",
+                "next_action": (
+                    "milestone_gate"
+                    if result.get("milestone_complete") is True
+                    else "feature_ready"
+                ),
+                "integration_plan": str(plan_path),
+                "model_session_launched": False,
             }
         except (ConveyorError, ValueError) as exc:
             self._terminalize_handled_kernel_failure(kernel, adapter, exc)
             raise
         finally:
-            reservation.release(run_id)
+            if reservation is not None:
+                reservation.release(run_id)
 
     def recover_planning_transaction(
         self,

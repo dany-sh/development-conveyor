@@ -605,3 +605,26 @@ This log records model configuration and deterministic deployment evidence. It n
 - Combined-tree validation: the four focused suites passed 33/33 tests in `56.754s`; the relevant changed Python files compiled in memory; `scripts/conveyor validate-config` returned `valid: true` for both registered projects; `git diff --check`, worktree-diff, and index-diff checks were clean.
 - Application isolation: Interview Companion remained clean on `codex/m0-foundation` at `e07d8803fbe56bbbfb7430aeb19e888f3d7d06a7`; its immutable F005 feature ref remained `a1f2c8dd47aaa68580cd7dfc3dc6923e04469857`. The controller ledger remained 21 lines with SHA-256 `87ec706e8df320e5f0203501e1e8179342246732d3a975890a9d6db4e3e9b520`. The real F005 integration remained unperformed.
 - Safety boundary: canonical `codex/development-conveyor` remained fixed at `96c5c4a85f54b183e7c6b798890b947bd1de782f`; no default-branch merge, push, tag, release, deployment, publication, branch deletion, destructive reset, rebase, amend, application write, or ledger write was performed.
+
+### Deterministic milestone-integration handoff repair — 2026-07-21
+
+- Interface repair: live queue-only rediscovery, absent local runtime exclusion, and controller/integrator double lease acquisition are replaced by one controller-owned immutable plan and a repository-versioned deterministic executor.
+- Deterministic boundary: exact conflict-free integration launches no model session. `scripts/conveyor execute-integration-plan --plan <absolute-controller-owned-plan-path>` consumes the controller plan directly and returns a validated machine result.
+- Lease boundary: the controller creates and releases the only typed `integration_writer` lease. The executor adopts and heartbeats its exact repository, project, transaction, run, milestone, feature, feature-branch, accepted-commit, start-snapshot, owner-process, host, and mutation-policy identity; it cannot acquire or release the lease.
+- Ref boundary: immutable accepted metadata supplies identity, Completed implementation, pending integration, acceptance flags, feature branch, integration base, and `SELF` commit identity. The live milestone ref supplies exact start and integrated dependency ancestry. The accepted ref must remain its branch HEAD and the sole direct child of the milestone start.
+- Local runtime: the exact root pattern `/.factory/runtime/milestone-integration/` is installed in common-Git `info/exclude` before `TransactionStarted` and lease acquisition, with identity rechecks, an advisory lock, atomic replacement, idempotency, multiple descendant verification, and byte-identical tracked `.gitignore`.
+- Focused validation: 44/44 tests passed in 90.077 seconds across `test_deterministic_integration_handoff`, `test_two_ref_integration_recovery`, `test_projection_authority`, `test_integration_gate_lifecycle`, `test_milestone_integration_result_contract`, `test_synthetic_integration`, and `test_repository`. The broader transactional-kernel matrix was intentionally not used as acceptance evidence; no full suite or pytest was run.
+- Live controller validation: `validate-config` returned valid queues for both registered projects. Both exact `verify-consistency --json` commands returned `CONSISTENT` with no failed invariant and `application_repository_written: false`.
+- Current gate dry-run: Interview Companion projects `integration_ready` and one fresh deterministic `milestone_integration` plan from `e07d8803fbe56bbbfb7430aeb19e888f3d7d06a7` to immutable accepted commit `a1f2c8dd47aaa68580cd7dfc3dc6923e04469857`; it reports no old-session resume, no model session, and no dry-run application write.
+- Registered-application invariants: Interview Companion remains clean on `codex/m0-foundation`; milestone and feature refs and trees remain `e07d8803fbe56bbbfb7430aeb19e888f3d7d06a7`/`85d02fc0707f7e78506dd26d7a817fd3baf2a003` and `a1f2c8dd47aaa68580cd7dfc3dc6923e04469857`/`182311b8d9bcb8e944e10b86d9342b4d79dc4b37`. Its head-ref fingerprint remains `f6db54a901994a2770b76ba70dbc6131920a945f3f971caca2d7f5fb9eed5d37`; the controller ledger remains 29 lines with SHA-256 `6b3f2f5e68b5d00b204abbc2fc43b9847023f3e4996b0c0ecb4af73dce969843`, tail fingerprint `504867bcb3f3f2f338ce1e86df1dc810fb01c824fae6364e968936fd4811dd4d`, and terminal transaction `4764dc11-5270-4d90-a379-2a0ce835ed9f`.
+- Safety: all mutation tests used disposable repositories. No real model session, subagent, CLI upgrade, F005 integration, default-branch merge, push, tag, publish, deploy, release, or registered-application tracked write occurred.
+
+### Model execution — 2026-07-22T03:28:18+00:00
+
+- Agent role: `primary-agent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `global_default`
+- Event: `start`
+- Reason code: `deterministic_integration_handoff_repair`
+- Safety and autonomy contracts unchanged: `true`

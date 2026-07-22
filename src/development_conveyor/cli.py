@@ -20,6 +20,7 @@ from .sessions import SessionLauncher
 from .validation import SafetyPolicy
 from .consistency import ConsistencyChecker
 from .migration import LegacyStateMigrator
+from .integration_executor import execute_integration_plan
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
 
@@ -127,6 +128,11 @@ def _parser() -> argparse.ArgumentParser:
     mode = migrate.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
+    execute_integration = subparsers.add_parser(
+        "execute-integration-plan",
+        help="execute one immutable controller-owned milestone integration plan",
+    )
+    execute_integration.add_argument("--plan", required=True)
     return parser
 
 
@@ -155,6 +161,8 @@ def _portfolio_run(engine: CycleEngine, registry: ProjectRegistry, mode: str, dr
 
 def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> dict[str, Any]:
     args = _parser().parse_args(arguments)
+    if args.command == "execute-integration-plan":
+        return execute_integration_plan(Path(args.plan).expanduser().resolve())
     controller_root = discover_root(root)
     configuration = load_configuration(controller_root)
     registry = ProjectRegistry(configuration)

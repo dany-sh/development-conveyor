@@ -41,6 +41,10 @@ class RecoveryError(ConveyorError):
     """Durable state and externally visible evidence cannot be reconciled."""
 
 
+class IntegrationPlanError(ConveyorError):
+    """A controller-owned deterministic integration plan cannot be trusted or executed."""
+
+
 class SessionError(ConveyorError):
     """A repository-scoped Codex session failed or returned invalid evidence."""
 

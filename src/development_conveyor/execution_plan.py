@@ -80,6 +80,7 @@ class ExecutionPlan:
         if self.workflow_type == HUMAN_MERGE_APPROVAL:
             return []
         if self.workflow in {
+            WorkflowType.MILESTONE_INTEGRATION,
             WorkflowType.HUMAN_DECISION_RESOLUTION,
             WorkflowType.RECOVERY,
         }:
@@ -383,7 +384,10 @@ def authoritative_status_fields(
         "writer_lock_required_before_resume": False,
         "writer_lock_would_be_acquired_before_mutation": executable.application_mutation_expected,
         "feature_factory_would_launch": workflow == WorkflowType.FEATURE_EXECUTION,
-        "milestone_integrator_would_launch": workflow == WorkflowType.MILESTONE_INTEGRATION,
+        "milestone_integrator_would_launch": False,
+        "deterministic_integration_executor_would_run": workflow
+        == WorkflowType.MILESTONE_INTEGRATION,
+        "model_session_would_launch": bool(executable.sessions_that_would_launch),
         "dry_run_writes_application_repository": False,
         "state_consistency": "projection_authoritative",
         "repair_transition_path": [],

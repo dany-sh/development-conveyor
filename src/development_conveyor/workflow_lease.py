@@ -48,6 +48,8 @@ class WorkflowLeaseRecord:
     workflow_type: WorkflowType
     milestone: str | None
     feature_id: str | None
+    feature_branch: str | None
+    accepted_commit: str | None
     starting_branch: str
     starting_head: str
     run_id: str
@@ -97,6 +99,8 @@ class WorkflowLeaseRecord:
                 workflow_type=WorkflowType(value["workflow_type"]),
                 milestone=value.get("milestone"),
                 feature_id=value.get("feature_id"),
+                feature_branch=value.get("feature_branch"),
+                accepted_commit=value.get("accepted_commit"),
                 starting_branch=value["starting_branch"],
                 starting_head=value["starting_head"],
                 run_id=value["run_id"],
@@ -254,6 +258,8 @@ class WorkflowWriterLease:
             workflow_type=workflow_type,
             milestone=milestone,
             feature_id=feature_id,
+            feature_branch=None,
+            accepted_commit=None,
             starting_branch=starting_branch,
             starting_head=starting_head,
             run_id=run_id,
@@ -351,6 +357,103 @@ class WorkflowWriterLease:
             repository_identity=repository_identity,
             project_id=project_id,
         )
+        value = record.to_dict()
+        value["last_heartbeat"] = utc_now()
+        self._write_existing(value)
+        return WorkflowLeaseRecord.from_dict(value)
+
+    def revalidate_adopted(self, expected_identity: dict[str, Any]) -> WorkflowLeaseRecord:
+        """Verify a controller-owned lease without transferring ownership.
+
+        Deterministic integration executors may run in a child process.  They
+        can verify and heartbeat the controller lease, but cannot acquire,
+        replace, bind a session to, or release it.
+        """
+
+        record = self.read()
+        if record is None:
+            raise LockError("controller integration lease is absent")
+        actual = json.loads(json.dumps(record.to_dict(), sort_keys=True))
+        identity_fields = (
+            "lease_id",
+            "lease_type",
+            "repository_identity",
+            "repository_path_fingerprint",
+            "repository_path",
+            "project_id",
+            "transaction_id",
+            "workflow_type",
+            "milestone",
+            "feature_id",
+            "feature_branch",
+            "accepted_commit",
+            "starting_branch",
+            "starting_head",
+            "run_id",
+            "session_id",
+            "owner_pid",
+            "owner_process_start",
+            "owner_host",
+            "allowed_mutations",
+        )
+        missing = [field for field in identity_fields if field not in expected_identity]
+        if missing:
+            raise LockError(
+                "controller integration plan has incomplete lease identity: "
+                + ", ".join(missing)
+            )
+        mismatched = [
+            field for field in identity_fields
+            if actual.get(field) != expected_identity.get(field)
+        ]
+        if mismatched:
+            raise LockError(
+                "controller integration lease identity mismatch: "
+                + ", ".join(mismatched)
+            )
+        if record.session_id is not None:
+            raise LockError("deterministic integration lease must not be bound to a model session")
+        if record.owner_host != socket.gethostname():
+            raise LockError("controller integration lease owner host does not match")
+        if not process_alive(record.owner_pid):
+            raise LockError("controller integration lease owner process is not alive")
+        if process_start_evidence(record.owner_pid) != record.owner_process_start:
+            raise LockError("controller integration lease owner process-start evidence changed")
+        return record
+
+    def bind_controller_plan(
+        self,
+        *,
+        transaction_id: str,
+        repository_identity: str,
+        project_id: str,
+        feature_branch: str,
+        accepted_commit: str,
+    ) -> WorkflowLeaseRecord:
+        """Bind an owned integration lease to the controller's immutable refs."""
+
+        record = self.revalidate(
+            transaction_id=transaction_id,
+            workflow_type=WorkflowType.MILESTONE_INTEGRATION,
+            repository_identity=repository_identity,
+            project_id=project_id,
+            session_id=None,
+        )
+        if not feature_branch or not accepted_commit:
+            raise LockError("controller integration ref binding is incomplete")
+        if record.feature_branch not in {None, feature_branch}:
+            raise LockError("controller integration feature-branch binding changed")
+        if record.accepted_commit not in {None, accepted_commit}:
+            raise LockError("controller integration accepted-commit binding changed")
+        value = record.to_dict()
+        value["feature_branch"] = feature_branch
+        value["accepted_commit"] = accepted_commit
+        value["last_heartbeat"] = utc_now()
+        self._write_existing(value)
+        return WorkflowLeaseRecord.from_dict(value)
+
+    def heartbeat_adopted(self, expected_identity: dict[str, Any]) -> WorkflowLeaseRecord:
+        record = self.revalidate_adopted(expected_identity)
         value = record.to_dict()
         value["last_heartbeat"] = utc_now()
         self._write_existing(value)

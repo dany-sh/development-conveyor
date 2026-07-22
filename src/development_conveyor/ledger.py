@@ -24,6 +24,7 @@ GENESIS_FINGERPRINT = "0" * 64
 EVENT_TYPES = frozenset({
     "TransactionStarted", "LeaseAcquired", "LeaseReleased", "SnapshotCaptured",
     "SessionLaunched", "SessionResultAccepted", "ChangesDetected", "ValidationStarted",
+    "DeterministicExecutionStarted", "DeterministicResultAccepted",
     "ValidationPassed", "ValidationFailed", "CommitFinalized", "HumanGateRaised",
     "HumanGateResolved", "TransactionBlocked", "TransactionCompleted",
     "TransactionSuperseded", "RecoveryApplied", "ProjectionUpdated", "LegacyEvidenceImported",
@@ -44,6 +45,13 @@ PAYLOAD_CONTRACTS: dict[str, dict[str, type | tuple[type, ...]]] = {
     "SessionResultAccepted": {
         "classification": str, "session_id": str, "changed_paths": list,
         "envelope": dict,
+    },
+    "DeterministicExecutionStarted": {
+        "plan_fingerprint": str, "model_session_launched": bool,
+    },
+    "DeterministicResultAccepted": {
+        "classification": str, "plan_fingerprint": str,
+        "changed_paths": list, "model_session_launched": bool,
     },
     "ChangesDetected": {"changed_paths": list, "diff_fingerprint": str},
     "ValidationFailed": {"diagnostic": str},
@@ -220,6 +228,8 @@ class EvidenceLedger:
             "SnapshotCaptured": "LeaseAcquired",
             "ValidationStarted": "SnapshotCaptured",
             "SessionResultAccepted": "SessionLaunched",
+            "DeterministicExecutionStarted": "SnapshotCaptured",
+            "DeterministicResultAccepted": "DeterministicExecutionStarted",
             "ValidationPassed": "ValidationStarted",
             "CommitFinalized": "ValidationPassed",
             "ProjectionUpdated": next((name for name in terminals), None),
@@ -497,6 +507,8 @@ class EvidenceLedger:
                 ("LeaseAcquired", "SnapshotCaptured"),
                 ("SnapshotCaptured", "SessionLaunched"),
                 ("SessionLaunched", "SessionResultAccepted"),
+                ("SnapshotCaptured", "DeterministicExecutionStarted"),
+                ("DeterministicExecutionStarted", "DeterministicResultAccepted"),
                 ("ValidationStarted", "ValidationPassed"),
                 ("ValidationPassed", "CommitFinalized"),
                 ("CommitFinalized", "TransactionCompleted"),

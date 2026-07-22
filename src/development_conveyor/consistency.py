@@ -834,7 +834,10 @@ class ConsistencyChecker:
                         verified_fresh_recovery = bool(
                             isinstance(recovery, dict)
                             and recovery.get("classification")
-                            == "fresh_after_terminal_pre_mutation_failure"
+                            in {
+                                "fresh_after_terminal_pre_mutation_failure",
+                                "fresh_after_terminal_pre_mutation_gate",
+                            }
                             and recovery.get("fresh_transaction") is True
                             and recovery.get("old_session_resume") is False
                             and isinstance(recovery_checks, dict)

@@ -253,7 +253,7 @@ class HistoricalIntegrationLifecycleTests(unittest.TestCase):
         self.assertNotEqual(plan["selected_feature"], "P0-003")
         self.assertEqual(
             plan["sessions_that_would_launch"],
-            ["fresh milestone-integration transaction"],
+            [],
         )
         self.assertEqual(self.launcher.compatibility_actions[-1], ("milestone_integration", "synthetic"))
         self.assertEqual(self.launcher.launches, [])

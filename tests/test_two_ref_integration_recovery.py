@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from development_conveyor.consistency import ConsistencyChecker
-from development_conveyor.contracts import WorkflowType
+from development_conveyor.contracts import WorkflowType, fingerprint
 from development_conveyor.cycle_engine import CycleEngine
 from development_conveyor.errors import ProjectionError
 from development_conveyor.ledger import EvidenceLedger
@@ -47,6 +47,7 @@ class TwoRefIntegrationRecoveryTests(unittest.TestCase):
         queue = json.loads(queue_path.read_text(encoding="utf-8"))
         queue["features"][0].update({
             "status": "integration_pending",
+            "implementation_status": "Completed",
             "branch": feature_branch,
             "integration_base_commit": milestone_start,
             "accepted_commit": "SELF",
@@ -204,9 +205,19 @@ class TwoRefIntegrationRecoveryTests(unittest.TestCase):
                 "baseline\naccepted two-ref behavior\n",
                 (repository / "app.txt").read_text(encoding="utf-8"),
             )
-            self.assertEqual(["milestone_integration"], launcher.actions)
-            self.assertEqual(accepted, launcher.requests[0].accepted_commit)
+            self.assertEqual([], launcher.actions)
+            self.assertEqual([], launcher.requests)
+            self.assertFalse(result["model_session_launched"])
             self.assertNotEqual(old_session, result["kernel_projection"].get("session_id"))
+            integrated_queue = json.loads(
+                (repository / project.queue_location).read_text(encoding="utf-8")
+            )
+            self.assertEqual("integrated", integrated_queue["features"][0]["status"])
+            self.assertEqual("passed", integrated_queue["features"][0]["integration_status"])
+            self.assertTrue(Path(result["integration_plan"]).is_file())
+            self.assertFalse(
+                Path(result["integration_plan"]).is_relative_to(repository)
+            )
             transactions = result["kernel_projection"]["transactions"]
             self.assertTrue(any(
                 item.get("workflow_type") == "milestone_integration"
@@ -216,6 +227,156 @@ class TwoRefIntegrationRecoveryTests(unittest.TestCase):
             ))
             self.assertFalse((repository / ".factory/locks/writer.json").exists())
             self.assertGreater(ledger.verify().sequence, 8)
+
+    def test_mechanical_terminal_gate_reconstructs_a_fresh_nonresumable_plan(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                repository, project, configuration, engine, launcher, ledger,
+                milestone_start, feature_branch, accepted, _,
+            ) = self._fixture(Path(temporary))
+            transaction = "mechanical-terminal-gate"
+            run_id = "mechanical-terminal-gate-run"
+            session_id = "mechanical-terminal-gate-session"
+            workflow = WorkflowType.MILESTONE_INTEGRATION
+            snapshot = {
+                "branch": project.milestone_branch,
+                "head": milestone_start,
+                "clean": True,
+            }
+            gate = {
+                "gate_id": "gate-mechanical-handoff",
+                "classification": "HUMAN_DECISION_REQUIRED",
+                "reason": "Deterministic handoff prerequisites were absent.",
+                "project_id": project.project_id,
+                "repository_identity": RepositoryInspector(repository).identity()[
+                    "repository_id"
+                ],
+                "repository_path_fingerprint": RepositoryInspector(repository).identity()[
+                    "path_fingerprint"
+                ],
+                "transaction_id": transaction,
+                "workflow_type": workflow.value,
+                "approved_next_state": "queue_reconciliation",
+                "blocker_categories": [
+                    "accepted_state_identity_mismatch",
+                    "runtime_ignore_policy",
+                ],
+            }
+            envelope = {
+                "schema_version": 1,
+                "workflow_type": workflow.value,
+                "classification": "HUMAN_DECISION_REQUIRED",
+                "project_id": project.project_id,
+                "repository_identity": gate["repository_identity"],
+                "transaction_id": transaction,
+                "run_id": run_id,
+                "session_id": session_id,
+                "starting_branch": project.milestone_branch,
+                "starting_commit": milestone_start,
+                "current_commit": milestone_start,
+                "feature_id": "F001",
+                "changed_paths": [],
+                "evidence": {
+                    "accepted_commit": accepted,
+                    "human_decision": {
+                        "transaction_id": transaction,
+                        "blocker_categories": gate["blocker_categories"],
+                    },
+                },
+                "next_state": "human_decision_required",
+            }
+            for event_type, payload in (
+                (
+                    "TransactionStarted",
+                    {
+                        "run_id": run_id,
+                        "feature_id": "F001",
+                        "milestone": "M0",
+                        "starting_branch": project.milestone_branch,
+                        "starting_head": milestone_start,
+                        "allowed_mutation_policy": {},
+                    },
+                ),
+                (
+                    "LeaseAcquired",
+                    {"lease_id": "mechanical-gate-lease", "lease_type": "integration_writer"},
+                ),
+                ("SnapshotCaptured", {"snapshot": snapshot}),
+                ("SessionLaunched", {"session_id": session_id}),
+                (
+                    "SessionResultAccepted",
+                    {
+                        "classification": "HUMAN_DECISION_REQUIRED",
+                        "session_id": session_id,
+                        "changed_paths": [],
+                        "envelope": envelope,
+                    },
+                ),
+                (
+                    "HumanGateRaised",
+                    {
+                        "classification": "HUMAN_DECISION_REQUIRED",
+                        "gate_id": gate["gate_id"],
+                        "gate": gate,
+                        "gate_fingerprint": fingerprint(gate),
+                        "next_state": "human_decision_required",
+                        "terminal_state": "human_decision_required",
+                        "terminal_snapshot": snapshot,
+                    },
+                ),
+                ("LeaseReleased", {"lease_id": "mechanical-gate-lease"}),
+                (
+                    "ProjectionUpdated",
+                    {"current_state": "human_decision_required", "current_feature": "F001"},
+                ),
+            ):
+                ledger.append(
+                    event_type=event_type,
+                    transaction_id=transaction,
+                    workflow_type=workflow,
+                    payload=payload,
+                )
+            ProjectionEngine(
+                ledger,
+                configuration.root / "state/projects/synthetic/projection-cache.json",
+            ).rebuild(persist_cache=True)
+            write_json(
+                configuration.root / f"reports/{run_id}/milestone_integration.json",
+                {
+                    "schema_version": 1,
+                    "project_id": project.project_id,
+                    "run_id": run_id,
+                    "action": workflow.value,
+                    "working_directory": str(repository),
+                    "session_id": session_id,
+                    "accepted_commit": accepted,
+                    "terminal_marker_found": True,
+                    "structured_output_validation": "valid",
+                    "result_classification": "HUMAN_DECISION_REQUIRED",
+                    "parsed_structured_result": envelope,
+                    "post_integration_commands": [
+                        {"category": "status_observation", "exit_code": 0}
+                    ],
+                },
+            )
+
+            plan = engine.project_plan(project)
+            self.assertEqual("integration_ready", plan["current_state"])
+            self.assertEqual("milestone_integration", plan["workflow_type"])
+            self.assertEqual("fresh", plan["transaction_mode"])
+            self.assertEqual(accepted, plan["accepted_feature_commit"])
+            self.assertEqual(feature_branch, plan["feature_branch"])
+            self.assertEqual(milestone_start, plan["feature_starting_commit"])
+            self.assertFalse(plan["old_session_will_resume"])
+            self.assertEqual([], plan["sessions_that_would_launch"])
+            self.assertEqual([], launcher.actions)
+            consistency = ConsistencyChecker(
+                controller_root=configuration.root,
+                project=project,
+                planner_observer=lambda: engine.project_plan(project),
+            ).check()
+            self.assertEqual("CONSISTENT", consistency["classification"])
+            self.assertEqual([], consistency["failed_invariants"])
 
     def test_feature_and_milestone_ref_drift_fail_before_new_ledger_events(self):
         for drift in ("feature", "milestone"):

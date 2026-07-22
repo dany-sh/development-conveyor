@@ -25,6 +25,7 @@ from .contracts import (
 )
 from .errors import RepositoryError, TransactionError
 from .ledger import EvidenceLedger
+from .integration_executor import validate_integration_result
 from .projection import ProjectionEngine
 from .queue import FeatureQueue
 from .registry import Project
@@ -630,6 +631,123 @@ class WorkflowKernel:
         )
         self.interrupt("after_session_result", transaction)
 
+    def accept_deterministic_integration_result(
+        self, plan: dict[str, Any], result: dict[str, Any]
+    ) -> None:
+        """Accept controller-plan executor evidence without inventing a session."""
+
+        transaction = self._require()
+        if transaction.workflow_type != WorkflowType.MILESTONE_INTEGRATION:
+            raise TransactionError(
+                "deterministic integration results require milestone_integration"
+            )
+        if transaction.current_state != TransactionState.ACTIVE:
+            raise TransactionError(
+                "deterministic integration result requires an active transaction"
+            )
+        self._revalidate_lease()
+        validate_integration_result(plan, result)
+        transaction.transition(TransactionState.RESULT_PENDING)
+        self.ledger.append(
+            event_type="DeterministicExecutionStarted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "plan_fingerprint": plan["plan_fingerprint"],
+                "plan_path": plan.get("controller_plan_path"),
+                "model_session_launched": False,
+            },
+        )
+        transaction.transition(TransactionState.VALIDATING)
+        self.ledger.append(
+            event_type="DeterministicResultAccepted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "classification": result["classification"],
+                "plan_fingerprint": plan["plan_fingerprint"],
+                "current_commit": result["current_commit"],
+                "changed_paths": result["changed_paths"],
+                "model_session_launched": False,
+            },
+        )
+        classification = result["classification"]
+        if classification == "SEMANTIC_CONFLICT":
+            return
+        self.ledger.append(
+            event_type="ValidationStarted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "changed_paths": result["changed_paths"],
+                "executor": "controller_plan",
+            },
+        )
+        validation = result.get("validation")
+        if classification == "VALIDATION_FAILED":
+            blockers = validation.get("blockers", []) if isinstance(validation, dict) else []
+            self.ledger.append(
+                event_type="ValidationFailed",
+                transaction_id=transaction.transaction_id,
+                workflow_type=transaction.workflow_type,
+                payload={
+                    "diagnostic": "deterministic integration validation failed",
+                    "blockers": blockers,
+                },
+            )
+            return
+        if classification != "INTEGRATED" or not isinstance(validation, dict) or not validation.get("ok"):
+            raise TransactionError(
+                "deterministic integration success lacks passing validation evidence"
+            )
+        final_commit = result.get("evidence_commit")
+        resulting_feature_commit = result.get("resulting_feature_commit")
+        if (
+            not isinstance(final_commit, str)
+            or not isinstance(resulting_feature_commit, str)
+            or self.inspector.rev_parse(final_commit, check=False) != final_commit
+            or self.inspector.rev_parse(resulting_feature_commit, check=False)
+            != resulting_feature_commit
+        ):
+            raise TransactionError(
+                "deterministic integration result lacks exact final commit identities"
+            )
+        self.ledger.append(
+            event_type="ValidationPassed",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "commands": validation.get("commands", []),
+                "warnings": [],
+                "validated_commit": validation.get("validated_commit"),
+                "executor": "controller_plan",
+            },
+        )
+        transaction.transition(TransactionState.FINALIZING)
+        self.final_commit = final_commit
+        self.prepared_integration_accepted_commit = plan["accepted_commit"]
+        final_paths = tuple(sorted(self.inspector.changed_paths(final_commit)))
+        self.ledger.append(
+            event_type="CommitFinalized",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "commit": final_commit,
+                "parent": self.inspector.rev_parse(f"{final_commit}^", check=False),
+                "changed_paths": list(final_paths),
+                "diff_fingerprint": self.inspector.patch_fingerprint(final_commit),
+                "accepted_commit": plan["accepted_commit"],
+                "resulting_feature_commit": resulting_feature_commit,
+                "integrating_metadata_commit": result.get("integrating_metadata_commit"),
+                "integration_execution_mode": "controller_plan",
+                "integration_once": True,
+                "plan_fingerprint": plan["plan_fingerprint"],
+            },
+        )
+        transaction.next_project_state = (
+            "milestone_gate" if result.get("milestone_complete") is True else "feature_ready"
+        )
+
     def record_file_mutation_boundary(self) -> None:
         transaction = self._require()
         if any(
@@ -1037,10 +1155,31 @@ class WorkflowKernel:
             accepted_commit = payload.get("accepted_commit")
             if not accepted_commit or not changed_paths:
                 raise TransactionError("integration terminal evidence lacks nonempty accepted diff")
-            if self.inspector.rev_parse(f"{expected_head}^", check=False) != transaction.starting_head:
-                raise TransactionError("integration terminal commit is not a direct child")
-            if self.inspector.patch_fingerprint(str(expected_head)) != self.inspector.patch_fingerprint(str(accepted_commit)):
-                raise TransactionError("integration terminal patch differs from accepted patch")
+            if payload.get("integration_execution_mode") == "controller_plan":
+                resulting = payload.get("resulting_feature_commit")
+                if not isinstance(resulting, str):
+                    raise TransactionError(
+                        "controller-plan integration lacks its resulting feature commit"
+                    )
+                if self.inspector.rev_parse(f"{resulting}^", check=False) != transaction.starting_head:
+                    raise TransactionError(
+                        "controller-plan feature commit is not a direct child of the milestone start"
+                    )
+                if self.inspector.patch_fingerprint(resulting) != self.inspector.patch_fingerprint(
+                    str(accepted_commit)
+                ):
+                    raise TransactionError(
+                        "controller-plan feature commit differs from the accepted patch"
+                    )
+                if not self.inspector.is_ancestor(resulting, str(expected_head)):
+                    raise TransactionError(
+                        "controller-plan final evidence does not descend from the feature commit"
+                    )
+            else:
+                if self.inspector.rev_parse(f"{expected_head}^", check=False) != transaction.starting_head:
+                    raise TransactionError("integration terminal commit is not a direct child")
+                if self.inspector.patch_fingerprint(str(expected_head)) != self.inspector.patch_fingerprint(str(accepted_commit)):
+                    raise TransactionError("integration terminal patch differs from accepted patch")
 
     def block(
         self,

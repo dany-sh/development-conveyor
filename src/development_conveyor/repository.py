@@ -8,6 +8,8 @@ import subprocess
 import os
 import stat
 import contextvars
+import fcntl
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -396,6 +398,139 @@ class RepositoryInspector:
                 handle.write(separator + "\n".join(additions) + "\n")
                 handle.flush()
         return additions
+
+    def ensure_milestone_integration_runtime_ignored(self) -> dict[str, Any]:
+        """Install and verify the exact local integration-runtime exclusion.
+
+        The root-anchored pattern lives only in the repository's common Git
+        directory.  A repository-identity check and an advisory lock make the
+        operation fail closed if the target changes while it is installed.
+        """
+
+        pattern = "/.factory/runtime/milestone-integration/"
+        descendants = (
+            ".factory/runtime/milestone-integration/latest.json",
+            ".factory/runtime/milestone-integration/F005-plan.json",
+        )
+        initial_identity = self.identity()
+        common = self.common_git_dir
+        tracked_ignore = self.root / ".gitignore"
+        tracked_ignore_before = tracked_ignore.read_bytes() if tracked_ignore.exists() else None
+        info = common / "info"
+        info.mkdir(parents=True, exist_ok=True)
+        lock_path = info / ".development-conveyor-runtime-exclude.lock"
+        descriptor = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        original: bytes | None = None
+        changed = False
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise RepositoryError("integration-runtime exclude lock is unsafe")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            current_identity = self.identity()
+            if (
+                current_identity != initial_identity
+                or Path(current_identity["common_git_dir"]).resolve() != common
+            ):
+                raise RepositoryError(
+                    "repository identity changed while installing the integration-runtime exclusion"
+                )
+
+            exclude = info / "exclude"
+            if exclude.exists() or exclude.is_symlink():
+                target = os.lstat(exclude)
+                if (
+                    stat.S_ISLNK(target.st_mode)
+                    or not stat.S_ISREG(target.st_mode)
+                    or target.st_nlink != 1
+                ):
+                    raise RepositoryError("common Git info/exclude is unsafe")
+                original = exclude.read_bytes()
+            else:
+                original = b""
+            try:
+                existing = original.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise RepositoryError("common Git info/exclude is not UTF-8") from exc
+
+            if pattern not in existing.splitlines():
+                separator = "" if not existing or existing.endswith("\n") else "\n"
+                rendered = (existing + separator + pattern + "\n").encode("utf-8")
+                temporary_descriptor, temporary_name = tempfile.mkstemp(
+                    prefix=".exclude.", dir=info
+                )
+                try:
+                    os.fchmod(temporary_descriptor, 0o644)
+                    os.write(temporary_descriptor, rendered)
+                    os.fsync(temporary_descriptor)
+                    os.close(temporary_descriptor)
+                    temporary_descriptor = -1
+                    os.replace(temporary_name, exclude)
+                    directory_descriptor = os.open(info, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_descriptor)
+                    finally:
+                        os.close(directory_descriptor)
+                finally:
+                    if temporary_descriptor >= 0:
+                        os.close(temporary_descriptor)
+                    if os.path.exists(temporary_name):
+                        os.unlink(temporary_name)
+                changed = True
+
+            verified: list[str] = []
+            for relative in descendants:
+                result = self.git(
+                    ["check-ignore", "-q", "--no-index", "--", relative],
+                    check=False,
+                )
+                if result.returncode != 0:
+                    if changed and original is not None:
+                        exclude.write_bytes(original)
+                    raise RepositoryError(
+                        f"integration-runtime exclusion did not cover {relative}"
+                    )
+                verified.append(relative)
+            if self.identity() != initial_identity:
+                if changed and original is not None:
+                    exclude.write_bytes(original)
+                raise RepositoryError(
+                    "repository identity changed after installing the integration-runtime exclusion"
+                )
+            tracked_ignore_after = (
+                tracked_ignore.read_bytes() if tracked_ignore.exists() else None
+            )
+            if tracked_ignore_after != tracked_ignore_before:
+                if changed and original is not None:
+                    exclude.write_bytes(original)
+                raise RepositoryError(
+                    "local integration-runtime exclusion changed tracked .gitignore"
+                )
+            return {
+                "pattern": pattern,
+                "common_git_dir": str(common),
+                "changed": changed,
+                "verified_descendants": verified,
+                "repository_identity": initial_identity["repository_id"],
+                "repository_path_fingerprint": initial_identity["path_fingerprint"],
+                "tracked_gitignore_sha256_before": (
+                    hashlib.sha256(tracked_ignore_before).hexdigest()
+                    if tracked_ignore_before is not None
+                    else None
+                ),
+                "tracked_gitignore_sha256_after": (
+                    hashlib.sha256(tracked_ignore_after).hexdigest()
+                    if tracked_ignore_after is not None
+                    else None
+                ),
+            }
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     def patch_fingerprint(self, commit: str) -> str:
         parent = self.rev_parse(f"{commit}^")

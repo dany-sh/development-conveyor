@@ -163,8 +163,18 @@ class ProjectionEngine:
                 if session and session not in transaction["session_ids"]:
                     transaction["session_ids"].append(session)
                 transaction["state"] = "result_pending"
+            elif kind == "DeterministicExecutionStarted":
+                transaction["state"] = "result_pending"
+                transaction["deterministic_plan_fingerprint"] = payload.get(
+                    "plan_fingerprint"
+                )
             elif kind == "SessionResultAccepted":
                 transaction["state"] = "validating"
+            elif kind == "DeterministicResultAccepted":
+                transaction["state"] = "validating"
+                transaction["deterministic_result_classification"] = payload.get(
+                    "classification"
+                )
             elif kind == "ValidationStarted":
                 transaction["state"] = "validating"
             elif kind == "ValidationPassed":

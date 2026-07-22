@@ -43,6 +43,7 @@ def synthetic_repository(root: Path, feature_status: str = "ready") -> tuple[Pat
         "schema_version": 1,
         "project": {"id": "synthetic", "name": "Synthetic"},
         "project_profile": {"usage": "personal_private"},
+        "content_policy": {"secrets": "block", "generated_artifacts": "ignore"},
         "factory": {"feature_queue": "docs/FEATURE_QUEUE.yaml"},
         "git": {
             "default_branch": "main",
@@ -72,6 +73,10 @@ def synthetic_repository(root: Path, feature_status: str = "ready") -> tuple[Pat
         }],
     }
     write_json(repository / ".factory/project.yaml", adapter)
+    write_json(
+        repository / ".factory/approved-content.yaml",
+        {"schema_version": 1, "approved": []},
+    )
     write_json(repository / "docs/FEATURE_QUEUE.yaml", queue)
     git(repository, "add", ".")
     git(repository, "commit", "-m", "synthetic baseline")
@@ -269,11 +274,24 @@ class SyntheticLauncher:
 
     def _accept_feature(self, project: Project) -> None:
         repository = project.repository
-        if (repository / "app.txt").read_text(encoding="utf-8").endswith(
-            "F001 integrated behavior\n"
-        ):
-            return
         (repository / "app.txt").write_text("baseline\nF001 integrated behavior\n", encoding="utf-8")
+        queue_path = repository / project.queue_location
+        queue = json.loads(queue_path.read_text(encoding="utf-8"))
+        feature = queue["features"][0]
+        feature.update({
+            "status": "integration_pending",
+            "implementation_status": "Completed",
+            "branch": git(repository, "branch", "--show-current"),
+            "integration_base_commit": git(repository, "rev-parse", "HEAD"),
+            "accepted_commit": "SELF",
+            "integration_status": "pending",
+            "acceptance": {
+                "tests_passed": True,
+                "review_passed": True,
+                "documentation_current": True,
+            },
+        })
+        write_json(queue_path, queue)
 
     def _integrate_feature(self, project: Project) -> None:
         repository = project.repository
