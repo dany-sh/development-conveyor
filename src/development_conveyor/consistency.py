@@ -1345,11 +1345,6 @@ class ConsistencyChecker:
                     warning_comparison = compare_warning_evidence(
                         queue_comparison.get("raw_structured") or {},
                         queue_comparison.get("raw_deterministic") or {},
-                        legacy_summary=(
-                            recovery.get("warnings_scope")
-                            if recovery.get("historical_warning_compatibility") is True
-                            else None
-                        ),
                     )
                     warning_evidence_agrees = not warning_comparison["disagreements"]
                 except WarningEvidenceError:
@@ -1359,8 +1354,18 @@ class ConsistencyChecker:
                     == "planning_finalization",
                     "transaction_mode": status.get("transaction_mode") == "recovery",
                     "canonical_state": status.get("current_state")
-                    == canonical_projection.get("current_state")
                     == "validation_failed",
+                    "canonical_projection_recoverable": (
+                        canonical_projection.get("current_state")
+                        == "validation_failed"
+                        or (
+                            isinstance(
+                                recovery.get("failed_recovery_supersession"), dict
+                            )
+                            and canonical_projection.get("current_state")
+                            == "human_decision_required"
+                        )
+                    ),
                     "original_transaction": status.get("original_transaction_id")
                     == recovery.get("original_transaction_id"),
                     "exact_recovery_checks": isinstance(exact_checks, dict)

@@ -9,8 +9,8 @@ from development_conveyor.contracts import SessionResultEnvelope
 from development_conveyor.errors import RecoveryError, SchemaValidationError
 from development_conveyor.planning import (
     LEGACY_WARNING_SUMMARY_COMPATIBILITY,
-    _legacy_warning_summary_for_recovery,
     compare_queue_validation_evidence,
+    normalize_legacy_planning_warning_evidence,
 )
 from tests.helpers import synthetic_repository
 
@@ -122,26 +122,34 @@ class WarningEvidenceTests(unittest.TestCase):
             failure = {
                 "classification": "historical_warning_summary_shape",
             }
-            summary = _legacy_warning_summary_for_recovery(
+            canonical = normalize_legacy_planning_warning_evidence(
                 project=project,
                 original_transaction_id=compatibility["transaction_id"],
                 run_id=compatibility["run_id"],
                 session_id=compatibility["session_id"],
+                report_fingerprint=compatibility["report_fingerprint"],
+                result_classification=compatibility["result_classification"],
                 current_paths=compatibility["changed_paths"],
                 planning_transaction={"error": compatibility["error"]},
                 result_queue={"warnings": compatibility["summary"]},
+                deterministic_validation=counts(
+                    warnings=["M1 warning", "M2 warning"],
+                    blocking_warnings=[],
+                ),
                 recoverable_failure=failure,
             )
-            self.assertEqual(summary, compatibility["summary"])
+            self.assertNotIn("warnings", canonical)
+            self.assertEqual(canonical["warning_count"], 2)
+            self.assertIsNone(canonical["warnings_scope"])
+            self.assertEqual(canonical["blocking_warnings"], [])
             comparison = compare_queue_validation_evidence(
-                counts(warnings=summary),
+                {**counts(), **canonical},
                 counts(
                     warnings=["M1 warning", "M2 warning"],
                     blocking_warnings=[],
                 ),
-                legacy_warning_summary=summary,
             )
-            self.assertTrue(
+            self.assertFalse(
                 comparison["normalized_structured"]["legacy_warning_summary"]
             )
             mismatches = {
@@ -153,6 +161,10 @@ class WarningEvidenceTests(unittest.TestCase):
                 },
                 "run": {"run_id": "different-run"},
                 "session": {"session_id": "different-session"},
+                "report": {"report_fingerprint": "0" * 64},
+                "classification": {
+                    "result_classification": "RECONCILED_NO_READY_WORK"
+                },
                 "paths": {"current_paths": compatibility["changed_paths"][:-1]},
                 "error": {"planning_transaction": {"error": "different error"}},
                 "summary": {"result_queue": {"warnings": "different summary"}},
@@ -162,9 +174,15 @@ class WarningEvidenceTests(unittest.TestCase):
                 "original_transaction_id": compatibility["transaction_id"],
                 "run_id": compatibility["run_id"],
                 "session_id": compatibility["session_id"],
+                "report_fingerprint": compatibility["report_fingerprint"],
+                "result_classification": compatibility["result_classification"],
                 "current_paths": compatibility["changed_paths"],
                 "planning_transaction": {"error": compatibility["error"]},
                 "result_queue": {"warnings": compatibility["summary"]},
+                "deterministic_validation": counts(
+                    warnings=["M1 warning", "M2 warning"],
+                    blocking_warnings=[],
+                ),
                 "recoverable_failure": failure,
             }
             for name, change in mismatches.items():
@@ -172,10 +190,12 @@ class WarningEvidenceTests(unittest.TestCase):
                     RecoveryError,
                     "compatibility identity",
                 ):
-                    _legacy_warning_summary_for_recovery(**{**base, **change})
+                    normalize_legacy_planning_warning_evidence(
+                        **{**base, **change}
+                    )
             with self.assertRaisesRegex(RecoveryError, "warnings must be a string array"):
                 compare_queue_validation_evidence(
-                    counts(warnings=summary),
+                    counts(warnings=compatibility["summary"]),
                     counts(
                         warnings=["M1 warning", "M2 warning"],
                         blocking_warnings=[],

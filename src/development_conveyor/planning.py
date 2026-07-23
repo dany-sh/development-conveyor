@@ -9,6 +9,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
+from .contracts import fingerprint
 from .errors import QueueError, RecoveryError
 from .execution_profiles import validate_feature_execution_policy
 from .logging import atomic_write_json, utc_now
@@ -74,6 +75,11 @@ LEGACY_WARNING_SUMMARY_COMPATIBILITY = {
     "transaction_id": "13b0828a-68e7-48a6-8c74-af5d3d411d26",
     "run_id": "826d9612-0cb1-441d-91ca-7531e64295bd",
     "session_id": "019f8e4c-19b4-7341-b860-90a784efa190",
+    "report_fingerprint": "bba3dd65f169fa6402425a7e7b62ed2b5ec779189170de6441afc58d232c2bac",
+    "result_classification": "RECONCILED_READY_WORK",
+    "failed_recovery_transaction_id": "66910386-790b-4c32-9e78-830e2b881faf",
+    "failed_recovery_run_id": "recovery-cf70c7b4-bcc2-4e07-9060-eee52d8ff6c9",
+    "failed_recovery_sequences": list(range(339, 346)),
     "summary": "M1-M9 preparation metadata warnings only",
     "error": "queue validation warnings is malformed",
     "changed_paths": [
@@ -597,27 +603,40 @@ def normalize_queue_validation_evidence(
     }
 
 
-def _legacy_warning_summary_for_recovery(
+def normalize_legacy_planning_warning_evidence(
     *,
     project: Project,
     original_transaction_id: str,
     run_id: str,
     session_id: str,
+    report_fingerprint: str,
+    result_classification: str,
     current_paths: list[str],
     planning_transaction: dict[str, Any],
     result_queue: dict[str, Any],
+    deterministic_validation: dict[str, Any],
     recoverable_failure: dict[str, Any],
-) -> str | None:
-    """Authorize the one recorded prose warning summary and no other live result."""
+) -> dict[str, Any]:
+    """Replace one identity-bound legacy warning summary before strict parsing."""
 
-    if recoverable_failure["classification"] != "historical_warning_summary_shape":
-        return None
+    if not isinstance(result_queue.get("warnings"), str):
+        return dict(result_queue)
     compatibility = LEGACY_WARNING_SUMMARY_COMPATIBILITY
     checks = {
+        "failure_classification": (
+            recoverable_failure.get("classification")
+            == "historical_warning_summary_shape"
+        ),
         "project_id": project.project_id == compatibility["project_id"],
         "transaction_id": original_transaction_id == compatibility["transaction_id"],
         "run_id": run_id == compatibility["run_id"],
         "session_id": session_id == compatibility["session_id"],
+        "report_fingerprint": (
+            report_fingerprint == compatibility["report_fingerprint"]
+        ),
+        "result_classification": (
+            result_classification == compatibility["result_classification"]
+        ),
         "changed_paths": current_paths == compatibility["changed_paths"],
         "recorded_error": planning_transaction.get("error") == compatibility["error"],
         "warning_summary": result_queue.get("warnings") == compatibility["summary"],
@@ -627,7 +646,19 @@ def _legacy_warning_summary_for_recovery(
         raise RecoveryError(
             "historical warning-summary compatibility identity disagrees: " + failed
         )
-    return str(compatibility["summary"])
+    deterministic = normalize_queue_validation_evidence(
+        deterministic_validation,
+        source="deterministic",
+    )
+    canonical = dict(result_queue)
+    canonical.pop("warnings", None)
+    canonical.update({
+        "warning_count": deterministic["warning_count"],
+        "warnings_scope": deterministic["warnings_scope"],
+        "blocking_warnings": deterministic["blocking_warnings"],
+    })
+    normalize_queue_validation_evidence(canonical, source="structured")
+    return canonical
 
 
 def compare_queue_validation_evidence(
@@ -927,22 +958,25 @@ def inspect_planning_finalization_recovery(
     selection = _selected_feature_evidence(project, queue, report_evidence["classification"])
     selected = selection.get("selected_feature")
     result_queue = (report_evidence.get("structured_result") or {}).get("queue_validation") or {}
-    legacy_warning_summary = _legacy_warning_summary_for_recovery(
+    inventory = _inventory_validation(project)
+    canonical_result_queue = normalize_legacy_planning_warning_evidence(
         project=project,
         original_transaction_id=original_transaction_id,
         run_id=run_id,
         session_id=session_id,
+        report_fingerprint=fingerprint(session_report),
+        result_classification=report_evidence["terminal_classification"],
         current_paths=current_paths,
         planning_transaction=planning_transaction,
         result_queue=result_queue,
+        deterministic_validation=inventory,
         recoverable_failure=recoverable_failure,
     )
-    inventory = _inventory_validation(project)
     queue_comparison = compare_queue_validation_evidence(
-        result_queue,
+        canonical_result_queue,
         inventory,
-        legacy_warning_summary=legacy_warning_summary,
     )
+    historical_warning_compatibility = canonical_result_queue != result_queue
     nonfatal_warnings = list(
         dict.fromkeys(
             [
@@ -956,7 +990,7 @@ def inspect_planning_finalization_recovery(
         (
             result_queue.get("selected_feature") != selected
             and not (
-                legacy_warning_summary is not None
+                historical_warning_compatibility
                 and "selected_feature" not in result_queue
             )
         )
@@ -965,7 +999,7 @@ def inspect_planning_finalization_recovery(
             selected is not None
             and result_queue.get("dependencies_complete") is not True
             and not (
-                legacy_warning_summary is not None
+                historical_warning_compatibility
                 and "dependencies_complete" not in result_queue
             )
         )
@@ -1045,8 +1079,8 @@ def inspect_planning_finalization_recovery(
         "historical_count_disagreements": recoverable_failure[
             "historical_disagreements"
         ],
-        "historical_warning_compatibility": legacy_warning_summary is not None,
-        "warnings_scope": legacy_warning_summary,
+        "historical_warning_compatibility": historical_warning_compatibility,
+        "warnings_scope": canonical_result_queue.get("warnings_scope"),
         "nonfatal_warnings": nonfatal_warnings,
         "checks": checks,
         "model_sessions_that_would_launch": [],

@@ -7,14 +7,24 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from development_conveyor.contracts import TransactionState, WorkflowType, fingerprint
+from development_conveyor.contracts import (
+    TransactionState,
+    WorkflowType,
+    bind_human_gate,
+    fingerprint,
+)
 from development_conveyor.consistency import ConsistencyChecker
 from development_conveyor.cycle_engine import CycleEngine
 from development_conveyor.errors import LockError, RecoveryError, SessionError
-from development_conveyor.kernel import QueueReconciliationAdapter, WorkflowKernel
+from development_conveyor.kernel import (
+    QueueReconciliationAdapter,
+    RecoveryAdapter,
+    WorkflowKernel,
+)
 from development_conveyor.ledger import EvidenceLedger
 from development_conveyor.locks import PlanningWriterLease
 from development_conveyor.planning import (
+    LEGACY_WARNING_SUMMARY_COMPATIBILITY,
     PLANNING_CLASSIFICATIONS,
     _classify_inventory_validation,
     _selected_feature_evidence,
@@ -424,6 +434,180 @@ class PlanningTransactionTests(unittest.TestCase):
             reference="RecoveryError",
         )
         return repository, project, engine, starting_head, ledger, warnings
+
+    def _failed_legacy_recovery_fixture(self, root: Path):
+        (
+            repository,
+            project,
+            engine,
+            starting_head,
+            ledger,
+            warnings,
+        ) = self._terminal_kernel_recovery_fixture(root)
+        report_path = engine.root / "reports" / RUN_ID / "queue_reconciliation.json"
+        report = json.loads(report_path.read_text())
+        envelope = report["structured_result"]
+        queue_validation = envelope["evidence"]["queue_validation"]
+        queue_validation.pop("warning_count", None)
+        queue_validation["warnings"] = "legacy planning warnings"
+        report["parsed_structured_result"] = envelope
+        write_json(report_path, report)
+        transaction_path = (
+            engine.root / "reports" / RUN_ID / "planning-transaction.json"
+        )
+        planning_transaction = json.loads(transaction_path.read_text())
+        planning_transaction["error"] = "legacy warning parse failure"
+        write_json(transaction_path, planning_transaction)
+
+        original_events = ledger.read()
+        for path in (ledger.path, ledger.head_path, ledger.lock_path):
+            path.unlink(missing_ok=True)
+        projection_path = ledger.path.parent / "projection-cache.json"
+        projection_path.unlink(missing_ok=True)
+        identity = RepositoryInspector(repository).identity()
+        ledger = EvidenceLedger(
+            ledger.path,
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        historical_transaction = "historical-f003-transaction"
+        historical_gate = bind_human_gate(
+            {
+                "classification": "structured_output_invalid",
+                "reason": "historical F003 gate",
+                "feature": "F003",
+            },
+            transaction_id=historical_transaction,
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+            workflow_type=WorkflowType.FEATURE_EXECUTION,
+            approved_next_state="queue_reconciliation",
+            terminal_classification="HUMAN_DECISION_REQUIRED",
+        )
+        ledger.append(
+            event_type="TransactionStarted",
+            transaction_id=historical_transaction,
+            workflow_type=WorkflowType.FEATURE_EXECUTION,
+            payload={
+                "run_id": "historical-f003-run",
+                "feature_id": "F003",
+                "milestone": "P0",
+                "starting_branch": project.milestone_branch,
+                "starting_head": starting_head,
+                "allowed_mutation_policy": {},
+            },
+        )
+        ledger.append(
+            event_type="HumanGateRaised",
+            transaction_id=historical_transaction,
+            workflow_type=WorkflowType.FEATURE_EXECUTION,
+            payload={
+                "classification": "HUMAN_DECISION_REQUIRED",
+                "terminal_state": "human_decision_required",
+                "reference": historical_gate["gate_id"],
+                "next_state": "human_decision_required",
+                "gate": historical_gate,
+                "gate_id": historical_gate["gate_id"],
+                "gate_fingerprint": fingerprint(historical_gate),
+                "terminal_snapshot": {
+                    "branch": project.milestone_branch,
+                    "head": starting_head,
+                    "clean": True,
+                },
+            },
+        )
+        for event in original_events:
+            ledger.append(
+                event_type=event["event_type"],
+                transaction_id=event["transaction_id"],
+                workflow_type=WorkflowType(event["workflow_type"]),
+                payload=event["payload"],
+            )
+        projection = ProjectionEngine(ledger, projection_path)
+        projection.rebuild(persist_cache=True)
+        inspector = RepositoryInspector(repository)
+        failed_adapter = RecoveryAdapter(
+            allowed_paths=SEVEN_PATHS,
+            commit_subject="factory: reconcile P0 queue and ready P0-003",
+            next_state="feature_ready",
+            require_clean_start=False,
+        )
+        failed_kernel = WorkflowKernel(
+            project=project,
+            ledger=ledger,
+            projection=projection,
+            lease=WorkflowWriterLease(repository / ".factory/locks/writer.json"),
+        )
+        report_fingerprint = fingerprint(report)
+        failed_transaction = "failed-legacy-warning-recovery"
+        failed_kernel.begin(
+            workflow_type=WorkflowType.RECOVERY,
+            milestone="P0",
+            feature_id="P0-003",
+            run_id="failed-legacy-warning-run",
+            policy=failed_adapter.policy,
+            transaction_id=failed_transaction,
+            start_evidence={
+                "recovered_transaction_id": ORIGINAL_TRANSACTION_ID,
+                "original_run_id": RUN_ID,
+                "original_session_id": SESSION_ID,
+                "planning_transaction_fingerprint": fingerprint(
+                    planning_transaction
+                ),
+                "session_report_fingerprint": report_fingerprint,
+                "model_sessions_planned": 0,
+                "child_sessions_planned": 0,
+            },
+        )
+        failed_kernel.acquire_lease()
+        failed_kernel.capture_snapshot()
+        failed_kernel.checkpoint(
+            "planning_finalization_recovery_verified",
+            {
+                "recovered_transaction_id": ORIGINAL_TRANSACTION_ID,
+                "changed_paths": SEVEN_PATHS,
+                "diff_fingerprint": inspector.planning_diff_fingerprint(),
+                "selected_feature": "P0-003",
+                "model_session_launched": False,
+            },
+        )
+        failed_kernel.block(
+            state=TransactionState.TERMINAL_FAILURE,
+            classification="TERMINAL_RECOVERY_FAILURE",
+            next_state="human_decision_required",
+            reference="RecoveryError",
+        )
+        compatibility = {
+            "project_id": project.project_id,
+            "transaction_id": ORIGINAL_TRANSACTION_ID,
+            "run_id": RUN_ID,
+            "session_id": SESSION_ID,
+            "report_fingerprint": report_fingerprint,
+            "result_classification": "RECONCILED_READY_WORK",
+            "failed_recovery_transaction_id": failed_transaction,
+            "failed_recovery_run_id": "failed-legacy-warning-run",
+            "failed_recovery_sequences": [
+                event["sequence"]
+                for event in ledger.read()
+                if event["transaction_id"] == failed_transaction
+            ],
+            "summary": "legacy planning warnings",
+            "error": "legacy warning parse failure",
+            "changed_paths": sorted(SEVEN_PATHS),
+        }
+        return (
+            repository,
+            project,
+            engine,
+            starting_head,
+            ledger,
+            warnings,
+            failed_transaction,
+            historical_gate,
+            compatibility,
+        )
 
     def _no_ready_count_recovery_fixture(self, root: Path):
         repository, project = synthetic_repository(root, feature_status="proposed")
@@ -1316,6 +1500,138 @@ class PlanningTransactionTests(unittest.TestCase):
                     for event in ledger.read()
                     if event["transaction_id"] == result["recovery_transaction_id"]
                 ],
+            )
+
+    def test_28_exact_failed_legacy_warning_recovery_is_retried_without_historical_gate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                repository,
+                project,
+                engine,
+                starting_head,
+                ledger,
+                warnings,
+                failed_transaction,
+                historical_gate,
+                compatibility,
+            ) = self._failed_legacy_recovery_fixture(Path(temporary))
+            inventory = {
+                "ok": True,
+                "valid": True,
+                "milestone_found": True,
+                "active_milestone": "P0",
+                "exit_code": 0,
+                "errors": [],
+                "warnings": warnings,
+                "nonfatal_warnings": warnings,
+                "blocking_warnings": [],
+                "warning_count": len(warnings),
+                "feature_count": 14,
+                "global_feature_count": 14,
+                "global_milestone_count": 1,
+                "ready": ["P0-003"],
+                "active": [],
+                "validator": "synthetic inventory validator",
+            }
+            inspector = RepositoryInspector(repository)
+            diff_fingerprint = inspector.planning_diff_fingerprint()
+            status_before = git(
+                repository, "status", "--porcelain=v1", "--branch"
+            )
+            ledger_before = ledger.path.read_bytes()
+            projection_path = ledger.path.parent / "projection-cache.json"
+            projection_before = projection_path.read_bytes()
+            app_before = (repository / "app.txt").read_bytes()
+            arguments = {
+                "run_id": RUN_ID,
+                "expected_starting_head": starting_head,
+                "expected_diff_fingerprint": diff_fingerprint,
+                "expected_changed_paths": SEVEN_PATHS,
+                "expected_session_id": SESSION_ID,
+            }
+            with (
+                patch.dict(
+                    LEGACY_WARNING_SUMMARY_COMPATIBILITY,
+                    compatibility,
+                    clear=True,
+                ),
+                patch(
+                    "development_conveyor.planning._inventory_validation",
+                    return_value=inventory,
+                ),
+            ):
+                dry = engine.recover_planning_transaction(
+                    project, **arguments, dry_run=True
+                )
+                canonical = dry["planning_finalization_recovery"][
+                    "queue_validation_evidence"
+                ]["raw_structured"]
+                self.assertNotIn("warnings", canonical)
+                self.assertEqual(canonical["warning_count"], len(warnings))
+                self.assertEqual(canonical["blocking_warnings"], [])
+                self.assertEqual(
+                    dry["planning_finalization_recovery"][
+                        "failed_recovery_supersession"
+                    ]["transaction_id"],
+                    failed_transaction,
+                )
+                self.assertEqual(
+                    git(repository, "status", "--porcelain=v1", "--branch"),
+                    status_before,
+                )
+                self.assertEqual(ledger.path.read_bytes(), ledger_before)
+                self.assertEqual(projection_path.read_bytes(), projection_before)
+                consistency = ConsistencyChecker(
+                    controller_root=engine.root,
+                    project=project,
+                    planner_observer=lambda: engine.project_plan(project),
+                ).check()
+                self.assertNotIn(
+                    consistency["classification"],
+                    {"UNSAFE_REPOSITORY_STATE", "HUMAN_DECISION_REQUIRED"},
+                )
+                result = engine.recover_planning_transaction(
+                    project, **arguments, dry_run=False
+                )
+            self.assertEqual(result["outcome"], "planning_recovery_committed")
+            self.assertEqual(result["selected_feature"], "P0-003")
+            self.assertEqual(result["model_sessions_launched"], [])
+            self.assertEqual(result["child_sessions_launched"], [])
+            self.assertEqual(
+                RepositoryInspector(repository).changed_paths(
+                    result["planning_result_commit"]
+                ),
+                sorted(SEVEN_PATHS),
+            )
+            self.assertEqual(
+                git(
+                    repository,
+                    "rev-list",
+                    "--count",
+                    f"{starting_head}..{result['planning_result_commit']}",
+                ),
+                "1",
+            )
+            self.assertEqual((repository / "app.txt").read_bytes(), app_before)
+            self.assertTrue(RepositoryInspector(repository).is_clean)
+            projection = ProjectionEngine(
+                ledger, projection_path
+            ).rebuild(persist_cache=False)
+            self.assertEqual(projection["current_state"], "feature_ready")
+            self.assertEqual(projection["current_feature"], "P0-003")
+            self.assertEqual(projection["selected_next_feature"], "P0-003")
+            self.assertEqual(projection["allowed_next_action"], "feature_cycle")
+            self.assertIsNone(projection["human_gate"])
+            self.assertFalse(historical_gate.get("resolved", False))
+            accounted = [
+                event
+                for event in ledger.read()
+                if event["transaction_id"] == failed_transaction
+                and event["event_type"] == "RecoveryApplied"
+            ]
+            self.assertEqual(
+                accounted[0]["payload"]["classification"],
+                "FAILED_LEGACY_WARNING_RECOVERY_SUPERSEDED",
             )
 
 

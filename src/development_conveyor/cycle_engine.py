@@ -33,6 +33,7 @@ from .locks import (
 )
 from .planning import (
     ALLOWED_PLANNING_PREFIXES,
+    LEGACY_WARNING_SUMMARY_COMPATIBILITY,
     PLANNING_CLASSIFICATIONS,
     allowed_planning_path,
     authoritative_queue_validation_evidence,
@@ -41,6 +42,7 @@ from .planning import (
     finalize_planning_commit,
     inspect_planning_finalization_recovery,
     load_planning_transaction,
+    normalize_legacy_planning_warning_evidence,
     persist_planning_transaction,
     planning_commit_subject,
     planning_report_path,
@@ -638,7 +640,8 @@ class CycleEngine:
     ) -> dict[str, Any] | None:
         if (
             projection.get("active_transaction") is not None
-            or projection.get("current_state") != "validation_failed"
+            or projection.get("current_state")
+            not in {"validation_failed", "human_decision_required"}
         ):
             return None
         latest = next((item for item in reversed(projection.get("transactions") or [])
@@ -684,11 +687,40 @@ class CycleEngine:
             repository_path_fingerprint=identity["path_fingerprint"],
         )
         events = ledger.read()
+        failed_recovery = self._failed_planning_recovery_supersession(
+            project,
+            projection=projection,
+            ledger_events=events,
+            inspector=inspector,
+            original_transaction_id=original_transaction_id,
+            planning_transaction=planning_transaction,
+            session_report=session_report,
+        )
+        if (
+            projection.get("current_state") == "human_decision_required"
+            and failed_recovery is None
+        ):
+            return None
+        inspection_projection = projection
+        if failed_recovery is not None:
+            inspection_projection = {
+                **projection,
+                "current_state": "validation_failed",
+                "current_feature": None,
+                "selected_next_feature": None,
+                "human_gate": None,
+                "transactions": [
+                    item
+                    for item in projection.get("transactions") or []
+                    if item.get("transaction_id")
+                    != failed_recovery["transaction_id"]
+                ],
+            }
         plan = inspect_planning_finalization_recovery(
             project,
             inspector,
             ledger_events=events,
-            projection=projection,
+            projection=inspection_projection,
             original_transaction_id=original_transaction_id,
             planning_transaction=planning_transaction,
             session_report=session_report,
@@ -703,9 +735,178 @@ class CycleEngine:
             "session_report_path": str(session_path),
             "planning_transaction_fingerprint": fingerprint(planning_transaction),
             "session_report_fingerprint": fingerprint(session_report),
+            "failed_recovery_supersession": failed_recovery,
         })
         plan["plan_fingerprint"] = fingerprint(plan)
         return plan
+
+    def _failed_planning_recovery_supersession(
+        self,
+        project: Project,
+        *,
+        projection: dict[str, Any],
+        ledger_events: list[dict[str, Any]],
+        inspector: RepositoryInspector,
+        original_transaction_id: str,
+        planning_transaction: dict[str, Any],
+        session_report: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Recognize only the controller-generated failed legacy-warning retry."""
+
+        if projection.get("current_state") != "human_decision_required":
+            return None
+        latest = max(
+            projection.get("transactions") or [],
+            key=lambda item: int(item.get("last_sequence") or 0),
+            default={},
+        )
+        failed_transaction_id = latest.get("transaction_id")
+        if (
+            latest.get("workflow_type") != WorkflowType.RECOVERY.value
+            or latest.get("state") != "terminal_failure"
+            or latest.get("terminal_classification")
+            != "TERMINAL_RECOVERY_FAILURE"
+            or not isinstance(failed_transaction_id, str)
+        ):
+            return None
+        events = [
+            event
+            for event in ledger_events
+            if event.get("transaction_id") == failed_transaction_id
+        ]
+        if [event.get("event_type") for event in events] != [
+            "TransactionStarted",
+            "LeaseAcquired",
+            "SnapshotCaptured",
+            "CheckpointRecorded",
+            "TransactionBlocked",
+            "LeaseReleased",
+            "ProjectionUpdated",
+        ]:
+            return None
+        start = events[0].get("payload") or {}
+        lease = events[1].get("payload") or {}
+        snapshot = (events[2].get("payload") or {}).get("snapshot") or {}
+        checkpoint = events[3].get("payload") or {}
+        blocked = events[4].get("payload") or {}
+        terminal_snapshot = blocked.get("terminal_snapshot") or {}
+        released = events[5].get("payload") or {}
+        projected = events[6].get("payload") or {}
+        compatibility = LEGACY_WARNING_SUMMARY_COMPATIBILITY
+        result_queue = (
+            ((session_report.get("structured_result") or {}).get("evidence") or {})
+            .get("queue_validation")
+            or {}
+        )
+        current_paths = sorted(inspector.tracked_changed_paths())
+        checks = {
+            "failed_recovery_identity": (
+                failed_transaction_id
+                == compatibility["failed_recovery_transaction_id"]
+                and start.get("run_id")
+                == compatibility["failed_recovery_run_id"]
+                and [event.get("sequence") for event in events]
+                == compatibility["failed_recovery_sequences"]
+            ),
+            "project": project.project_id == compatibility["project_id"],
+            "original_transaction": (
+                original_transaction_id == compatibility["transaction_id"]
+                == start.get("recovered_transaction_id")
+            ),
+            "original_run": (
+                planning_transaction.get("run_id")
+                == compatibility["run_id"]
+                == start.get("original_run_id")
+            ),
+            "original_session": (
+                planning_transaction.get("session_id")
+                == compatibility["session_id"]
+                == start.get("original_session_id")
+            ),
+            "report_fingerprint": (
+                fingerprint(session_report)
+                == compatibility["report_fingerprint"]
+                == start.get("session_report_fingerprint")
+            ),
+            "planning_transaction_fingerprint": (
+                fingerprint(planning_transaction)
+                == start.get("planning_transaction_fingerprint")
+            ),
+            "classification": (
+                session_report.get("result_classification")
+                == compatibility["result_classification"]
+            ),
+            "legacy_warning_error": (
+                planning_transaction.get("error") == compatibility["error"]
+                and result_queue.get("warnings") == compatibility["summary"]
+            ),
+            "zero_sessions": (
+                start.get("model_sessions_planned") == 0
+                and start.get("child_sessions_planned") == 0
+            ),
+            "original_reference": (
+                checkpoint.get("checkpoint")
+                == "planning_finalization_recovery_verified"
+                and checkpoint.get("recovered_transaction_id")
+                == original_transaction_id
+            ),
+            "unchanged_repository": (
+                inspector.current_branch == start.get("starting_branch")
+                == snapshot.get("branch")
+                == terminal_snapshot.get("branch")
+                and inspector.head == start.get("starting_head")
+                == snapshot.get("head")
+                == terminal_snapshot.get("head")
+                and current_paths == compatibility["changed_paths"]
+                == sorted(snapshot.get("tracked_changed_paths") or [])
+                == sorted(terminal_snapshot.get("tracked_changed_paths") or [])
+                and inspector.planning_diff_fingerprint()
+                == start.get("starting_tracked_diff_fingerprint")
+                == snapshot.get("tracked_diff_fingerprint")
+                == terminal_snapshot.get("tracked_diff_fingerprint")
+                == checkpoint.get("diff_fingerprint")
+            ),
+            "no_commit": not any(
+                event.get("event_type") == "CommitFinalized" for event in events
+            ),
+            "exact_failure_terminal": (
+                blocked.get("classification") == "TERMINAL_RECOVERY_FAILURE"
+                and blocked.get("reference") == "RecoveryError"
+                and blocked.get("next_state") == "human_decision_required"
+                and blocked.get("terminal_state") == "terminal_failure"
+            ),
+            "lease_released": (
+                isinstance(lease.get("lease_id"), str)
+                and released.get("lease_id") == lease.get("lease_id")
+                and not inspector.writer_lock_path(
+                    self.configuration.conveyor["lock_policy"][
+                        "writer_lock_relative_path"
+                    ]
+                ).exists()
+            ),
+            "no_active_transaction": projection.get("active_transaction") is None,
+            "failed_projection": (
+                projected.get("current_state") == "human_decision_required"
+                and projected.get("current_feature")
+                == checkpoint.get("selected_feature")
+            ),
+            "not_already_superseded": not any(
+                event.get("event_type") == "RecoveryApplied"
+                and (event.get("payload") or {}).get("classification")
+                == "FAILED_LEGACY_WARNING_RECOVERY_SUPERSEDED"
+                for event in events
+            ),
+        }
+        if not all(checks.values()):
+            return None
+        return {
+            "transaction_id": failed_transaction_id,
+            "classification": "FAILED_LEGACY_WARNING_RECOVERY_SUPERSEDED",
+            "failure": "queue validation warnings must be a string array",
+            "recovered_transaction_id": original_transaction_id,
+            "terminal_snapshot": terminal_snapshot,
+            "checks": checks,
+        }
 
     def _verified_failed_integration_recovery(
         self, project: Project, projection: dict[str, Any]
@@ -5686,6 +5887,11 @@ class CycleEngine:
                     "original_ledger_fingerprint": expected_plan["original_ledger_fingerprint"],
                     "planning_transaction_fingerprint": expected_plan["planning_transaction_fingerprint"],
                     "session_report_fingerprint": expected_plan["session_report_fingerprint"],
+                    "supersedes_failed_recovery": (
+                        (expected_plan.get("failed_recovery_supersession") or {}).get(
+                            "transaction_id"
+                        )
+                    ),
                     "model_sessions_planned": 0,
                     "child_sessions_planned": 0,
                 },
@@ -5719,6 +5925,69 @@ class CycleEngine:
                     selected_feature=selected_feature, next_state=next_state,
                 )
             else:
+                planning_transaction = load_planning_transaction(
+                    Path(expected_plan["planning_transaction_path"])
+                )
+                if (
+                    planning_transaction is None
+                    or fingerprint(planning_transaction)
+                    != expected_plan["planning_transaction_fingerprint"]
+                ):
+                    raise RecoveryError(
+                        "planning recovery transaction evidence changed after checkpoint"
+                    )
+                report_envelope = session_report.get("structured_result")
+                if not isinstance(report_envelope, dict):
+                    raise RecoveryError(
+                        "planning recovery session report lost its typed result"
+                    )
+                report_evidence = report_envelope.get("evidence")
+                if not isinstance(report_evidence, dict):
+                    raise RecoveryError(
+                        "planning recovery session report lost its typed evidence"
+                    )
+                result_queue = report_evidence.get("queue_validation")
+                if not isinstance(result_queue, dict):
+                    raise RecoveryError(
+                        "planning recovery session report lost queue validation"
+                    )
+                canonical_queue = normalize_legacy_planning_warning_evidence(
+                    project=effective,
+                    original_transaction_id=expected_plan[
+                        "original_transaction_id"
+                    ],
+                    run_id=expected_plan["original_run_id"],
+                    session_id=expected_plan["original_session_id"],
+                    report_fingerprint=fingerprint(session_report),
+                    result_classification=str(
+                        report_envelope.get("classification") or ""
+                    ),
+                    current_paths=list(expected_paths),
+                    planning_transaction=planning_transaction,
+                    result_queue=result_queue,
+                    deterministic_validation=(
+                        expected_plan.get("inventory_validation") or {}
+                    ),
+                    recoverable_failure={
+                        "classification": expected_plan.get(
+                            "recovered_failure_classification"
+                        )
+                    },
+                )
+                normalized_evidence = {
+                    **report_evidence,
+                    "queue_validation": canonical_queue,
+                }
+                normalized_envelope = {
+                    **report_envelope,
+                    "evidence": normalized_evidence,
+                }
+                session_report = {
+                    **session_report,
+                    "structured_result": normalized_envelope,
+                }
+                if isinstance(session_report.get("parsed_structured_result"), dict):
+                    session_report["parsed_structured_result"] = normalized_envelope
                 validation = validate_planning_changes(
                     effective, inspector, session_report, run_id=expected_plan["original_run_id"],
                     starting_head=expected_plan["starting_commit"], expected_diff_fingerprint=expected_plan["mutation_fingerprint"],
@@ -5732,6 +6001,24 @@ class CycleEngine:
                     expected_diff_fingerprint=expected_plan["mutation_fingerprint"], plan_fingerprint=expected_plan["plan_fingerprint"],
                     validation_evidence={"commands": [{"validator": inventory.get("validator"), "exit_code": inventory.get("exit_code")}, {"validator": "git diff --check", "exit_code": 0}], "warnings": validation_warnings},
                     selected_feature=selected_feature, next_state=next_state,
+                )
+            failed_recovery = expected_plan.get("failed_recovery_supersession")
+            if isinstance(failed_recovery, dict):
+                ledger.append(
+                    event_type="RecoveryApplied",
+                    transaction_id=str(failed_recovery["transaction_id"]),
+                    workflow_type=WorkflowType.RECOVERY,
+                    payload={
+                        "classification": failed_recovery["classification"],
+                        "superseded_by": transaction.transaction_id,
+                        "reference": failed_recovery["failure"],
+                        "recovered_transaction_id": expected_plan[
+                            "original_transaction_id"
+                        ],
+                        "terminal_snapshot": failed_recovery[
+                            "terminal_snapshot"
+                        ],
+                    },
                 )
             committed = {
                 **validation,
@@ -5761,6 +6048,7 @@ class CycleEngine:
                     "recovered_transaction_id": expected_plan["original_transaction_id"],
                     "model_session_launched": False,
                     "nonfatal_warnings": validation_warnings,
+                    "human_merge_gate": None,
                 },
             )
             recovery_report = self._report_path(
