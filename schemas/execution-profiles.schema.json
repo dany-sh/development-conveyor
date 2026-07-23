@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "execution-profiles.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "profiles", "workflow_fallbacks", "feature_policies"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "profiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mechanical", "repository_aware", "bounded_precise", "multi_module_precise", "generic_or_architectural", "ambiguous_or_authoritative", "unresolved_after_high"],
+      "properties": {
+        "mechanical": {"$ref": "#/$defs/profile"},
+        "repository_aware": {"$ref": "#/$defs/profile"},
+        "bounded_precise": {"$ref": "#/$defs/profile"},
+        "multi_module_precise": {"$ref": "#/$defs/profile"},
+        "generic_or_architectural": {"$ref": "#/$defs/profile"},
+        "ambiguous_or_authoritative": {"$ref": "#/$defs/profile"},
+        "unresolved_after_high": {"$ref": "#/$defs/profile"}
+      }
+    },
+    "workflow_fallbacks": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/profileName"},
+      "required": ["queue_reconciliation", "application_feature", "controller_repair", "metadata"]
+    },
+    "feature_policies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["project_id", "feature_id", "execution_policy"],
+        "properties": {
+          "project_id": {"type": "string", "minLength": 1},
+          "feature_id": {"type": "string", "minLength": 1},
+          "execution_policy": {"$ref": "#/$defs/executionPolicy"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "profileName": {
+      "type": "string",
+      "enum": ["mechanical", "repository_aware", "bounded_precise", "multi_module_precise", "generic_or_architectural", "ambiguous_or_authoritative", "unresolved_after_high"]
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "reasoning"],
+      "properties": {
+        "model": {"type": "string", "enum": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]},
+        "reasoning": {"type": "string", "enum": ["medium", "high", "xhigh"]}
+      }
+    },
+    "executionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "parent_sessions", "child_sessions"],
+      "properties": {
+        "profile": {"$ref": "#/$defs/profileName"},
+        "parent_sessions": {"type": "integer", "minimum": 1},
+        "child_sessions": {"type": "integer", "minimum": 0},
+        "escalation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["trigger", "profile"],
+          "properties": {
+            "trigger": {"type": "string", "minLength": 1},
+            "profile": {"$ref": "#/$defs/profileName"}
+          }
+        }
+      }
+    }
+  }
+}

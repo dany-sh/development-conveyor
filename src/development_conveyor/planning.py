@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import QueueError, RecoveryError
+from .execution_profiles import validate_feature_execution_policy
 from .logging import atomic_write_json, utc_now
 from .queue import FeatureQueue
 from .registry import Project
@@ -509,6 +510,9 @@ def _inspect_committed_planning_finalization_recovery(
     if failed:
         raise RecoveryError("committed planning finalization topology disagrees: " + ", ".join(failed))
     queue = FeatureQueue.from_location(project.repository, project.queue_location)
+    newly_policy_bound = _require_new_ready_execution_policies(
+        project, inspector, starting_head, queue
+    )
     selection = _selected_feature_evidence(project, queue, report_evidence["classification"])
     inventory = _inventory_validation(project)
     comparison = compare_queue_validation_evidence(
@@ -525,6 +529,7 @@ def _inspect_committed_planning_finalization_recovery(
         "existing_commit": existing_commit, "existing_planning_changes": {"count": len(paths), "paths": paths},
         "result_classification": report_evidence["terminal_classification"], "selected_feature": "F004",
         "ready_features": selection["ready_features"], "checks": checks,
+        "newly_readied_execution_policies": newly_policy_bound,
         "queue_validation_evidence": comparison, "inventory_validation": inventory,
         "model_sessions_that_would_launch": [], "child_sessions_that_would_launch": [],
         "execution": {"models_planned": 0}, "deterministic_only": True,
@@ -680,6 +685,9 @@ def inspect_planning_finalization_recovery(
         )
 
     queue = FeatureQueue.from_location(project.repository, project.queue_location)
+    newly_policy_bound = _require_new_ready_execution_policies(
+        project, inspector, starting_head, queue
+    )
     selection = _selected_feature_evidence(project, queue, report_evidence["classification"])
     selected = selection.get("selected_feature")
     result_queue = (report_evidence.get("structured_result") or {}).get("queue_validation") or {}
@@ -745,6 +753,7 @@ def inspect_planning_finalization_recovery(
         "ready_features": selection["ready_features"],
         "dependencies": selection["dependencies"],
         "dependency_evidence": dependency_evidence,
+        "newly_readied_execution_policies": newly_policy_bound,
         "completed_features_not_selected": sorted(
             item.get("id")
             for item in queue.features_for_milestone(project.active_milestone or "")
@@ -794,6 +803,39 @@ def _semantic_document_agreement(
     return {"ok": True, "checked_paths": sorted(checked)}
 
 
+def _require_new_ready_execution_policies(
+    project: Project,
+    inspector: RepositoryInspector,
+    starting_head: str,
+    queue: FeatureQueue,
+) -> list[str]:
+    """Require explicit policy only for features newly promoted to ready.
+
+    Existing ready entries remain compatible with the validated workflow
+    fallback or a controller-owned reconciled feature policy.
+    """
+    baseline_text = inspector.file_at_commit(starting_head, project.queue_location)
+    try:
+        baseline = FeatureQueue(json.loads(baseline_text or ""))
+    except (json.JSONDecodeError, QueueError, ValueError) as exc:
+        raise RecoveryError("starting commit lacks authoritative queue evidence") from exc
+    required: list[str] = []
+    for feature in queue.features:
+        before = baseline.feature(str(feature.get("id") or ""))
+        if feature.get("status") != "ready" or (before or {}).get("status") == "ready":
+            continue
+        if "execution_policy" not in feature:
+            raise RecoveryError(
+                f"newly readied feature {feature['id']} lacks required execution_policy"
+            )
+        validate_feature_execution_policy(
+            feature["execution_policy"],
+            path=f"feature {feature['id']}.execution_policy",
+        )
+        required.append(str(feature["id"]))
+    return sorted(required)
+
+
 def validate_planning_changes(
     project: Project,
     inspector: RepositoryInspector,
@@ -840,6 +882,9 @@ def validate_planning_changes(
     if expected_diff_fingerprint is not None and diff_fingerprint != expected_diff_fingerprint:
         raise RecoveryError("planning diff fingerprint differs from the recovery expectation")
     queue = FeatureQueue.from_location(project.repository, project.queue_location)
+    newly_policy_bound = _require_new_ready_execution_policies(
+        project, inspector, starting_head, queue
+    )
     classification = report_evidence["classification"]
     selection = _selected_feature_evidence(project, queue, classification)
     inventory = _inventory_validation(project)
@@ -884,6 +929,7 @@ def validate_planning_changes(
         "diff_check": diff_check,
         "semantic_agreement": semantic,
         "model_evidence": model_records,
+        "newly_readied_execution_policies": newly_policy_bound,
         **selection,
         "planning_commit_would_be_created": True,
         "feature_factory_would_launch": False,

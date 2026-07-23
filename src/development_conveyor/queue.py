@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import QueueError
+from .execution_profiles import validate_feature_execution_policy
 
 COMPLETE_STATUSES = {"integrated", "done"}
 ACTIVE_STATUSES = {"in_progress", "review", "accepted", "integration_pending", "integrating"}
@@ -231,6 +232,10 @@ class FeatureQueue:
             human = item.get("requires_human_decision")
             if human is not None and not isinstance(human, bool):
                 raise QueueError(f"{path}.requires_human_decision: expected a boolean")
+            if "execution_policy" in item:
+                validate_feature_execution_policy(
+                    item["execution_policy"], path=f"{path}.execution_policy"
+                )
             specification = item.get("spec") or item.get("specification") or item.get("spec_path")
             if specification is not None:
                 if not isinstance(specification, str) or not specification.strip():

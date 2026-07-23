@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "mechanical": {"model": "gpt-5.6-luna", "reasoning": "medium"},
+    "repository_aware": {"model": "gpt-5.6-luna", "reasoning": "high"},
+    "bounded_precise": {"model": "gpt-5.6-terra", "reasoning": "medium"},
+    "multi_module_precise": {"model": "gpt-5.6-terra", "reasoning": "high"},
+    "generic_or_architectural": {"model": "gpt-5.6-sol", "reasoning": "medium"},
+    "ambiguous_or_authoritative": {"model": "gpt-5.6-sol", "reasoning": "high"},
+    "unresolved_after_high": {"model": "gpt-5.6-sol", "reasoning": "xhigh"}
+  },
+  "workflow_fallbacks": {
+    "queue_reconciliation": "repository_aware",
+    "application_feature": "generic_or_architectural",
+    "controller_repair": "generic_or_architectural",
+    "metadata": "mechanical"
+  },
+  "feature_policies": [
+    {
+      "project_id": "interview-companion",
+      "feature_id": "F004",
+      "execution_policy": {
+        "profile": "multi_module_precise",
+        "parent_sessions": 1,
+        "child_sessions": 0,
+        "escalation": {
+          "trigger": "material_architecture_or_authority_ambiguity",
+          "profile": "generic_or_architectural"
+        }
+      }
+    }
+  ]
+}

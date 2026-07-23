@@ -44,6 +44,8 @@ Before an active feature cycle is created, `feature_running` is persisted, or a 
 
 Repository launches receive explicit `--model` and `model_reasoning_effort` arguments from the authoritative role policy. `scripts/conveyor doctor --project PROJECT-ID` reports the executable, detected and policy-minimum versions, model, reasoning, compatibility classification, remediation, and exact validation command without writing an application repository.
 
+Feature execution uses the validated profiles in `config/execution-profiles.yaml`. Resolution prefers a deterministic zero-model route, then an explicit `--execution-profile` run override, selected feature metadata, a historical workflow fallback, and finally a matching recorded escalation. Dry-run reports the profile, resolution source, exact model/reasoning pair, parent/child budgets, escalation contract, focused context, feature acceptance criteria, and configured final gates. The governing rationale and non-executable decision guidance are versioned in `docs/policies/accepted-functionality-per-usage-v1.md`.
+
 ## State models
 
 Portfolio project states:

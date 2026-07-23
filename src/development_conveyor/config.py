@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .errors import ConfigurationError
+from .execution_profiles import validate_execution_profile_configuration
 from .validation import validate_schema
 
 VARIABLE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
@@ -54,6 +55,7 @@ class Configuration:
     root: Path
     conveyor: dict[str, Any]
     projects_document: dict[str, Any]
+    execution_profiles: dict[str, Any] = field(default_factory=dict)
 
     @property
     def projects(self) -> list[dict[str, Any]]:
@@ -74,8 +76,15 @@ def load_configuration(root: Path, environment: dict[str, str] | None = None) ->
     approved = set(approved_value)
     conveyor = expand_value(raw_conveyor, approved, env)
     projects = expand_value(load_json(root / "config/projects.yaml"), approved, env)
+    execution_profiles = expand_value(
+        load_json(root / "config/execution-profiles.yaml"), approved, env
+    )
     validate_schema(conveyor, load_json(root / "schemas/conveyor-config.schema.json"))
     validate_schema(projects, load_json(root / "schemas/projects.schema.json"))
+    validate_schema(
+        execution_profiles, load_json(root / "schemas/execution-profiles.schema.json")
+    )
+    validate_execution_profile_configuration(execution_profiles)
 
     ids = [item["project_id"] for item in projects["projects"]]
     if len(ids) != len(set(ids)):
@@ -83,7 +92,12 @@ def load_configuration(root: Path, environment: dict[str, str] | None = None) ->
     repositories = [str(Path(item["repository"]).expanduser().resolve()) for item in projects["projects"]]
     if len(repositories) != len(set(repositories)):
         raise ConfigurationError("registered repository paths must be unique")
-    return Configuration(root=root, conveyor=conveyor, projects_document=projects)
+    return Configuration(
+        root=root,
+        conveyor=conveyor,
+        projects_document=projects,
+        execution_profiles=execution_profiles,
+    )
 
 
 def discover_root(start: Path | None = None) -> Path:
@@ -96,5 +110,6 @@ def discover_root(start: Path | None = None) -> Path:
         candidate = (Path.home() / "Developer/development-conveyor").resolve()
     if not (candidate / "config/conveyor.yaml").is_file():
         raise ConfigurationError(f"Development Conveyor configuration is missing under {candidate}")
+    if not (candidate / "config/execution-profiles.yaml").is_file():
+        raise ConfigurationError(f"Development Conveyor execution profiles are missing under {candidate}")
     return candidate
-

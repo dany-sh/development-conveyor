@@ -124,10 +124,17 @@ DETERMINISTIC_COMPATIBILITY_FAILURES = {
 
 
 class CycleEngine:
-    def __init__(self, configuration: Configuration, launcher: SessionLauncher | None = None):
+    def __init__(
+        self,
+        configuration: Configuration,
+        launcher: SessionLauncher | None = None,
+        *,
+        execution_profile_override: str | None = None,
+    ):
         self.configuration = configuration
         self.root = configuration.root
         self.launcher = launcher or SessionLauncher(self.root, configuration.conveyor)
+        self.execution_profile_override = execution_profile_override
         self.project_store = JsonStateStore(self.root / "schemas/project-state.schema.json")
         self.cycle_store = JsonStateStore(self.root / "schemas/cycle-state.schema.json")
         self.events = EventLogger(
@@ -1241,15 +1248,23 @@ class CycleEngine:
                     "compatibility_preflight": None,
                 })
                 plan["cost_aware_run_plan"] = build_run_plan(
-                    plan, self.root, project=effective
+                    plan, self.root, project=effective,
+                    profile_configuration=self.configuration.execution_profiles or None,
+                    override_profile=self.execution_profile_override,
                 )
                 return plan
+            self._attach_milestone_integration_contract(plan, project)
+            cost_plan = build_run_plan(
+                plan, self.root, project=project,
+                profile_configuration=self.configuration.execution_profiles or None,
+                override_profile=self.execution_profile_override,
+            )
             compatibility = self._compatibility_snapshot(
-                project, str(authoritative.get("allowed_next_action") or "verify_consistency")
+                project,
+                str(authoritative.get("allowed_next_action") or "verify_consistency"),
+                execution_profile=cost_plan,
             )
             plan["compatibility_preflight"] = compatibility
-            self._attach_milestone_integration_contract(plan, project)
-            cost_plan = build_run_plan(plan, self.root, project=project)
             plan["cost_aware_run_plan"] = cost_plan
             return plan
         planning_transaction = None
@@ -1367,7 +1382,14 @@ class CycleEngine:
             "milestone_integration": "milestone_integration",
             "milestone_gate": "milestone_gate",
         }.get(str(proposed), "feature_cycle")
-        compatibility = self._compatibility_snapshot(project, compatibility_action)
+        preflight_cost_plan = build_run_plan(
+            plan, self.root, project=project,
+            profile_configuration=self.configuration.execution_profiles or None,
+            override_profile=self.execution_profile_override,
+        )
+        compatibility = self._compatibility_snapshot(
+            project, compatibility_action, execution_profile=preflight_cost_plan
+        )
         stale = plan.get("stale_cycle_evidence")
         if isinstance(stale, dict) and stale.get("classification") == "deterministic_failed_cycle":
             stale["environment_remediation_verified"] = bool(
@@ -1388,7 +1410,11 @@ class CycleEngine:
             plan["expected_stop_condition"] = compatibility.get("diagnostic")
             plan["sessions_that_would_launch"] = []
             plan["compatibility_human_gate"] = compatibility
-        plan["cost_aware_run_plan"] = build_run_plan(plan, self.root, project=project)
+        plan["cost_aware_run_plan"] = build_run_plan(
+            plan, self.root, project=project,
+            profile_configuration=self.configuration.execution_profiles or None,
+            override_profile=self.execution_profile_override,
+        )
         return plan
 
     def _reconcile_projection_compatibility_cache(
@@ -1431,11 +1457,29 @@ class CycleEngine:
         self.project_store.write(path, document)
         return document, True
 
-    def _compatibility_snapshot(self, project: Project, action: str) -> dict[str, Any] | None:
+    def _compatibility_snapshot(
+        self,
+        project: Project,
+        action: str,
+        *,
+        execution_profile: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         probe = getattr(self.launcher, "compatibility", None)
         if probe is None:
             return None
-        result = probe(action, project_id=project.project_id)
+        kwargs: dict[str, Any] = {"project_id": project.project_id}
+        parameters = inspect.signature(probe).parameters
+        if (
+            execution_profile
+            and execution_profile.get("selected_model")
+            and "planned_model" in parameters
+        ):
+            kwargs.update({
+                "planned_model": execution_profile["selected_model"],
+                "planned_reasoning": execution_profile["selected_reasoning_effort"],
+                "model_plan_source": execution_profile["profile_resolution_source"],
+            })
+        result = probe(action, **kwargs)
         return result.as_dict()
 
     def _persist_startup_reconciliation(
@@ -2094,7 +2138,15 @@ class CycleEngine:
                         f"error={exc}; report={report_path}; current_state={phase}; "
                         f"resume=scripts/conveyor resume --project {request.project.project_id}"
                     ) from exc
-                compatibility = self._compatibility_snapshot(request.project, request.action) or {
+                compatibility = self._compatibility_snapshot(
+                    request.project,
+                    request.action,
+                    execution_profile={
+                        "selected_model": request.planned_model,
+                        "selected_reasoning_effort": request.planned_reasoning,
+                        "profile_resolution_source": request.model_plan_source,
+                    },
+                ) or {
                     "classification": classification,
                     "compatible": False,
                     "diagnostic": str(exc),
@@ -2154,7 +2206,15 @@ class CycleEngine:
         report_root = self.configuration.owned_path(self.configuration.conveyor["report_directory"])
         suffix = f"-repair-{request.repair_attempt}" if request.repair_attempt is not None else ""
         path = self._report_path(report_root, request.run_id, f"{request.action}{suffix}-launch-failure.json")
-        compatibility = self._compatibility_snapshot(request.project, request.action)
+        compatibility = self._compatibility_snapshot(
+            request.project,
+            request.action,
+            execution_profile={
+                "selected_model": request.planned_model,
+                "selected_reasoning_effort": request.planned_reasoning,
+                "profile_resolution_source": request.model_plan_source,
+            },
+        )
         try:
             plan = self.launcher.plan(request)
             argv = list(plan.argv)
@@ -2993,7 +3053,20 @@ class CycleEngine:
             )
         if not inspector.is_clean:
             raise ConveyorError("feature execution requires a clean repository")
-        compatibility = self._compatibility_snapshot(project, "feature_cycle")
+        cost_plan = build_run_plan(
+            {
+                "proposed_next_action": "feature_cycle",
+                "selected_feature": bound_feature_id,
+                "application_mutation_expected": True,
+            },
+            self.root,
+            project=project,
+            profile_configuration=self.configuration.execution_profiles or None,
+            override_profile=self.execution_profile_override,
+        )
+        compatibility = self._compatibility_snapshot(
+            project, "feature_cycle", execution_profile=cost_plan
+        )
         if compatibility is not None and compatibility.get("compatible") is not True:
             if expected_execution_plan is not None:
                 compatibility_reservation = self._launch_lock(project, inspector)
@@ -3284,17 +3357,9 @@ class CycleEngine:
                 raise TransactionError("kernel feature identity differs from the execution plan")
             feature_kernel.acquire_lease()
             feature_kernel.capture_snapshot()
-            cost_plan = build_run_plan(
-                {
-                    "proposed_next_action": "feature_cycle",
-                    "selected_feature": selection.feature_id,
-                    "application_mutation_expected": True,
-                },
-                self.root,
-                project=project,
-            )
             if (
-                cost_plan["execution"]["models_planned"] != 1
+                cost_plan["execution"]["models_planned"] < 1
+                or cost_plan["execution"]["models_planned"] != cost_plan["parent_session_budget"]
                 or not cost_plan.get("selected_model")
                 or not cost_plan.get("selected_reasoning_effort")
             ):
@@ -3307,10 +3372,11 @@ class CycleEngine:
                 starting_branch=feature_transaction.starting_branch,
                 starting_commit=feature_transaction.starting_head,
                 allowed_paths=feature_allowed_paths,
-                child_session_budget=0,
+                parent_session_budget=int(cost_plan["parent_session_budget"]),
+                child_session_budget=int(cost_plan["child_session_budget"]),
                 planned_model=str(cost_plan["selected_model"]),
                 planned_reasoning=str(cost_plan["selected_reasoning_effort"]),
-                model_plan_source="cost_aware_execution_plan",
+                model_plan_source=str(cost_plan["profile_resolution_source"]),
                 context_files=tuple(cost_plan["context_pack"]["files"]),
             )
             if request.feature != bound_feature_id:
@@ -3606,9 +3672,12 @@ class CycleEngine:
             },
             self.root,
             project=project,
+            profile_configuration=self.configuration.execution_profiles or None,
+            override_profile=self.execution_profile_override,
         )
         if (
-            cost_plan["execution"]["models_planned"] != 1
+            cost_plan["execution"]["models_planned"] < 1
+            or cost_plan["execution"]["models_planned"] != cost_plan["parent_session_budget"]
             or not cost_plan.get("selected_model")
             or not cost_plan.get("selected_reasoning_effort")
         ):
@@ -3691,9 +3760,11 @@ class CycleEngine:
             starting_branch=kernel.transaction.starting_branch,
             starting_commit=kernel.transaction.starting_head,
             allowed_paths=kernel.transaction.allowed_mutation_policy.allowed_paths,
+            parent_session_budget=int(cost_plan["parent_session_budget"]),
+            child_session_budget=int(cost_plan["child_session_budget"]),
             planned_model=str(cost_plan["selected_model"]),
             planned_reasoning=str(cost_plan["selected_reasoning_effort"]),
-            model_plan_source="cost_aware_execution_plan",
+            model_plan_source=str(cost_plan["profile_resolution_source"]),
         ), inspector, "queue_reconciliation", "queue_reconciliation_repairs", reservation_held=True,
             on_session_started=kernel.session_launched)
         if not result.session_id:
@@ -4747,6 +4818,17 @@ class CycleEngine:
         ):
             return None
         queue_path = resolve_queue_path(project.repository, project.queue_location)
+        selected_feature_execution_plan = build_run_plan(
+            {
+                "proposed_next_action": "feature_cycle",
+                "selected_feature": selected,
+                "application_mutation_expected": True,
+            },
+            self.root,
+            project=project,
+            profile_configuration=self.configuration.execution_profiles or None,
+            override_profile=self.execution_profile_override,
+        )
         return {
             "project_id": project.project_id,
             "workflow_type": "cache_binding_recovery",
@@ -4777,6 +4859,7 @@ class CycleEngine:
             "model_sessions_that_would_launch": [],
             "child_sessions_that_would_launch": [],
             "sessions_that_would_launch": [],
+            "selected_feature_execution_plan": selected_feature_execution_plan,
             "execution": {"models_planned": 0},
             "cost_aware_run_plan": {
                 "execution": {"models_planned": 0},

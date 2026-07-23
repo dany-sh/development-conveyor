@@ -123,12 +123,22 @@ class PlanningTransactionTests(unittest.TestCase):
         path = repository / queue_location
         queue = json.loads(path.read_text())
         queue["features"][0]["status"] = "ready"
+        queue["features"][0]["execution_policy"] = {
+            "profile": "bounded_precise",
+            "parent_sessions": 1,
+            "child_sessions": 0,
+        }
         write_json(path, queue)
 
     @staticmethod
     def _apply_case_reconciliation(repository: Path) -> None:
         queue = json.loads((repository / "docs/FEATURE_QUEUE.yaml").read_text())
         queue["features"][2]["status"] = "ready"
+        queue["features"][2]["execution_policy"] = {
+            "profile": "multi_module_precise",
+            "parent_sessions": 1,
+            "child_sessions": 0,
+        }
         queue["features"][2]["dependencies"] = ["P0-001", "P0-002"]
         queue["features"][2]["requires_human_decision"] = False
         write_json(repository / "docs/FEATURE_QUEUE.yaml", queue)
@@ -512,6 +522,22 @@ class PlanningTransactionTests(unittest.TestCase):
                 engine.recover_planning_transaction(
                     project, run_id=RUN_ID, expected_starting_head=head,
                     expected_diff_fingerprint="0" * 64, expected_changed_paths=SEVEN_PATHS,
+                    expected_session_id=SESSION_ID, dry_run=True,
+                )
+
+    def test_newly_readied_feature_without_execution_policy_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, project, engine, head, _ = self._case_recovery_fixture(root)
+            queue_path = repository / project.queue_location
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            queue["features"][2].pop("execution_policy")
+            write_json(queue_path, queue)
+            diff = RepositoryInspector(repository).planning_diff_fingerprint()
+            with self.assertRaisesRegex(RecoveryError, "lacks required execution_policy"):
+                engine.recover_planning_transaction(
+                    project, run_id=RUN_ID, expected_starting_head=head,
+                    expected_diff_fingerprint=diff, expected_changed_paths=SEVEN_PATHS,
                     expected_session_id=SESSION_ID, dry_run=True,
                 )
 

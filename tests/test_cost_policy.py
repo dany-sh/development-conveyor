@@ -9,6 +9,11 @@ from development_conveyor.cost_policy import (
     ChildSessionBudget, build_run_plan, contain_command_output, context_pack, reusable_evidence,
     select_model, ValidationEvidenceCache, validation_identity, verification_plan,
 )
+from development_conveyor.execution_profiles import (
+    resolve_execution_profile,
+    validate_feature_execution_policy,
+)
+from development_conveyor.errors import QueueError, SessionError
 from development_conveyor.sessions import (
     SessionLauncher,
     SessionRequest,
@@ -28,10 +33,10 @@ class CostPolicyTests(unittest.TestCase):
 
     def test_model_and_reasoning_are_independent(self):
         self.assertEqual((select_model(task="metadata").model, select_model(task="metadata").reasoning), ("gpt-5.6-luna", "medium"))
-        self.assertEqual((select_model(task="controller_repair").model, select_model(task="controller_repair").reasoning), ("gpt-5.6-terra", "medium"))
-        self.assertEqual(select_model(task="controller_repair", ambiguity=True).reasoning, "high")
+        self.assertEqual((select_model(task="controller_repair").model, select_model(task="controller_repair").reasoning), ("gpt-5.6-sol", "medium"))
+        self.assertEqual(select_model(task="controller_repair", ambiguity=True).reasoning, "medium")
         self.assertEqual(select_model(task="recovery", risk="high").model, "gpt-5.6-sol")
-        self.assertEqual(select_model(task="recovery", risk="high", ambiguity=True, focused_attempt_failed=True).reasoning, "xhigh")
+        self.assertEqual(select_model(task="recovery", risk="high", ambiguity=True, focused_attempt_failed=True).reasoning, "medium")
         self.assertEqual(select_model(task="controller_repair", task_length=100).reasoning, "medium")
 
     def test_child_budget_blocks_before_callback(self):
@@ -46,7 +51,8 @@ class CostPolicyTests(unittest.TestCase):
     def test_queue_reconciliation_routes_by_ready_selection(self):
         semantic = build_run_plan({"proposed_next_action": "queue_reconciliation"}, Path.cwd())
         self.assertEqual(semantic["queue_reconciliation_route"], "semantic_queue_reconciliation")
-        self.assertEqual((semantic["selected_model"], semantic["selected_reasoning_effort"]), ("gpt-5.6-terra", "medium"))
+        self.assertEqual((semantic["selected_model"], semantic["selected_reasoning_effort"]), ("gpt-5.6-luna", "high"))
+        self.assertEqual(semantic["profile_resolution_source"], "workflow_fallback")
         self.assertEqual((semantic["usage_accounting"]["parent_sessions_planned"], semantic["usage_accounting"]["child_sessions_planned"]), (1, 0))
         self.assertFalse(semantic["usage_accounting"]["deterministic_only"])
         self.assertEqual((semantic["execution"]["models_planned"], semantic["dry_run"]["models"]), (1, 0))
@@ -65,10 +71,9 @@ class CostPolicyTests(unittest.TestCase):
             write_json(queue_path, queue)
             plan = build_run_plan({"proposed_next_action": "feature_cycle", "selected_feature": "F003", "application_mutation_expected": True}, Path.cwd(), project=project)
             self.assertEqual((plan["task_classification"], plan["risk_classification"]), ("application_feature", "high"))
-            self.assertEqual((plan["selected_model"], plan["selected_reasoning_effort"]), ("gpt-5.6-sol", "high"))
+            self.assertEqual((plan["selected_model"], plan["selected_reasoning_effort"]), ("gpt-5.6-sol", "medium"))
             self.assertGreater(plan["context_pack"]["file_count"], 0)
-            self.assertIn("Tests/LiveInterviewCompanionTests/SessionLifecycleTests.swift", plan["selected_tests"])
-            self.assertTrue(plan["final_feature_acceptance_gates"])
+            self.assertEqual(plan["profile_resolution_source"], "workflow_fallback")
 
     def test_zero_child_budget_blocks_at_session_launcher_before_planning(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -77,6 +82,34 @@ class CostPolicyTests(unittest.TestCase):
             launcher = SessionLauncher(Path(temporary), {"codex": {"executable": "definitely-not-called"}})
             with self.assertRaisesRegex(Exception, "child session budget exhausted"):
                 launcher.launch(request)
+
+    def test_parent_budget_blocks_second_launch_at_launcher_boundary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, project = synthetic_repository(Path(temporary))
+            launcher = SessionLauncher(
+                REPOSITORY_ROOT,
+                {"codex": {"executable": "/usr/bin/true", "session_timeout_seconds": 60}},
+            )
+            compatible = CompatibilityResult(
+                classification="compatible", executable="/usr/bin/true",
+                detected_version="1.0.0", required_minimum_version=None,
+                effective_model="gpt-5.6-luna", effective_reasoning="high",
+                policy_source="workflow_fallback", policy_role="feature-inventory-lead",
+                compatible=True, diagnostic="ok", remediation="none",
+                validation_command="scripts/conveyor doctor",
+            )
+            request = SessionRequest(
+                "queue_reconciliation", project, "budgeted-run", "one_feature",
+                parent_session_budget=1,
+                planned_model="gpt-5.6-luna", planned_reasoning="high",
+            )
+            with (
+                patch.object(launcher, "compatibility", return_value=compatible),
+                patch("development_conveyor.sessions.SafetyPolicy.validate_controller_command"),
+            ):
+                launcher.launch(request)
+                with self.assertRaisesRegex(SessionError, "parent session budget exhausted"):
+                    launcher.launch(request)
 
     def test_authoritative_cost_plan_is_bound_to_launch_argv(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -178,6 +211,7 @@ class CostPolicyTests(unittest.TestCase):
                 repository_identity=identity,
                 starting_branch="codex/m0-foundation",
                 starting_commit=git(repository, "rev-parse", "HEAD"),
+                parent_session_budget=1,
                 child_session_budget=0,
                 planned_model="gpt-5.6-sol",
                 planned_reasoning="high",
@@ -231,7 +265,7 @@ class CostPolicyTests(unittest.TestCase):
                 feature="F001", transaction_id="transaction-direct",
                 repository_identity=identity,
                 starting_branch="codex/m0-foundation", starting_commit=starting,
-                child_session_budget=0, planned_model="gpt-5.6-sol",
+                parent_session_budget=1, child_session_budget=0, planned_model="gpt-5.6-sol",
                 planned_reasoning="high", context_files=("docs/features/F001.md",),
             )
             value = {
@@ -291,3 +325,195 @@ class CostPolicyTests(unittest.TestCase):
             summary = contain_command_output(["python3", "-c", "print('x' * 5001)"], cwd=Path(temporary), report_path=path)
             self.assertTrue(path.is_file())
             self.assertTrue(summary["truncated_for_context"])
+
+    def test_feature_policy_schema_and_f004_resolution(self):
+        policy = {
+            "profile": "multi_module_precise",
+            "parent_sessions": 1,
+            "child_sessions": 0,
+            "escalation": {
+                "trigger": "material_architecture_or_authority_ambiguity",
+                "profile": "generic_or_architectural",
+            },
+        }
+        parsed = validate_feature_execution_policy(policy)
+        self.assertEqual((parsed.parent_sessions, parsed.child_sessions), (1, 0))
+        resolved = resolve_execution_profile(
+            workflow="application_feature",
+            deterministic=False,
+            feature={"id": "F004", "execution_policy": policy},
+            project_id="interview-companion",
+        )
+        self.assertEqual(
+            (resolved.profile, resolved.model, resolved.reasoning),
+            ("multi_module_precise", "gpt-5.6-terra", "high"),
+        )
+        with self.assertRaises(QueueError):
+            validate_feature_execution_policy({**policy, "parent_sessions": 0})
+
+    def test_resolution_precedence_and_recorded_escalation(self):
+        feature = {
+            "id": "F004",
+            "execution_policy": {
+                "profile": "multi_module_precise",
+                "parent_sessions": 1,
+                "child_sessions": 0,
+                "escalation": {
+                    "trigger": "material_architecture_or_authority_ambiguity",
+                    "profile": "generic_or_architectural",
+                },
+            },
+        }
+        override = resolve_execution_profile(
+            workflow="application_feature", deterministic=False, feature=feature,
+            override_profile="bounded_precise",
+            escalation_evidence={
+                "recorded": True, "context_complete": True,
+                "trigger": "material_architecture_or_authority_ambiguity",
+                "evidence_id": "e-1",
+            },
+        )
+        self.assertEqual(
+            (override.profile, override.resolution_source),
+            ("bounded_precise", "explicit_run_override"),
+        )
+        environment_failure = resolve_execution_profile(
+            workflow="application_feature", deterministic=False, feature=feature,
+            escalation_evidence={
+                "recorded": True, "context_complete": True,
+                "trigger": "material_architecture_or_authority_ambiguity",
+                "evidence_id": "e-2", "environment_failure": True,
+            },
+        )
+        self.assertEqual(environment_failure.profile, "multi_module_precise")
+        escalated = resolve_execution_profile(
+            workflow="application_feature", deterministic=False, feature=feature,
+            escalation_evidence={
+                "recorded": True, "context_complete": True,
+                "trigger": "material_architecture_or_authority_ambiguity",
+                "evidence_id": "e-3",
+            },
+        )
+        self.assertEqual(
+            (escalated.profile, escalated.resolution_source, escalated.escalation_evidence_id),
+            ("generic_or_architectural", "evidence_based_escalation", "e-3"),
+        )
+        deterministic = resolve_execution_profile(
+            workflow="application_feature", deterministic=True, feature=feature,
+            override_profile="ambiguous_or_authoritative",
+        )
+        self.assertIsNone(deterministic.model)
+
+    def test_f004_profile_context_and_complete_verification_are_separate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            queue_path = repository / project.queue_location
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            queue["features"][0].update({
+                "id": "F004",
+                "title": "Navigation and Workspace Restoration",
+                "spec": "docs/features/F004.md",
+                "execution_policy": {
+                    "profile": "multi_module_precise",
+                    "parent_sessions": 1,
+                    "child_sessions": 0,
+                    "escalation": {
+                        "trigger": "material_architecture_or_authority_ambiguity",
+                        "profile": "generic_or_architectural",
+                    },
+                },
+                "acceptance_criteria": [
+                    "WorkspaceRouter restoration passes accessibility relaunch smoke."
+                ],
+            })
+            (repository / "docs/features/F004.md").write_text(
+                "Use `WorkspaceRouter` and `AppPaths`.\n", encoding="utf-8"
+            )
+            (repository / "Sources").mkdir()
+            (repository / "Sources/WorkspaceRouter.swift").write_text(
+                "struct WorkspaceRouter {}\n", encoding="utf-8"
+            )
+            (repository / "Tests").mkdir()
+            (repository / "Tests/WorkspaceRouterTests.swift").write_text(
+                "// WorkspaceRouter AppPaths\n", encoding="utf-8"
+            )
+            adapter_path = repository / project.validation_source
+            adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
+            adapter["commands"] = {
+                "build": [["swift", "build"]],
+                "test": [["swift", "test"]],
+                "lint": [],
+                "package": [["swift", "build", "-c", "release"]],
+                "validate": [["./script/build_and_run.sh", "--verify"]],
+            }
+            write_json(adapter_path, adapter)
+            write_json(queue_path, queue)
+            plan = build_run_plan(
+                {
+                    "proposed_next_action": "feature_cycle",
+                    "selected_feature": "F004",
+                    "application_mutation_expected": True,
+                },
+                REPOSITORY_ROOT,
+                project=project,
+            )
+            self.assertEqual(
+                (plan["profile"], plan["profile_resolution_source"]),
+                ("multi_module_precise", "selected_feature_profile"),
+            )
+            self.assertEqual(
+                (plan["selected_model"], plan["selected_reasoning_effort"]),
+                ("gpt-5.6-terra", "high"),
+            )
+            self.assertEqual(
+                (plan["parent_session_budget"], plan["child_session_budget"]),
+                (1, 0),
+            )
+            self.assertIn("Sources/WorkspaceRouter.swift", plan["context_pack"]["source_files"])
+            self.assertIn("Tests/WorkspaceRouterTests.swift", plan["selected_tests"])
+            self.assertEqual(len(plan["feature_acceptance_criteria"]), 1)
+            self.assertIn(
+                ["./script/build_and_run.sh", "--verify"],
+                plan["final_feature_acceptance_gates"],
+            )
+            launcher = SessionLauncher(
+                REPOSITORY_ROOT,
+                {"codex": {"executable": "codex", "session_timeout_seconds": 60}},
+            )
+            compatible = CompatibilityResult(
+                classification="compatible", executable="codex", detected_version="1.0.0",
+                required_minimum_version=None, effective_model="gpt-5.6-terra",
+                effective_reasoning="high", policy_source="selected_feature_profile",
+                policy_role="direct-feature-session", compatible=True, diagnostic="ok",
+                remediation="none", validation_command="scripts/conveyor doctor",
+            )
+            request = SessionRequest(
+                "feature_cycle", project, "f004-run", "one_feature", feature="F004",
+                transaction_id="f004-transaction",
+                repository_identity=RepositoryInspector(repository).identity()["repository_id"],
+                starting_branch="codex/m0-foundation", starting_commit=git(repository, "rev-parse", "HEAD"),
+                parent_session_budget=plan["parent_session_budget"],
+                child_session_budget=plan["child_session_budget"],
+                planned_model=plan["selected_model"],
+                planned_reasoning=plan["selected_reasoning_effort"],
+                model_plan_source=plan["profile_resolution_source"],
+                context_files=tuple(plan["context_pack"]["files"]),
+            )
+            with (
+                patch.object(launcher, "compatibility", return_value=compatible),
+                patch.object(launcher, "_verify_zero_child_capability"),
+            ):
+                launch_plan = launcher.plan(request)
+            self.assertIn("gpt-5.6-terra", launch_plan.argv)
+            self.assertIn('model_reasoning_effort="high"', launch_plan.argv)
+
+    def test_application_feature_with_planning_documents_only_fails_before_launch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            (repository / "app.txt").unlink()
+            with self.assertRaisesRegex(SessionError, "no relevant source/test context"):
+                build_run_plan(
+                    {"proposed_next_action": "feature_cycle", "selected_feature": "F001"},
+                    REPOSITORY_ROOT,
+                    project=project,
+                )

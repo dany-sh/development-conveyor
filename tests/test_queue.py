@@ -3,6 +3,7 @@ import unittest
 import json
 from pathlib import Path
 
+from development_conveyor.errors import QueueError
 from development_conveyor.queue import FeatureQueue
 from tests.helpers import synthetic_repository
 
@@ -33,3 +34,19 @@ class QueueTests(unittest.TestCase):
             path.write_text(json.dumps(document), encoding="utf-8")
             feature = FeatureQueue.from_location(repository, project.queue_location).feature("F001")
             self.assertEqual(feature["accepted_commit"], "a" * 40)
+
+    def test_execution_policy_is_validated_when_present(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            path = repository / project.queue_location
+            document = json.loads(path.read_text())
+            document["features"][0]["execution_policy"] = {
+                "profile": "bounded_precise", "parent_sessions": 1, "child_sessions": 0
+            }
+            path.write_text(json.dumps(document), encoding="utf-8")
+            feature = FeatureQueue.from_location(repository, project.queue_location).feature("F001")
+            self.assertEqual(feature["execution_policy"]["profile"], "bounded_precise")
+            document["features"][0]["execution_policy"]["profile"] = "keyword_scored"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(QueueError, "unsupported profile"):
+                FeatureQueue.from_location(repository, project.queue_location)

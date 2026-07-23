@@ -98,6 +98,7 @@ class SessionRequest:
     accepted_commit: str | None = None
     allowed_paths: tuple[str, ...] = ()
     session_kind: str = "parent"
+    parent_session_budget: int | None = None
     child_session_budget: int | None = None
     planned_model: str | None = None
     planned_reasoning: str | None = None
@@ -111,6 +112,18 @@ class SessionRequest:
             raise SessionError("session kind must be parent or child")
         if (self.planned_model is None) != (self.planned_reasoning is None):
             raise SessionError("planned model and reasoning must be supplied together")
+        if self.parent_session_budget is not None and (
+            not isinstance(self.parent_session_budget, int)
+            or isinstance(self.parent_session_budget, bool)
+            or self.parent_session_budget < 1
+        ):
+            raise SessionError("parent session budget must be an integer of at least 1")
+        if self.child_session_budget is not None and (
+            not isinstance(self.child_session_budget, int)
+            or isinstance(self.child_session_budget, bool)
+            or self.child_session_budget < 0
+        ):
+            raise SessionError("child session budget must be a non-negative integer")
         if self.action == "feature_cycle":
             bindings = {
                 "feature": self.feature,
@@ -128,8 +141,10 @@ class SessionRequest:
                     "direct feature session lacks authoritative identity: "
                     + ", ".join(missing)
                 )
-            if self.child_session_budget != 0:
-                raise SessionError("direct feature session requires child_session_budget=0")
+            if self.parent_session_budget is None:
+                raise SessionError("direct feature session requires a parent session budget")
+            if self.child_session_budget is None:
+                raise SessionError("direct feature session requires a child session budget")
 
 
 @dataclass(frozen=True)
@@ -954,6 +969,8 @@ class SessionLauncher:
     def __init__(self, controller_root: Path, configuration: dict[str, Any]):
         self.controller_root = controller_root.resolve()
         self.configuration = configuration
+        self._budget_lock = threading.Lock()
+        self._parent_launch_counts: dict[tuple[str, str, str, str | None], int] = {}
 
     def compatibility(
         self,
@@ -973,10 +990,10 @@ class SessionLauncher:
                 reasoning=planned_reasoning,
                 source=model_plan_source or "cost_aware_execution_plan",
                 role=selection.role,
-                policy_path=selection.policy_path,
+                policy_path=str(self.controller_root / "config/execution-profiles.yaml"),
                 minimum_cli_version=None,
-                policy_valid=selection.policy_valid,
-                policy_error=selection.policy_error,
+                policy_valid=True,
+                policy_error=None,
                 manual_reasoning_authorization=selection.manual_reasoning_authorization,
             )
         return check_compatibility(
@@ -1176,6 +1193,8 @@ class SessionLauncher:
             starting_commit=request.starting_commit or "LEGACY_UNBOUND",
             accepted_commit=request.accepted_commit or "LEGACY_UNBOUND",
             allowed_paths=json.dumps(list(request.allowed_paths), separators=(",", ":")),
+            parent_session_budget=request.parent_session_budget if request.parent_session_budget is not None else "UNBOUNDED",
+            child_session_budget=request.child_session_budget if request.child_session_budget is not None else "UNBOUNDED",
             session_identity=request.session_id or "ACTUAL_CODEX_SESSION_ID_FROM_THIS_LAUNCH",
             mutation_command=mutation_command,
             terminal_schema=terminal_schema,
@@ -1232,6 +1251,10 @@ class SessionLauncher:
         return prompt
 
     def plan(self, request: SessionRequest) -> SessionPlan:
+        if request.action == "feature_cycle" and request.child_session_budget not in {0, None}:
+            raise SessionError(
+                "positive child-session budgets are not enforceable by this direct launcher"
+            )
         prompt = self._render_prompt(request)
         compatibility = self.compatibility(
             request.action,
@@ -1311,7 +1334,24 @@ class SessionLauncher:
     ) -> SessionResult:
         if request.session_kind == "child" and (request.child_session_budget is None or request.child_session_budget <= 0):
             raise SessionError("child session budget exhausted or prohibited before Codex launch")
+        key = (
+            request.project.project_id,
+            request.run_id,
+            request.action,
+            request.feature,
+        )
+        if request.session_kind == "parent" and request.parent_session_budget is not None:
+            with self._budget_lock:
+                launched = self._parent_launch_counts.get(key, 0)
+                if launched >= request.parent_session_budget:
+                    raise SessionError("parent session budget exhausted before Codex launch")
         plan = self.plan(request)
+        if request.session_kind == "parent" and request.parent_session_budget is not None:
+            with self._budget_lock:
+                launched = self._parent_launch_counts.get(key, 0)
+                if launched >= request.parent_session_budget:
+                    raise SessionError("parent session budget exhausted before Codex process invocation")
+                self._parent_launch_counts[key] = launched + 1
         environment = dict(os.environ)
         environment.update({
             "CONVEYOR_RUN_ID": request.run_id,

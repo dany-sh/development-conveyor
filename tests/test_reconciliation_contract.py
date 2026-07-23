@@ -59,6 +59,12 @@ class ContractLauncher:
             queue_path = request.project.repository / request.project.queue_location
             document = json.loads(queue_path.read_text())
             document["features"][0]["status"] = self.mutate_status
+            if self.mutate_status == "ready":
+                document["features"][0]["execution_policy"] = {
+                    "profile": "bounded_precise",
+                    "parent_sessions": 1,
+                    "child_sessions": 0,
+                }
             write_json(queue_path, document)
         value = contract(
             self.classification,

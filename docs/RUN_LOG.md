@@ -710,3 +710,25 @@ This log records model configuration and deterministic deployment evidence. It n
 - Live dry-run evidence: Interview Companion selected deterministic `cache_binding_recovery`, `feature_ready`, F004, source transaction `11a0e09a-9f38-4207-9665-3d202feba2cc`, ledger sequence 166/fingerprint `729a9a2bf40a7f58c749e1e1739e77eaf56a08a50969fc35bdbabc97360216e8`, canonical projection `dfc1c4ff9e2ebb5ea75c6f2721c9a970dc4fee622a258bc5c41d19ea453a5fb8`, queue-bound projection `7e17ae8e2a9996b944a8724cc25f07162aa70a52c094f06dc71e17249db791e1`, zero models, zero children, zero application content commits, and no feature-branch creation.
 - Consistency evidence: Case Manager remained read-only and reported `RECOVERABLE_INCONSISTENCY` because its sequence-19 persisted projection cache is semantically different from the canonical unchanged-ledger rebuild; the stricter shared canonical check no longer masks that cache mismatch.
 - Isolation evidence: Case Manager remained clean on `codex/p0-foundation` at `f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0`; Interview Companion remained clean on `codex/m0-foundation` at `7a754a4b4741b85ac51b8b516cebd25cae1eec69`. Their head-ref fingerprints, cycle-cache hashes, controller ledger hashes, and controller projection-cache hashes were byte-identical before and after all validation, and neither application had a writer lease.
+
+### Model execution — 2026-07-23T00:18:57+00:00
+
+- Agent role: `standalone_controller_feature_profile_implementation`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `user_directed_feature_execution_profiles`
+- Safety and autonomy contracts unchanged: `true`
+
+### Feature-owned execution profiles — 2026-07-22
+
+- Scope and execution: one direct parent `gpt-5.6-sol`/`medium` controller implementation session; zero child sessions, no delegated agent, no application-repository mutation, no real Conveyor resume, no F004 implementation, and no complete controller suite.
+- Executable authority: deterministic zero-model route, explicit run override, selected or reconciled feature policy, validated workflow fallback, then matching recorded evidence-based escalation. Keyword scoring, per-run complexity arithmetic, missing-context escalation, environment-failure escalation, and localized-test-omission escalation are absent.
+- Profiles and budgets: seven fixed schema-validated profiles bind resolved model and reasoning to Codex argv. Parent and child budgets are validated in feature metadata and fail closed at the direct launcher boundary; zero children mechanically disables collaboration surfaces.
+- F004 reconciliation: controller-owned metadata resolves `multi_module_precise` to `gpt-5.6-terra`/`high`, one parent, zero children, with optional `material_architecture_or_authority_ambiguity` escalation to `generic_or_architectural` only from complete recorded evidence.
+- Context and verification: model profile resolution is independent from focused source/test discovery and acceptance-gate planning. Application features with planning documents but no relevant implementation or test context fail before launch.
+- Focused validation: 86 affected tests passed across schema/config loading, queue metadata, profile resolution and precedence, execution planning, actual launcher argv and budgets, context discovery, verification gates, planning transactions, and reconciliation. A legacy CLI-compatibility test expecting a model integration session also fails unchanged at starting commit `2ce0a01`; it is outside this change's affected gate.
+- Requested commands: `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, both registered-project consistency commands, the Interview Companion dry-run, and `git diff --check` exited zero. Interview Companion reported `CONSISTENT`; Case Manager retained its pre-existing read-only `RECOVERABLE_INCONSISTENCY` for stale projection-cache agreement.
+- Live dry-run: Interview Companion selected F004 and exposed `multi_module_precise`, source `reconciled_feature_profile`, `gpt-5.6-terra`, high reasoning, one parent, zero children, 28 focused context files, all 9 acceptance criteria, and 8 final gates. Dry-run executed zero models, children, mutations, tests, builds, leases, or transactions.
+- Isolation and content: Case Manager remained clean on `codex/p0-foundation` at `f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0`; Interview Companion remained clean on `codex/m0-foundation` at `7a754a4b4741b85ac51b8b516cebd25cae1eec69`. Both queue hashes matched their pre-run baselines, no application writer lease existed, and the post-change content audit scanned 177 files with no hard gate.

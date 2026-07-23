@@ -15,11 +15,14 @@ class ConfigurationTests(unittest.TestCase):
         root = Path(temporary.name)
         (root / "config").mkdir()
         (root / "schemas").mkdir()
-        for name in ("conveyor-config.schema.json", "projects.schema.json"):
+        for name in ("conveyor-config.schema.json", "projects.schema.json", "execution-profiles.schema.json"):
             (root / "schemas" / name).write_text((REPOSITORY_ROOT / "schemas" / name).read_text(), encoding="utf-8")
         conveyor = json.loads((REPOSITORY_ROOT / "config/conveyor.yaml").read_text())
         conveyor["approved_environment_variables"] = [variable]
         (root / "config/conveyor.yaml").write_text(json.dumps(conveyor), encoding="utf-8")
+        (root / "config/execution-profiles.yaml").write_text(
+            (REPOSITORY_ROOT / "config/execution-profiles.yaml").read_text(), encoding="utf-8"
+        )
         project = json.loads((REPOSITORY_ROOT / "config/projects.yaml").read_text())["projects"][0]
         project["repository"] = repository
         (root / "config/projects.yaml").write_text(json.dumps({"schema_version": 1, "projects": [project]}), encoding="utf-8")
@@ -49,6 +52,18 @@ class ConfigurationTests(unittest.TestCase):
         path.write_text(json.dumps(value), encoding="utf-8")
         with self.assertRaises(SchemaValidationError):
             load_configuration(root, {"HOME": "/tmp"})
+
+    def test_execution_profile_matrix_is_loaded_and_fixed(self):
+        root = self._root()
+        configuration = load_configuration(root, {"HOME": "/tmp/synthetic-home"})
+        profile = configuration.execution_profiles["profiles"]["multi_module_precise"]
+        self.assertEqual(profile, {"model": "gpt-5.6-terra", "reasoning": "high"})
+        path = root / "config/execution-profiles.yaml"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["profiles"]["multi_module_precise"]["model"] = "gpt-5.6-sol"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaises(ConfigurationError):
+            load_configuration(root, {"HOME": "/tmp/synthetic-home"})
 
     def test_inventory_blocking_warning_patterns_are_typed_registry_policy(self):
         root = self._root()

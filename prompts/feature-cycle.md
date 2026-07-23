@@ -11,7 +11,8 @@ Repository identity: `{repository_identity}`
 Starting branch: `{starting_branch}`
 Starting commit: `{starting_commit}`
 Authorized paths: `{allowed_paths}`
-Child-session budget: `0`
+Parent-session budget: `{parent_session_budget}`
+Child-session budget: `{child_session_budget}`
 
 Implement exactly the selected feature directly in this parent session. Do not
 read or invoke Feature Factory, Milestone Integrator, Product Architect,

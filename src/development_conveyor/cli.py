@@ -22,6 +22,7 @@ from .consistency import ConsistencyChecker
 from .migration import LegacyStateMigrator
 from .integration_executor import execute_integration_plan
 from .feature_result_recovery import FeatureResultRecovery
+from .execution_profiles import PROFILE_NAMES
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
 
@@ -70,15 +71,18 @@ def _parser() -> argparse.ArgumentParser:
     plan = subparsers.add_parser("plan", help="produce a read-only project plan")
     plan.add_argument("--project", required=True)
     plan.add_argument("--dry-run", action="store_true", help="accepted for command symmetry; planning is always read-only")
+    plan.add_argument("--execution-profile", choices=PROFILE_NAMES)
 
     run = subparsers.add_parser("run", help="run or dry-run a project or portfolio cycle")
     run.add_argument("--project")
     run.add_argument("--mode", choices=MODES, default=None)
     run.add_argument("--dry-run", action="store_true")
+    run.add_argument("--execution-profile", choices=PROFILE_NAMES)
 
     resume = subparsers.add_parser("resume", help="resume a persisted active cycle")
     resume.add_argument("--project", required=True)
     resume.add_argument("--dry-run", action="store_true")
+    resume.add_argument("--execution-profile", choices=PROFILE_NAMES)
 
     reconcile = subparsers.add_parser(
         "reconcile", help="validate queue reconciliation and optionally recover Conveyor-owned project state"
@@ -182,7 +186,11 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
     configuration = load_configuration(controller_root)
     registry = ProjectRegistry(configuration)
     launcher = SessionLauncher(controller_root, configuration.conveyor)
-    engine = CycleEngine(configuration, launcher)
+    engine = CycleEngine(
+        configuration,
+        launcher,
+        execution_profile_override=getattr(args, "execution_profile", None),
+    )
 
     if args.command == "validate-config":
         projects = []

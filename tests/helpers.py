@@ -162,6 +162,11 @@ class SyntheticLauncher:
             queue_path = request.project.repository / request.project.queue_location
             queue = json.loads(queue_path.read_text(encoding="utf-8"))
             queue["features"][0]["status"] = "ready"
+            queue["features"][0]["execution_policy"] = {
+                "profile": "bounded_precise",
+                "parent_sessions": 1,
+                "child_sessions": 0,
+            }
             write_json(queue_path, queue)
             legacy = {
                 "schema_version": 1,

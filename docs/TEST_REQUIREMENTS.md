@@ -4,7 +4,7 @@ This table maps every required M1 scenario to executable evidence. The M1-specif
 
 ## M1-002 cost-aware policy
 
-`tests/test_cost_policy.py` covers deterministic zero-model routing, the independent model/reasoning matrix, child-session fail-closed enforcement, focused context packs, changed-path verification selection, complete trusted validation-evidence reuse, and command-output containment. All tests use temporary directories only.
+`tests/test_cost_policy.py` covers deterministic zero-model routing; feature, override, fallback, and recorded-evidence profile precedence; the seven fixed model/reasoning profiles; parent and child launcher budgets; focused context discovery; planning-document-only launch rejection; complete feature acceptance gates; changed-path verification selection; trusted validation-evidence reuse; and command-output containment. All mutation-capable unit scenarios use temporary directories only.
 
 | # | Required scenario | Executable evidence |
 |---:|---|---|
