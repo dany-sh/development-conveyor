@@ -1296,16 +1296,23 @@ if dirty:
             self.accept_kernel(kernel, transaction, identity, classification="FEATURE_ACCEPTED", changed_paths=["app.txt"], next_state="feature_accepted")
             kernel.record_file_mutation_boundary(); kernel.validate(authority=CommandAuthority(), command_results=()); kernel.finalize()
 
-            class RecordingStore:
-                def __init__(self): self.writes = []
-                def write(self, path, value): self.writes.append((path, dict(value)))
-
             engine = CycleEngine(controller_configuration(root, project))
-            store = RecordingStore(); engine.cycle_store = store
             state = {"current_phase": "feature_in_progress"}
-            engine._advance_cycle(Path("cycle.json"), state, "feature_review", RepositoryInspector(repository), "after_commit", kernel=kernel)
-            self.assertEqual([], store.writes)
+            cycle_path = root / "cycle.json"
+            engine._advance_cycle(
+                cycle_path,
+                state,
+                "feature_review",
+                RepositoryInspector(repository),
+                "after_commit",
+                kernel=kernel,
+            )
+            self.assertFalse(cycle_path.exists())
             completion = kernel.complete()
+            ProjectionEngine(
+                kernel.ledger,
+                kernel.ledger.path.parent / "projection-cache.json",
+            ).rebuild(persist_cache=True)
             state.update({
                 "current_feature": completion["projection"].get("selected_feature") or completion["projection"].get("current_feature"),
                 "current_phase": completion["projection"]["current_state"],
@@ -1313,15 +1320,20 @@ if dirty:
                 "last_successful_checkpoint": "terminal",
                 "updated_at": "2026-01-01T00:00:00+00:00",
             })
-            engine._materialize_terminal_cycle_cache(Path("cycle.json"), state, transaction.transaction_id, completion, kernel.ledger)
-            self.assertEqual(1, len(store.writes))
+            engine._materialize_terminal_cycle_cache(
+                cycle_path,
+                state,
+                transaction.transaction_id,
+                completion,
+                kernel.ledger,
+            )
+            signed = json.loads(cycle_path.read_text(encoding="utf-8"))
             terminal_sequence = next(
                 event["sequence"] for event in kernel.ledger.read()
                 if event["transaction_id"] == transaction.transaction_id
                 and event["event_type"] == "TransactionCompleted"
             )
-            self.assertGreaterEqual(store.writes[0][1]["kernel_ledger_sequence"], terminal_sequence)
-            signed = store.writes[0][1]
+            self.assertGreaterEqual(signed["kernel_ledger_sequence"], terminal_sequence)
             self.assertEqual(transaction.transaction_id, signed["kernel_transaction_id"])
             self.assertEqual(signed["kernel_cache_fingerprint"], fingerprint({
                 key: value for key, value in signed.items() if key != "kernel_cache_fingerprint"
@@ -1898,7 +1910,12 @@ if dirty:
             cycle.update({
                 "current_phase": projection["current_state"],
                 "current_feature": projection.get("current_feature"),
-                "selected_feature": selected_feature,
+                "selected_feature": projection.get("selected_next_feature"),
+                "accepted_feature_commit": projection.get(
+                    "accepted_feature_commit"
+                ),
+                "integration_status": projection.get("integration_status"),
+                "next_safe_action": projection.get("allowed_next_action"),
             })
             write_terminal_cycle_cache(
                 inspector.cycle_state_path(),

@@ -87,6 +87,7 @@ class CacheBindingRecoveryTests(unittest.TestCase):
         cycle.update({
             "current_phase": "feature_ready", "current_feature": feature_id,
             "selected_feature": feature_id,
+            "next_safe_action": "feature_cycle",
             "last_successful_checkpoint": "old-terminal", "feature_session_id": "stale-session",
         })
         cycle_path = inspector.cycle_state_path()
@@ -174,6 +175,7 @@ class CacheBindingRecoveryTests(unittest.TestCase):
             "current_phase": "queue_reconciliation",
             "current_feature": None,
             "selected_feature": None,
+            "next_safe_action": "queue_reconciliation",
             "last_successful_checkpoint": "old-terminal",
         })
         cycle_path = inspector.cycle_state_path()
@@ -287,6 +289,164 @@ class CacheBindingRecoveryTests(unittest.TestCase):
             subsequent = engine.run_project(project, "resume", dry_run=True)
             self.assertEqual("feature_execution", subsequent["workflow_type"])
             self.assertEqual("feature_cycle", subsequent["proposed_next_action"])
+
+    def test_successful_integration_materializes_final_projection_semantics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                repository,
+                project,
+                configuration,
+                engine,
+                _,
+                cycle_path,
+            ) = self._fixture(Path(temporary))
+            inspector = RepositoryInspector(repository)
+            identity = inspector.identity()
+            state_root = (
+                configuration.root / "state/projects" / project.project_id
+            )
+            ledger = EvidenceLedger(
+                state_root / "evidence-ledger.jsonl",
+                project_id=project.project_id,
+                repository_identity=identity["repository_id"],
+                repository_path_fingerprint=identity["path_fingerprint"],
+            )
+            integration_transaction = "terminal-milestone-integration"
+            accepted_commit = "b" * 40
+            for event_type, payload in (
+                (
+                    "TransactionStarted",
+                    {
+                        "run_id": "integration-run",
+                        "feature_id": "F001",
+                        "milestone": "M0",
+                        "starting_branch": project.milestone_branch,
+                        "starting_head": inspector.head,
+                        "allowed_mutation_policy": {},
+                    },
+                ),
+                (
+                    "LeaseAcquired",
+                    {
+                        "lease_id": "integration-lease",
+                        "lease_type": "integration_writer",
+                    },
+                ),
+                (
+                    "SnapshotCaptured",
+                    {
+                        "snapshot": {
+                            "branch": inspector.current_branch,
+                            "head": inspector.head,
+                            "clean": True,
+                        }
+                    },
+                ),
+                ("ValidationStarted", {}),
+                ("ValidationPassed", {}),
+                (
+                    "TransactionCompleted",
+                    {
+                        "classification": "INTEGRATED",
+                        "next_state": "feature_integrated",
+                        "feature_id": "F001",
+                        "selected_feature": "F001",
+                        "accepted_feature_commit": accepted_commit,
+                        "integrated_commit": "c" * 40,
+                        "integration_status": "passed",
+                        "terminal_snapshot": {
+                            "branch": inspector.current_branch,
+                            "head": inspector.head,
+                            "clean": True,
+                        },
+                    },
+                ),
+                ("LeaseReleased", {"lease_id": "integration-lease"}),
+            ):
+                ledger.append(
+                    event_type=event_type,
+                    transaction_id=integration_transaction,
+                    workflow_type=WorkflowType.MILESTONE_INTEGRATION,
+                    payload=payload,
+                )
+            projection_engine = ProjectionEngine(
+                ledger, state_root / "projection-cache.json"
+            )
+            projection = projection_engine.rebuild(persist_cache=True)
+            self.assertEqual("queue_reconciliation", projection["current_state"])
+            self.assertIsNone(projection["current_feature"])
+            self.assertIsNone(projection["selected_next_feature"])
+
+            stale_cycle = engine.cycle_store.read(cycle_path)
+            self.assertIsNotNone(stale_cycle)
+            stale_cycle.update(
+                {
+                    "current_phase": "feature_integrated",
+                    "current_feature": "F001",
+                    "selected_feature": "F001",
+                    "accepted_feature_commit": accepted_commit,
+                    "integration_status": "passed",
+                    "next_safe_action": None,
+                }
+            )
+            engine._materialize_terminal_cycle_cache(
+                cycle_path,
+                stale_cycle,
+                integration_transaction,
+                {"projection": projection},
+                ledger,
+            )
+
+            finalized = json.loads(cycle_path.read_text(encoding="utf-8"))
+            self.assertEqual("queue_reconciliation", finalized["current_phase"])
+            self.assertIsNone(finalized["current_feature"])
+            self.assertIsNone(finalized["selected_feature"])
+            self.assertIsNone(finalized["accepted_feature_commit"])
+            self.assertIsNone(finalized["integration_status"])
+            self.assertEqual(
+                "queue_reconciliation", finalized["next_safe_action"]
+            )
+            self.assertEqual(
+                integration_transaction, finalized["kernel_transaction_id"]
+            )
+
+    def test_semantic_disagreement_is_rejected_before_cache_signing(self):
+        binding = CanonicalProjectionBinding(
+            ledger_sequence=330,
+            ledger_fingerprint="a" * 64,
+            projection_fingerprint="b" * 64,
+            canonical_projection={
+                "current_state": "queue_reconciliation",
+                "current_feature": None,
+                "selected_next_feature": None,
+                "accepted_feature_commit": None,
+                "integration_status": None,
+                "allowed_next_action": "queue_reconciliation",
+            },
+        )
+        ledger = mock.Mock()
+        ledger.terminal_event.return_value = {
+            "event_type": "TransactionCompleted",
+            "payload": {"feature_id": "F008"},
+        }
+        with self.assertRaisesRegex(
+            RecoveryError,
+            "semantic state disagrees.*current_phase.*current_feature",
+        ):
+            _bind_terminal_cycle_cache(
+                {
+                    "current_phase": "feature_integrated",
+                    "current_feature": "F008",
+                    "selected_feature": "F008",
+                    "accepted_feature_commit": "c" * 40,
+                    "integration_status": "passed",
+                    "next_safe_action": None,
+                },
+                ledger=ledger,
+                binding=binding,
+                transaction_id="integration-transaction",
+                expected_feature=None,
+            )
 
     def test_exact_legacy_recovery_provenance_is_normalized_and_not_rewritten(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -467,6 +627,30 @@ class CacheBindingRecoveryTests(unittest.TestCase):
             state_root = (
                 configuration.root / "state/projects" / project.project_id
             )
+            canonical = json.loads(
+                (state_root / "projection-cache.json").read_text(encoding="utf-8")
+            )
+            stale = json.loads(cycle_path.read_text(encoding="utf-8"))
+            stale.update(
+                {
+                    "current_phase": "feature_integrated",
+                    "current_feature": "F008",
+                    "selected_feature": "F008",
+                    "accepted_feature_commit": "b" * 40,
+                    "integration_status": "passed",
+                    "next_safe_action": None,
+                    "kernel_transaction_id": transaction_id,
+                    "kernel_ledger_sequence": canonical["ledger_sequence"],
+                    "kernel_ledger_fingerprint": canonical["ledger_fingerprint"],
+                    "kernel_projection_fingerprint": canonical[
+                        "projection_fingerprint"
+                    ],
+                }
+            )
+            unsigned = dict(stale)
+            unsigned.pop("kernel_cache_fingerprint")
+            stale["kernel_cache_fingerprint"] = fingerprint(unsigned)
+            write_json(cycle_path, stale)
             before_ledger = (state_root / "evidence-ledger.jsonl").read_bytes()
             before_projection = (state_root / "projection-cache.json").read_bytes()
             before_cycle = cycle_path.read_bytes()
@@ -492,6 +676,10 @@ class CacheBindingRecoveryTests(unittest.TestCase):
                 planner_observer=lambda: engine.project_plan(project),
             ).check()
             self.assertEqual(
+                "RECOVERABLE_INCONSISTENCY",
+                before_consistency["classification"],
+            )
+            self.assertEqual(
                 ["cycle_cache_binding"],
                 [
                     item["invariant"]
@@ -516,6 +704,11 @@ class CacheBindingRecoveryTests(unittest.TestCase):
             self.assertEqual("queue_reconciliation", cache["current_phase"])
             self.assertIsNone(cache["current_feature"])
             self.assertIsNone(cache["selected_feature"])
+            self.assertIsNone(cache["accepted_feature_commit"])
+            self.assertIsNone(cache["integration_status"])
+            self.assertEqual(
+                "queue_reconciliation", cache["next_safe_action"]
+            )
             self.assertEqual(
                 "cache_binding_recovery_terminal",
                 cache["last_successful_checkpoint"],
@@ -693,6 +886,9 @@ class CacheBindingRecoveryTests(unittest.TestCase):
                 "current_state": "feature_ready",
                 "current_feature": "F004",
                 "selected_next_feature": "F004",
+                "accepted_feature_commit": None,
+                "integration_status": None,
+                "allowed_next_action": "feature_cycle",
             },
         )
         ledger = mock.Mock()
@@ -701,7 +897,14 @@ class CacheBindingRecoveryTests(unittest.TestCase):
             "payload": {"selected_feature": "F004"},
         }
         finalized = _bind_terminal_cycle_cache(
-            {"current_phase": "feature_ready", "current_feature": "F004"},
+            {
+                "current_phase": "feature_ready",
+                "current_feature": "F004",
+                "selected_feature": "F004",
+                "accepted_feature_commit": None,
+                "integration_status": None,
+                "next_safe_action": "feature_cycle",
+            },
             ledger=ledger,
             binding=binding,
             transaction_id="11a0e09a-9f38-4207-9665-3d202feba2cc",

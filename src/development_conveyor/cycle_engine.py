@@ -106,6 +106,8 @@ from .workflow_lease import WorkflowWriterLease
 from .command_authority import CommandAuthority
 from .cycle_cache import (
     LEGACY_CACHE_BINDING_RECOVERY_FIELD,
+    cycle_cache_semantic_mismatches,
+    cycle_cache_semantics_from_projection,
     normalize_cycle_cache_for_rebinding,
     validated_canonical_projection_binding,
     write_terminal_cycle_cache,
@@ -2023,14 +2025,25 @@ class CycleEngine:
         completion: dict[str, Any],
         ledger: EvidenceLedger,
     ) -> None:
+        terminal_projection = completion.get("projection")
+        if not isinstance(terminal_projection, dict):
+            raise RecoveryError(
+                "terminal cycle cache materialization requires its final projection"
+            )
+        cache_state = dict(state)
+        cache_state.update(
+            cycle_cache_semantics_from_projection(terminal_projection)
+        )
+        expected_feature = terminal_projection.get(
+            "selected_next_feature"
+        ) or terminal_projection.get("current_feature")
         write_terminal_cycle_cache(
-            path, state, ledger=ledger,
+            path, cache_state, ledger=ledger,
             projection_engine=ProjectionEngine(
                 ledger, ledger.path.parent / "projection-cache.json"
             ),
             transaction_id=transaction_id,
-            expected_feature=state.get("current_feature"),
-            require_semantic_state=False,
+            expected_feature=expected_feature,
         )
 
     def _write_cycle_cache(
@@ -4902,10 +4915,21 @@ class CycleEngine:
                 "kernel_projection_fingerprint": canonical_binding.projection_fingerprint,
             }.items()
         )
+        semantic_binding_invalid = bool(
+            cycle_cache_semantic_mismatches(
+                cycle, canonical_binding.canonical_projection
+            )
+        )
+        if (
+            ordinary_next_action == "verify_consistency"
+            and self._integration_finalization_recovery_context(project) is not None
+        ):
+            return None
         if (
             cycle_exists
             and not fingerprint_invalid
             and not durable_binding_invalid
+            and not semantic_binding_invalid
             and not legacy_provenance_present
         ):
             return None

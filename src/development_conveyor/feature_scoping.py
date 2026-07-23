@@ -14,7 +14,10 @@ from typing import Any, Iterable
 from .command_authority import CommandAuthority
 from .config import Configuration
 from .contracts import SessionResultEnvelope, TransactionState, WorkflowType
-from .cycle_cache import write_terminal_cycle_cache
+from .cycle_cache import (
+    cycle_cache_semantics_from_projection,
+    write_terminal_cycle_cache,
+)
 from .errors import ConveyorError, QueueError, RecoveryError, SessionError
 from .execution_profiles import validate_feature_execution_policy
 from .kernel import QueueReconciliationAdapter, RecoveryAdapter, WorkflowKernel
@@ -704,6 +707,9 @@ class FeatureScoper:
                 "created_at": utc_now(),
                 "updated_at": utc_now(),
             }
+            cycle_state.update(
+                cycle_cache_semantics_from_projection(terminal["projection"])
+            )
             cache = write_terminal_cycle_cache(
                 inspector.cycle_state_path(),
                 cycle_state,
@@ -1017,6 +1023,9 @@ class FeatureScoper:
             "created_at": utc_now(),
             "updated_at": utc_now(),
         }
+        cycle_state.update(
+            cycle_cache_semantics_from_projection(completed["projection"])
+        )
         cache = write_terminal_cycle_cache(
             inspector.cycle_state_path(),
             cycle_state,

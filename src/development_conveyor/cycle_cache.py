@@ -26,6 +26,15 @@ _LEGACY_CACHE_BINDING_RECOVERY_SCHEMA = {
     },
 }
 
+_SEMANTIC_FIELD_BINDINGS = {
+    "current_phase": "current_state",
+    "current_feature": "current_feature",
+    "selected_feature": "selected_next_feature",
+    "accepted_feature_commit": "accepted_feature_commit",
+    "integration_status": "integration_status",
+    "next_safe_action": "allowed_next_action",
+}
+
 
 @dataclass(frozen=True)
 class CanonicalProjectionBinding:
@@ -44,6 +53,29 @@ class CanonicalProjectionBinding:
             "ledger_fingerprint": self.ledger_fingerprint,
             "projection_fingerprint": self.projection_fingerprint,
         }
+
+
+def cycle_cache_semantics_from_projection(
+    projection: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the active compatibility semantics owned by one projection."""
+
+    return {
+        cache_field: projection.get(projection_field)
+        for cache_field, projection_field in _SEMANTIC_FIELD_BINDINGS.items()
+    }
+
+
+def cycle_cache_semantic_mismatches(
+    state: dict[str, Any],
+    projection: dict[str, Any],
+) -> tuple[str, ...]:
+    """Return active cache fields that disagree with canonical projection."""
+
+    expected = cycle_cache_semantics_from_projection(projection)
+    return tuple(
+        field for field, value in expected.items() if state.get(field) != value
+    )
 
 
 def normalize_cycle_cache_for_rebinding(
@@ -164,7 +196,6 @@ def _bind_terminal_cycle_cache(
     binding: CanonicalProjectionBinding,
     transaction_id: str,
     expected_feature: str | None = None,
-    require_semantic_state: bool = True,
 ) -> dict[str, Any]:
     """Return one finalized cycle cache from a validated canonical binding."""
 
@@ -177,16 +208,10 @@ def _bind_terminal_cycle_cache(
     selected_feature = canonical_projection.get(
         "selected_next_feature"
     ) or canonical_projection.get("current_feature")
-    if require_semantic_state and expected_feature is not None and (
+    if expected_feature is not None and (
         terminal_feature != expected_feature or selected_feature != expected_feature
     ):
         raise RecoveryError("cycle cache selected feature disagrees with terminal projection")
-    if require_semantic_state and (
-        state.get("current_feature") != selected_feature
-        or state.get("current_phase") != canonical_projection.get("current_state")
-    ):
-        raise RecoveryError("cycle cache semantic state disagrees with terminal projection")
-
     finalized = dict(state)
     finalized.pop(LEGACY_CACHE_BINDING_RECOVERY_FIELD, None)
     finalized.update(
@@ -197,6 +222,29 @@ def _bind_terminal_cycle_cache(
             "kernel_projection_fingerprint": binding.projection_fingerprint,
         }
     )
+    semantic_mismatches = cycle_cache_semantic_mismatches(
+        finalized, canonical_projection
+    )
+    identity_mismatches = tuple(
+        field
+        for field, expected in {
+            "kernel_transaction_id": transaction_id,
+            "kernel_ledger_sequence": binding.ledger_sequence,
+            "kernel_ledger_fingerprint": binding.ledger_fingerprint,
+            "kernel_projection_fingerprint": binding.projection_fingerprint,
+        }.items()
+        if finalized.get(field) != expected
+    )
+    if semantic_mismatches:
+        raise RecoveryError(
+            "cycle cache semantic state disagrees with terminal projection: "
+            + ", ".join(semantic_mismatches)
+        )
+    if identity_mismatches:
+        raise RecoveryError(
+            "cycle cache binding disagrees with terminal projection: "
+            + ", ".join(identity_mismatches)
+        )
     finalized.pop("kernel_cache_fingerprint", None)
     signed = dict(finalized)
     finalized["kernel_cache_fingerprint"] = fingerprint(signed)
@@ -211,7 +259,6 @@ def write_terminal_cycle_cache(
     projection_engine: ProjectionEngine,
     transaction_id: str,
     expected_feature: str | None = None,
-    require_semantic_state: bool = True,
 ) -> dict[str, Any]:
     """Atomically write and read back one canonical terminal cache binding."""
 
@@ -226,7 +273,6 @@ def write_terminal_cycle_cache(
         binding=binding,
         transaction_id=transaction_id,
         expected_feature=expected_feature,
-        require_semantic_state=require_semantic_state,
     )
     atomic_write_json(path, finalized)
 
@@ -256,4 +302,12 @@ def write_terminal_cycle_cache(
         != post_write_binding.projection_fingerprint
     ):
         raise RecoveryError("written cycle cache disagrees with canonical projection binding")
+    semantic_mismatches = cycle_cache_semantic_mismatches(
+        persisted, post_write_binding.canonical_projection
+    )
+    if semantic_mismatches:
+        raise RecoveryError(
+            "written cycle cache semantic state disagrees with canonical projection: "
+            + ", ".join(semantic_mismatches)
+        )
     return persisted

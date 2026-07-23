@@ -35,6 +35,7 @@ from .execution_plan import (
 from .feature_branches import canonical_feature_branch
 from .cycle_cache import (
     LEGACY_CACHE_BINDING_RECOVERY_FIELD,
+    cycle_cache_semantic_mismatches,
     normalize_cycle_cache_for_rebinding,
     validated_canonical_projection_binding,
 )
@@ -848,19 +849,21 @@ class ConsistencyChecker:
                         if canonical_binding is not None
                         else canonical_projection
                     )
-                    if cycle_binding_failure is None and (
-                        canonical_cycle_projection is None
-                        or cycle.get("current_phase")
-                        != canonical_cycle_projection.get("current_state")
-                        or cycle.get("current_feature") not in {
-                            canonical_cycle_projection.get("selected_next_feature"),
-                            canonical_cycle_projection.get("current_feature"),
-                        }
-                    ):
-                        cycle_binding_failure = (
-                            "cycle cache semantic state disagrees with the canonical projection"
+                    semantic_mismatches = (
+                        cycle_cache_semantic_mismatches(
+                            cycle, canonical_cycle_projection
                         )
-                        cycle_binding_classification = ConsistencyClassification.CORRUPT_EVIDENCE
+                        if canonical_cycle_projection is not None
+                        else ("canonical_projection",)
+                    )
+                    if cycle_binding_failure is None and semantic_mismatches:
+                        cycle_binding_failure = (
+                            "cycle cache semantic state disagrees with the canonical projection: "
+                            + ", ".join(semantic_mismatches)
+                        )
+                        cycle_binding_classification = (
+                            ConsistencyClassification.RECOVERABLE_INCONSISTENCY
+                        )
                     if cycle_binding_failure is None and cycle["kernel_transaction_id"] not in {
                         event["transaction_id"] for event in ledger_events
                     }:

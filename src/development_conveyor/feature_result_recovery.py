@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .contracts import TransactionState, WorkflowType, fingerprint
-from .cycle_cache import write_terminal_cycle_cache
+from .cycle_cache import (
+    cycle_cache_semantics_from_projection,
+    write_terminal_cycle_cache,
+)
 from .errors import RecoveryError, TransactionError
 from .kernel import FeatureExecutionAdapter, WorkflowKernel
 from .ledger import EvidenceLedger
@@ -534,6 +537,7 @@ class FeatureResultRecovery:
             "kernel_projection_fingerprint": projection["projection_fingerprint"],
             "updated_at": utc_now(),
         })
+        state.update(cycle_cache_semantics_from_projection(projection))
         write_terminal_cycle_cache(
             path, state, ledger=self.ledger, projection_engine=self.projection,
             transaction_id=transaction_id, expected_feature="F003",

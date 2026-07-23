@@ -14,7 +14,10 @@ from .accepted_commit import (
     materialize_acceptance_metadata,
 )
 from .contracts import MutationPolicy, WorkflowType, fingerprint
-from .cycle_cache import write_terminal_cycle_cache
+from .cycle_cache import (
+    cycle_cache_semantics_from_projection,
+    write_terminal_cycle_cache,
+)
 from .errors import RecoveryError
 from .integration_executor import inspect_two_refs
 from .kernel import WorkflowKernel
@@ -404,6 +407,7 @@ class AcceptedCommitRecovery:
                 ],
             }
         )
+        state.update(cycle_cache_semantics_from_projection(projection))
         write_terminal_cycle_cache(
             path,
             state,
