@@ -46,6 +46,60 @@ SESSION_DESCRIPTION: dict[WorkflowType, str] = {
 }
 
 
+@dataclass(frozen=True)
+class ExecutionIdentity:
+    """Workflow-scoped identity used by construction, validation, and status."""
+
+    feature_id: str | None
+    accepted_commit: str | None
+    starting_commit: str | None
+    feature_branch: str | None
+    milestone_branch: str | None
+    human_gate_authoritative: bool
+
+
+def execution_identity(
+    projection: dict[str, Any], workflow: WorkflowType | str | None
+) -> ExecutionIdentity:
+    """Resolve executable identity without allowing historical gates to route work."""
+
+    workflow_value = workflow.value if isinstance(workflow, WorkflowType) else workflow
+    gate = projection.get("human_gate")
+    human_gate_authoritative = bool(
+        projection.get("current_state") == "human_decision_required"
+        and workflow_value == WorkflowType.HUMAN_DECISION_RESOLUTION.value
+        and isinstance(gate, dict)
+    )
+    gate_identity = gate if human_gate_authoritative else {}
+    return ExecutionIdentity(
+        feature_id=(
+            gate_identity.get("feature_id")
+            or gate_identity.get("feature")
+            or projection.get("current_feature")
+            or projection.get("selected_next_feature")
+        ),
+        accepted_commit=(
+            gate_identity.get("accepted_feature_commit")
+            or gate_identity.get("accepted_commit")
+            or projection.get("accepted_feature_commit")
+        ),
+        starting_commit=(
+            gate_identity.get("feature_starting_commit")
+            or gate_identity.get("candidate_validated_planning_commit")
+            or projection.get("selected_feature_starting_commit")
+        ),
+        feature_branch=(
+            gate_identity.get("feature_branch")
+            or projection.get("feature_branch")
+        ),
+        milestone_branch=(
+            gate_identity.get("milestone_branch")
+            or projection.get("milestone_branch")
+        ),
+        human_gate_authoritative=human_gate_authoritative,
+    )
+
+
 def bind_projection_to_queue(
     projection: dict[str, Any], queue: FeatureQueue, milestone_id: str
 ) -> dict[str, Any]:
@@ -236,19 +290,9 @@ class ExecutionPlan:
         if projected_lease is not None and projected_lease != lease:
             raise ProjectionError("projection required lease disagrees with its workflow")
         transaction_mode = "recovery" if active is not None else "fresh"
-        gate = projection.get("human_gate")
-        gate_identity = gate if isinstance(gate, dict) else {}
-        feature_id = (
-            gate_identity.get("feature_id")
-            or gate_identity.get("feature")
-            or projection.get("current_feature")
-            or projection.get("selected_next_feature")
-        )
-        accepted_commit = (
-            gate_identity.get("accepted_feature_commit")
-            or gate_identity.get("accepted_commit")
-            or projection.get("accepted_feature_commit")
-        )
+        identity = execution_identity(projection, workflow)
+        feature_id = identity.feature_id
+        accepted_commit = identity.accepted_commit
         historical = projection.get("historical_integration_outcomes") or []
         integrated_features = {
             item.get("feature_id")
@@ -272,19 +316,6 @@ class ExecutionPlan:
                 raise ProjectionError(
                     "historical accepted commit cannot create a fresh executable plan"
                 )
-        projected_starting_commit = (
-            gate_identity.get("feature_starting_commit")
-            or gate_identity.get("candidate_validated_planning_commit")
-            or projection.get("selected_feature_starting_commit")
-        )
-        projected_feature_branch = (
-            gate_identity.get("feature_branch")
-            or projection.get("feature_branch")
-        )
-        projected_milestone_branch = (
-            gate_identity.get("milestone_branch")
-            or projection.get("milestone_branch")
-        )
         plan = cls(
             project_id=str(projection.get("project_id") or ""),
             ledger_sequence=int(projection.get("ledger_sequence", -1)),
@@ -294,9 +325,9 @@ class ExecutionPlan:
             workflow_type=workflow.value if isinstance(workflow, WorkflowType) else workflow,
             feature_id=feature_id,
             accepted_commit=accepted_commit,
-            starting_commit=projected_starting_commit or starting_commit,
-            feature_branch=projected_feature_branch or feature_branch,
-            milestone_branch=projected_milestone_branch or milestone_branch,
+            starting_commit=identity.starting_commit or starting_commit,
+            feature_branch=identity.feature_branch or feature_branch,
+            milestone_branch=identity.milestone_branch or milestone_branch,
             transaction_mode=transaction_mode,
             session_resume_eligible=resume,
             session_to_resume=session_to_resume,
@@ -326,19 +357,7 @@ class ExecutionPlan:
             if active is None:
                 raise ProjectionError("execution plan names an absent active transaction")
             expected_workflow = WorkflowType(str(active["workflow_type"]))
-        gate = projection.get("human_gate")
-        gate_identity = gate if isinstance(gate, dict) else {}
-        expected_feature = (
-            gate_identity.get("feature_id")
-            or gate_identity.get("feature")
-            or projection.get("current_feature")
-            or projection.get("selected_next_feature")
-        )
-        expected_accepted_commit = (
-            gate_identity.get("accepted_feature_commit")
-            or gate_identity.get("accepted_commit")
-            or projection.get("accepted_feature_commit")
-        )
+        identity = execution_identity(projection, expected_workflow)
         checks = {
             "project_id": self.project_id == projection.get("project_id"),
             "ledger_sequence": self.ledger_sequence == projection.get("ledger_sequence"),
@@ -349,8 +368,8 @@ class ExecutionPlan:
                 expected_workflow.value
                 if isinstance(expected_workflow, WorkflowType) else expected_workflow
             ),
-            "feature_id": self.feature_id == expected_feature,
-            "accepted_commit": self.accepted_commit == expected_accepted_commit,
+            "feature_id": self.feature_id == identity.feature_id,
+            "accepted_commit": self.accepted_commit == identity.accepted_commit,
             "session_resume_eligible": self.session_resume_eligible
             == bool(projection.get("session_resume_eligible")),
             "lease_type": self.lease_type == (
@@ -361,25 +380,12 @@ class ExecutionPlan:
                 )
             ),
         }
-        projected_start = (
-            gate_identity.get("feature_starting_commit")
-            or gate_identity.get("candidate_validated_planning_commit")
-            or projection.get("selected_feature_starting_commit")
-        )
-        projected_feature_branch = (
-            gate_identity.get("feature_branch")
-            or projection.get("feature_branch")
-        )
-        projected_milestone_branch = (
-            gate_identity.get("milestone_branch")
-            or projection.get("milestone_branch")
-        )
-        if projected_start is not None:
-            checks["starting_commit"] = self.starting_commit == projected_start
-        if projected_feature_branch is not None:
-            checks["feature_branch"] = self.feature_branch == projected_feature_branch
-        if projected_milestone_branch is not None:
-            checks["milestone_branch"] = self.milestone_branch == projected_milestone_branch
+        if identity.starting_commit is not None:
+            checks["starting_commit"] = self.starting_commit == identity.starting_commit
+        if identity.feature_branch is not None:
+            checks["feature_branch"] = self.feature_branch == identity.feature_branch
+        if identity.milestone_branch is not None:
+            checks["milestone_branch"] = self.milestone_branch == identity.milestone_branch
         if not all(checks.values()):
             failed = ", ".join(key for key, passed in checks.items() if not passed)
             raise ProjectionError(f"execution plan disagrees with authoritative projection: {failed}")
@@ -462,30 +468,13 @@ def authoritative_status_fields(
         "legacy_sessions_that_would_launch": legacy_plan.get("sessions_that_would_launch", []),
     }
     projection_gate = projection.get("human_gate")
-    identity_gate = (
-        projection_gate if isinstance(projection_gate, dict) else {}
-    )
-    status_feature = (
-        identity_gate.get("feature_id")
-        or identity_gate.get("feature")
-        or executable.feature_id
-    )
-    status_accepted_commit = (
-        identity_gate.get("accepted_feature_commit")
-        or identity_gate.get("accepted_commit")
-        or executable.accepted_commit
-    )
-    status_starting_commit = (
-        identity_gate.get("feature_starting_commit")
-        or identity_gate.get("candidate_validated_planning_commit")
-        or executable.starting_commit
-    )
-    status_feature_branch = (
-        identity_gate.get("feature_branch") or executable.feature_branch
-    )
-    status_milestone_branch = (
-        identity_gate.get("milestone_branch") or executable.milestone_branch
-    )
+    preserved_gate = projection_gate if isinstance(projection_gate, dict) else {}
+    identity = execution_identity(projection, workflow)
+    status_feature = identity.feature_id or executable.feature_id
+    status_accepted_commit = identity.accepted_commit or executable.accepted_commit
+    status_starting_commit = identity.starting_commit or executable.starting_commit
+    status_feature_branch = identity.feature_branch or executable.feature_branch
+    status_milestone_branch = identity.milestone_branch or executable.milestone_branch
     ordinary_resume_allowed = workflow is not None and workflow not in {
         WorkflowType.HUMAN_DECISION_RESOLUTION,
         WorkflowType.RECOVERY,
@@ -514,8 +503,8 @@ def authoritative_status_fields(
         "application_mutation_expected": executable.application_mutation_expected,
         "next_state_on_success": executable.next_state_on_success,
         "state_source": "evidence_ledger_projection",
-        "human_gate": identity_gate or None,
-        "human_decision_required": identity_gate or None,
+        "human_gate": preserved_gate or None,
+        "human_decision_required": preserved_gate or None,
         "kernel_projection": projection,
         "executable_plan": executable.to_dict(),
         "execution_plan": executable.to_dict(),
@@ -590,31 +579,12 @@ def execution_plan_projection_agreement(
     action = projection.get("allowed_next_action")
     expected_sessions = executable.sessions_that_would_launch
     expected_lease = projection.get("required_lease") or executable.lease_type
-    gate = status.get("integration_gate")
-    if not isinstance(gate, dict):
-        gate = status.get("human_gate")
-    identity_gate = gate if isinstance(gate, dict) else {}
-    expected_feature = (
-        identity_gate.get("feature_id")
-        or identity_gate.get("feature")
-        or executable.feature_id
-    )
-    expected_accepted_commit = (
-        identity_gate.get("accepted_feature_commit")
-        or identity_gate.get("accepted_commit")
-        or executable.accepted_commit
-    )
-    expected_starting_commit = (
-        identity_gate.get("feature_starting_commit")
-        or identity_gate.get("candidate_validated_planning_commit")
-        or executable.starting_commit
-    )
-    expected_feature_branch = (
-        identity_gate.get("feature_branch") or executable.feature_branch
-    )
-    expected_milestone_branch = (
-        identity_gate.get("milestone_branch") or executable.milestone_branch
-    )
+    identity = execution_identity(projection, executable.workflow)
+    expected_feature = identity.feature_id or executable.feature_id
+    expected_accepted_commit = identity.accepted_commit or executable.accepted_commit
+    expected_starting_commit = identity.starting_commit or executable.starting_commit
+    expected_feature_branch = identity.feature_branch or executable.feature_branch
+    expected_milestone_branch = identity.milestone_branch or executable.milestone_branch
     checks = {
         "kernel_current_state": status.get("current_state") == projection.get("current_state"),
         "derived_state": status.get("derived_state") == projection.get("current_state"),

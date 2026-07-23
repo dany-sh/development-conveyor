@@ -22,6 +22,7 @@ from .errors import AmbiguousLockError
 from .execution_plan import (
     ExecutionPlan,
     bind_projection_to_queue,
+    execution_identity,
     execution_plan_projection_agreement,
     integrated_feature_execution_checks,
 )
@@ -990,6 +991,25 @@ class ConsistencyChecker:
                                 == observed_executable.accepted_commit
                             ] == [observed_executable.feature_branch]
                         )
+                        projected_identity = execution_identity(
+                            observed_projection, observed_executable.workflow
+                        )
+                        authoritative_branch_binding = bool(
+                            observed_executable.workflow_type
+                            == WorkflowType.MILESTONE_INTEGRATION.value
+                            and observed_projection.get("current_state")
+                            == "integration_ready"
+                            and projected_identity.feature_id
+                            == observed_executable.feature_id
+                            and projected_identity.accepted_commit
+                            == observed_executable.accepted_commit
+                            and observed_executable.feature_branch
+                            and observed_executable.accepted_commit
+                            and self.inspector.rev_parse(
+                                observed_executable.feature_branch, check=False
+                            )
+                            == observed_executable.accepted_commit
+                        )
                         canonical_planned_branch = (
                             canonical_feature_branch(self.project, planned_feature)
                             if isinstance(planned_feature, dict) else None
@@ -1005,14 +1025,28 @@ class ConsistencyChecker:
                             and self.inspector.head == observed_executable.starting_commit
                         )
                         live_checks["planned_feature_branch"] = bool(
-                            canonical_planned_branch == observed_executable.feature_branch
-                            and (fresh_absent_branch or recovered_branch_binding or bool(
+                            recovered_branch_binding
+                            or (
+                                canonical_planned_branch
+                                == observed_executable.feature_branch
+                                and (
+                                    fresh_absent_branch
+                                    or bool(
+                                        canonical_planned_branch
+                                        and self.inspector.ref_exists(
+                                            canonical_planned_branch
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                        live_checks["planned_feature_branch_state"] = (
+                            recovered_branch_binding
+                            or fresh_absent_branch
+                            or bool(
                                 canonical_planned_branch
                                 and self.inspector.ref_exists(canonical_planned_branch)
-                            ))
-                        )
-                        live_checks["planned_feature_branch_state"] = fresh_absent_branch or bool(
-                            canonical_planned_branch and self.inspector.ref_exists(canonical_planned_branch)
+                            )
                         )
                         agreement_evidence["planned_feature_branch_state"] = (
                             "planned_branch_absent_and_ready_for_creation"
@@ -1061,7 +1095,10 @@ class ConsistencyChecker:
                                     and resolution.commit == observed_executable.accepted_commit
                                     or planned_feature
                                     and not planned_feature.get("accepted_commit")
-                                    and recovered_branch_binding
+                                    and (
+                                        recovered_branch_binding
+                                        or authoritative_branch_binding
+                                    )
                                 )
                     agreement_evidence["checks"].update(live_checks)
                     live_agreement = all(live_checks.values())

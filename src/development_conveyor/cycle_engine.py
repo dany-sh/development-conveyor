@@ -624,7 +624,10 @@ class CycleEngine:
         project: Project,
         projection: dict[str, Any],
     ) -> dict[str, Any] | None:
-        if projection.get("active_transaction") is not None or projection.get("current_state") == "feature_ready":
+        if (
+            projection.get("active_transaction") is not None
+            or projection.get("current_state") != "validation_failed"
+        ):
             return None
         latest = next((item for item in reversed(projection.get("transactions") or [])
             if item.get("workflow_type") == WorkflowType.QUEUE_RECONCILIATION.value
