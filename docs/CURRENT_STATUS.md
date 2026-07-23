@@ -4,6 +4,10 @@ Last updated: 2026-07-22
 
 ## Summary
 
+The transient cache-recovery provenance repair is prepared on `codex/m1-2-transient-cache-recovery-provenance` from starting commit `f85b84a9de80864dabb6105b8a3a152954817620`. Newly materialized compatibility cycle caches no longer persist `cache_binding_recovery`. Deterministic rebinding alone may normalize the one legacy object when it contains exactly non-empty `source_transaction` and `recovery_run_id` strings; every other unsupported top-level field and every malformed or extra legacy nested field still fails closed.
+
+Completed Interview Companion planning recovery remains authoritative and is not repeated. Its paused/no-feature projection routes the stale compatibility cache to zero-model `cache_binding_recovery`; the later user-applied recovery will rewrite only ignored `.factory/conveyor-state.json` and stop.
+
 The M1-002 accepted-commit finalization repair is prepared on `codex/m1-2-finalized-accepted-commit` from starting commit `b6d412553b3efc42637065dbba7d926aebc8aa8f`. Normal feature execution now preserves the model-produced commit as candidate evidence and deterministically reconstructs one authoritative direct-child accepted commit containing the validated implementation plus the established acceptance metadata. `accepted_commit: SELF`, exact parent/ref checks, authorized metadata-only tree comparison, and the existing immutable two-ref integration validation all pass before the controller may project `integration_ready`.
 
 The seven named profiles are schema-validated, newly readied features must provide an `execution_policy`, and historical ready features retain a validated fallback. Context discovery and verification planning remain independent from profile selection; planning-only application features fail before launch. No keyword scoring, per-run complexity arithmetic, or broad automatic escalation was added.
@@ -20,12 +24,12 @@ M1 — Transactional workflow kernel
 
 ## Active feature
 
-M1-002 — Immutable accepted-commit finalization (`controller repair prepared`)
+M1-002 — Transient cache-recovery provenance (`controller repair prepared`)
 
 ## Next boundary
 
-Commit the controller repair, then run only the exact transactional F004 accepted-commit recovery. Leave milestone integration for the configured human-reviewed workflow. Do not merge a default branch, push, tag, publish, deploy, release, run a real Conveyor resume, or rerun F004 implementation.
+Commit the controller repair. The user may later run the already-planned cache-binding recovery, which must rewrite only the ignored compatibility cache and stop. Do not repeat planning recovery, merge a default branch, push, tag, publish, deploy, release, run a real Conveyor resume, or rerun F004 implementation.
 
 ## Validation scope
 
-Validation is limited to affected finalization, acceptance, Git identity, protected recovery, integration-preflight, projection, consistency, duplicate-integration, and dry-run tests; `compileall`; configuration validation; Interview Companion consistency; the Interview Companion resume dry-run; and `git diff --check`. Application tests, the complete controller suite, a real `resume`, and milestone integration are intentionally excluded.
+Validation is limited to affected cycle-cache, cache-binding recovery, planning-recovery, consistency, projection, and routing tests; `compileall`; configuration validation; Interview Companion consistency; the Interview Companion resume dry-run; and `git diff --check`. Application tests, the complete controller suite, a real `resume`, live cache recovery, and milestone integration are intentionally excluded.

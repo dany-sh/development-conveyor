@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from development_conveyor.contracts import TransactionState, WorkflowType
+from development_conveyor.contracts import TransactionState, WorkflowType, fingerprint
 from development_conveyor.consistency import ConsistencyChecker
 from development_conveyor.cycle_engine import CycleEngine
 from development_conveyor.errors import LockError, RecoveryError, SessionError
@@ -35,6 +35,7 @@ RUN_ID = "planning-recovery-run"
 SESSION_ID = "019f77e1-c551-7f00-9409-2fff9f6ee79b"
 ORIGINAL_TRANSACTION_ID = "50824b65-bfc2-4289-a4e7-3538ef892324"
 NO_READY_TRANSACTION_ID = "e928db79-488e-4184-966d-2a32938fd91f"
+EARLIER_CACHE_RECOVERY_TRANSACTION_ID = "earlier-cache-recovery-transaction"
 SEVEN_PATHS = [
     "docs/CURRENT_STATUS.md",
     "docs/FEATURE_CATALOG.md",
@@ -260,6 +261,56 @@ class PlanningTransactionTests(unittest.TestCase):
             repository_identity=identity["repository_id"],
             repository_path_fingerprint=identity["path_fingerprint"],
         )
+        for event_type, payload in (
+            (
+                "TransactionStarted",
+                {
+                    "run_id": "earlier-cache-recovery",
+                    "feature_id": None,
+                    "milestone": "P0",
+                    "starting_branch": project.milestone_branch,
+                    "starting_head": inspector.head,
+                    "allowed_mutation_policy": {},
+                },
+            ),
+            (
+                "LeaseAcquired",
+                {
+                    "lease_id": "earlier-cache-recovery-lease",
+                    "lease_type": "recovery_writer",
+                },
+            ),
+            (
+                "SnapshotCaptured",
+                {
+                    "snapshot": {
+                        "branch": inspector.current_branch,
+                        "head": inspector.head,
+                        "clean": True,
+                    }
+                },
+            ),
+            ("ValidationStarted", {}),
+            ("ValidationPassed", {}),
+            (
+                "TransactionCompleted",
+                {
+                    "classification": "RECOVERY_APPLIED",
+                    "next_state": "queue_reconciliation",
+                    "selected_feature": None,
+                },
+            ),
+            (
+                "LeaseReleased",
+                {"lease_id": "earlier-cache-recovery-lease"},
+            ),
+        ):
+            ledger.append(
+                event_type=event_type,
+                transaction_id=EARLIER_CACHE_RECOVERY_TRANSACTION_ID,
+                workflow_type=WorkflowType.RECOVERY,
+                payload=payload,
+            )
         projection = ProjectionEngine(ledger, state_root / "projection-cache.json")
         lease = WorkflowWriterLease(repository / ".factory/locks/writer.json")
         adapter = QueueReconciliationAdapter(
@@ -976,6 +1027,18 @@ class PlanningTransactionTests(unittest.TestCase):
             )
             self.assertTrue(any(event["event_type"] == "RecoveryApplied" for event in recovery_events))
             self.assertTrue(any(event["event_type"] == "TransactionCompleted" for event in recovery_events))
+            earlier_terminal = ledger.terminal_event(
+                EARLIER_CACHE_RECOVERY_TRANSACTION_ID
+            )
+            planning_terminal = ledger.terminal_event(
+                result["recovery_transaction_id"]
+            )
+            self.assertIsNotNone(earlier_terminal)
+            self.assertIsNotNone(planning_terminal)
+            self.assertLess(
+                earlier_terminal["sequence"],
+                planning_terminal["sequence"],
+            )
             cycle = json.loads((repository / ".factory/conveyor-state.json").read_text())
             self.assertEqual(result["recovery_transaction_id"], cycle["kernel_transaction_id"])
             self.assertEqual("P0-003", cycle["current_feature"])
@@ -989,6 +1052,12 @@ class PlanningTransactionTests(unittest.TestCase):
                     expected_plan=expected_plan["planning_finalization_recovery"],
                 )
             self.assertEqual(git(repository, "rev-list", "--count", f"{starting_head}..HEAD"), "1")
+            subsequent = engine.run_project(project, "resume", dry_run=True)
+            self.assertNotEqual(
+                "planning_finalization",
+                subsequent.get("proposed_next_action"),
+            )
+            self.assertNotIn("planning_finalization_recovery", subsequent)
 
     def test_24_milestone_local_and_global_counts_are_distinct(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1182,6 +1251,46 @@ class PlanningTransactionTests(unittest.TestCase):
                     repository, project.queue_location
                 ).summary("M0")["reconciliation_classification"],
                 "reconciled_no_ready_work",
+            )
+            cycle_path = repository / ".factory/conveyor-state.json"
+            cycle = json.loads(cycle_path.read_text(encoding="utf-8"))
+            cycle["cache_binding_recovery"] = {
+                "source_transaction": "earlier-cache-recovery",
+                "recovery_run_id": "cache-recovery-earlier",
+            }
+            unsigned = dict(cycle)
+            unsigned.pop("kernel_cache_fingerprint")
+            cycle["kernel_cache_fingerprint"] = fingerprint(unsigned)
+            write_json(cycle_path, cycle)
+            head_before_dry_run = git(repository, "rev-parse", "HEAD")
+            ledger_before_dry_run = ledger.path.read_bytes()
+            completed_recovery_events = [
+                event
+                for event in ledger.read()
+                if event["transaction_id"] == result["recovery_transaction_id"]
+            ]
+
+            dry_run = engine.run_project(project, "resume", dry_run=True)
+            self.assertEqual("cache_binding_recovery", dry_run["workflow_type"])
+            self.assertEqual("paused", dry_run["current_state"])
+            self.assertIsNone(dry_run["current_feature"])
+            self.assertIsNone(dry_run["selected_feature"])
+            self.assertEqual(0, dry_run["models_planned"])
+            self.assertEqual(0, dry_run["child_sessions_planned"])
+            self.assertEqual([], dry_run["model_sessions_that_would_launch"])
+            self.assertEqual([], dry_run["child_sessions_that_would_launch"])
+            self.assertEqual(
+                head_before_dry_run,
+                git(repository, "rev-parse", "HEAD"),
+            )
+            self.assertEqual(ledger_before_dry_run, ledger.path.read_bytes())
+            self.assertEqual(
+                completed_recovery_events,
+                [
+                    event
+                    for event in ledger.read()
+                    if event["transaction_id"] == result["recovery_transaction_id"]
+                ],
             )
 
 

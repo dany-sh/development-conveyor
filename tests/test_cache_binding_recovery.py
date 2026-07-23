@@ -278,6 +278,7 @@ class CacheBindingRecoveryTests(unittest.TestCase):
                 cache["kernel_projection_fingerprint"],
             )
             self.assertEqual("cache_binding_recovery_terminal", cache["last_successful_checkpoint"])
+            self.assertNotIn("cache_binding_recovery", cache)
             consistency = ConsistencyChecker(
                 controller_root=configuration.root, project=project,
                 planner_observer=lambda: engine.project_plan(project),
@@ -286,6 +287,87 @@ class CacheBindingRecoveryTests(unittest.TestCase):
             subsequent = engine.run_project(project, "resume", dry_run=True)
             self.assertEqual("feature_execution", subsequent["workflow_type"])
             self.assertEqual("feature_cycle", subsequent["proposed_next_action"])
+
+    def test_exact_legacy_recovery_provenance_is_normalized_and_not_rewritten(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project, _, engine, transaction_id, cycle_path = self._fixture(
+                Path(temporary)
+            )
+            cache = json.loads(cycle_path.read_text(encoding="utf-8"))
+            cache["cache_binding_recovery"] = {
+                "source_transaction": "earlier-cache-recovery",
+                "recovery_run_id": "cache-recovery-earlier",
+            }
+            unsigned = dict(cache)
+            unsigned.pop("kernel_cache_fingerprint")
+            cache["kernel_cache_fingerprint"] = fingerprint(unsigned)
+            write_json(cycle_path, cache)
+
+            plan = engine.run_project(project, "resume", dry_run=True)
+            self.assertEqual("cache_binding_recovery", plan["workflow_type"])
+            self.assertEqual(transaction_id, plan["source_transaction"])
+            result = engine.run_project(project, "resume")
+            self.assertEqual("cache_binding_recovered", result["outcome"])
+            self.assertEqual(transaction_id, result["source_transaction"])
+            self.assertTrue(result["recovery_run_id"])
+
+            rewritten = json.loads(cycle_path.read_text(encoding="utf-8"))
+            self.assertNotIn("cache_binding_recovery", rewritten)
+            rewritten_unsigned = dict(rewritten)
+            claimed = rewritten_unsigned.pop("kernel_cache_fingerprint")
+            self.assertEqual(claimed, fingerprint(rewritten_unsigned))
+
+    def test_unrelated_unknown_top_level_and_legacy_nested_fields_fail_closed(self):
+        mutations = {
+            "unknown_top_level": lambda cache: cache.update(
+                {"unrelated_recovery_metadata": {"value": "unsupported"}}
+            ),
+            "legacy_empty_string": lambda cache: cache.update(
+                {
+                    "cache_binding_recovery": {
+                        "source_transaction": "",
+                        "recovery_run_id": "cache-recovery-earlier",
+                    }
+                }
+            ),
+            "legacy_extra_nested_field": lambda cache: cache.update(
+                {
+                    "cache_binding_recovery": {
+                        "source_transaction": "earlier-cache-recovery",
+                        "recovery_run_id": "cache-recovery-earlier",
+                        "extra": "unsupported",
+                    }
+                }
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                repository, project, configuration, engine, _, cycle_path = self._fixture(
+                    Path(temporary)
+                )
+                cache = json.loads(cycle_path.read_text(encoding="utf-8"))
+                mutate(cache)
+                unsigned = dict(cache)
+                unsigned.pop("kernel_cache_fingerprint")
+                cache["kernel_cache_fingerprint"] = fingerprint(unsigned)
+                write_json(cycle_path, cache)
+                before = cycle_path.read_bytes()
+
+                self.assertIsNone(engine._cache_binding_recovery_plan(project))
+                consistency = ConsistencyChecker(
+                    controller_root=configuration.root,
+                    project=project,
+                    planner_observer=lambda: engine.project_plan(project),
+                ).check()
+                failed = {
+                    item["invariant"]: item
+                    for item in consistency["failed_invariants"]
+                }
+                self.assertEqual(
+                    "CORRUPT_EVIDENCE",
+                    failed["cycle_cache_binding"]["classification"],
+                )
+                self.assertEqual(before, cycle_path.read_bytes())
 
     def test_unchanged_canonical_rebuild_is_stable_and_read_only(self):
         with tempfile.TemporaryDirectory() as temporary:

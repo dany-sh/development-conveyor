@@ -772,3 +772,23 @@ This log records model configuration and deterministic deployment evidence. It n
 - Requested commands: `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, `scripts/conveyor verify-consistency --project interview-companion --json`, `scripts/conveyor resume --project interview-companion --dry-run`, and `git diff --check` exited zero. Consistency reported only the expected recoverable `cycle_cache_binding` invariant; dry-run selected `cache_binding_recovery`.
 - Isolation evidence: Interview Companion remained clean on `codex/m0-foundation` at `f0b210baab63ece29a307934907124a56097e89d`; Case Manager remained clean on `codex/p0-foundation` at `f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0`. Interview Companion ledger sequence remained 237 with SHA-256 `953f36dd20ffb57216bb10eb23daa2045f2ca0b2372cf27747a7590228c6223e`; its projection cache and repository cycle-cache hashes also remained unchanged.
 - Content audit: the `personal_private` profile scan covered all 132 tracked controller files and found no high-confidence secret or tracked-binary gate.
+
+### Model execution — 2026-07-23T06:14:39+00:00
+
+- Agent role: `development-conveyor`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `transient_cache_recovery_provenance`
+- Safety and autonomy contracts unchanged: `true`
+
+### Transient cache-recovery provenance — 2026-07-22
+
+- Scope and execution: one direct parent controller-maintenance session; zero child or delegated sessions, no application tests, no real Conveyor resume, no planning recovery rerun, no live cache recovery, no milestone integration, and no complete controller suite.
+- Defect and correction: `CycleEngine._apply_cache_binding_recovery` no longer writes `cache_binding_recovery` into durable compatibility cycle state. Cache finalization defensively removes the transient field before signing, while the command result continues to expose `source_transaction` and `recovery_run_id`.
+- Legacy normalization: deterministic cache rebinding alone accepts the historical top-level object when it contains exactly non-empty `source_transaction` and `recovery_run_id` strings. The remaining cache must satisfy the common cycle schema; unrelated top-level fields, empty legacy values, and extra legacy nested fields are corrupt evidence. Canonical rewrites omit the legacy field.
+- Planning preservation and routing: focused fixtures prove planning finalization can follow an earlier recovery transaction, cannot repeat after completion, and a completed paused/no-feature planning recovery routes a legacy cache to `cache_binding_recovery` with zero model and child sessions while preserving application HEAD and ledger bytes.
+- Focused validation: 41 cache-binding and planning-recovery tests passed in `71.523s`; 17 additional recovery, execution-identity, projection, consistency, cache, and routing tests passed in `18.940s`. An initial over-broad test for an unrelated existing `oneOf` schema branch was corrected to the requested legacy normalization boundary before the clean rerun.
+- Requested commands: `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, `scripts/conveyor verify-consistency --project interview-companion --json`, `scripts/conveyor resume --project interview-companion --dry-run`, and `git diff --check` exited zero. Consistency reported only recoverable `cycle_cache_binding`; dry-run selected `cache_binding_recovery`, `current_state: paused`, null current/selected features, and empty model/child session lists.
+- Isolation and content: Interview Companion remained clean on `codex/m0-foundation` at `5fdff173847507e6490fdbba0ceb4c064f6b8f6f`. Its 259-record ledger, projection cache, and compatibility cycle cache retained exact pre-run SHA-256 hashes; the focused eight-file controller diff contained no high-confidence credential or private-key material.

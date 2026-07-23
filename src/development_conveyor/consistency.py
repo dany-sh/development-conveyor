@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .contracts import ConsistencyClassification, WorkflowType, fingerprint
-from .errors import CorruptEvidenceError, ProjectionError, QueueError, RecoveryError
+from .errors import (
+    CorruptEvidenceError,
+    ProjectionError,
+    QueueError,
+    RecoveryError,
+    SchemaValidationError,
+)
 from .ledger import EvidenceLedger, TERMINAL_EVENT_TYPES
 from .locks import inspect_repository_writer_lock
 from .migration import LegacyStateMigrator
@@ -27,7 +33,12 @@ from .execution_plan import (
     integrated_feature_execution_checks,
 )
 from .feature_branches import canonical_feature_branch
-from .cycle_cache import validated_canonical_projection_binding
+from .cycle_cache import (
+    LEGACY_CACHE_BINDING_RECOVERY_FIELD,
+    normalize_cycle_cache_for_rebinding,
+    validated_canonical_projection_binding,
+)
+from .logging import JsonStateStore
 
 
 SEVERITY_ORDER = {
@@ -78,6 +89,9 @@ class ConsistencyChecker:
             repository_path_fingerprint=identity["path_fingerprint"],
         )
         self.projection = ProjectionEngine(self.ledger, project_root / "projection-cache.json")
+        self.cycle_schema = JsonStateStore(
+            self.controller_root / "schemas/cycle-state.schema.json"
+        ).schema
 
     def check(self) -> dict[str, Any]:
         results: list[InvariantResult] = []
@@ -777,7 +791,18 @@ class ConsistencyChecker:
             cycle_binding_failure = "cycle cache is missing"
         elif cycle_path.exists() and integrity is not None:
             try:
-                cycle = json.loads(cycle_path.read_text(encoding="utf-8"))
+                loaded_cycle = json.loads(cycle_path.read_text(encoding="utf-8"))
+                if not isinstance(loaded_cycle, dict):
+                    raise ValueError("cycle cache is not an object")
+                legacy_provenance_present = (
+                    LEGACY_CACHE_BINDING_RECOVERY_FIELD in loaded_cycle
+                )
+                unsigned = dict(loaded_cycle)
+                claimed_cache = unsigned.pop("kernel_cache_fingerprint", None)
+                cycle = normalize_cycle_cache_for_rebinding(
+                    loaded_cycle,
+                    cycle_schema=self.cycle_schema,
+                )
                 keys = {
                     "kernel_transaction_id", "kernel_ledger_sequence", "kernel_ledger_fingerprint",
                     "kernel_projection_fingerprint", "kernel_cache_fingerprint",
@@ -787,8 +812,6 @@ class ConsistencyChecker:
                     raise ValueError("cycle cache has a partial kernel binding")
                 if present:
                     canonical_binding = None
-                    unsigned = dict(cycle)
-                    claimed_cache = unsigned.pop("kernel_cache_fingerprint")
                     if claimed_cache != fingerprint(unsigned):
                         cycle_binding_failure = "cycle cache fingerprint is invalid"
                         cycle_binding_classification = ConsistencyClassification.CORRUPT_EVIDENCE
@@ -851,8 +874,19 @@ class ConsistencyChecker:
                     ):
                         cycle_binding_failure = "cycle cache is bound to a nonterminal kernel transaction"
                         cycle_binding_classification = ConsistencyClassification.CORRUPT_EVIDENCE
+                    if cycle_binding_failure is None and legacy_provenance_present:
+                        cycle_binding_failure = (
+                            "cycle cache contains transient legacy recovery provenance"
+                        )
                     cycle_binding.update({key: cycle.get(key) for key in sorted(keys)})
-            except (OSError, json.JSONDecodeError, TypeError, ValueError, RecoveryError) as exc:
+            except (
+                OSError,
+                json.JSONDecodeError,
+                TypeError,
+                ValueError,
+                RecoveryError,
+                SchemaValidationError,
+            ) as exc:
                 cycle_binding_failure = str(exc)
                 cycle_binding_classification = ConsistencyClassification.CORRUPT_EVIDENCE
         add(

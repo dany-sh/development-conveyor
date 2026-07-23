@@ -12,6 +12,19 @@ from .errors import ProjectionError, RecoveryError, StaleProjectionCache
 from .ledger import EvidenceLedger, TERMINAL_EVENT_TYPES
 from .logging import atomic_write_json
 from .projection import ProjectionEngine, projection_fingerprint
+from .validation import validate_schema
+
+
+LEGACY_CACHE_BINDING_RECOVERY_FIELD = "cache_binding_recovery"
+_LEGACY_CACHE_BINDING_RECOVERY_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["source_transaction", "recovery_run_id"],
+    "properties": {
+        "source_transaction": {"type": "string", "minLength": 1},
+        "recovery_run_id": {"type": "string", "minLength": 1},
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -31,6 +44,29 @@ class CanonicalProjectionBinding:
             "ledger_fingerprint": self.ledger_fingerprint,
             "projection_fingerprint": self.projection_fingerprint,
         }
+
+
+def normalize_cycle_cache_for_rebinding(
+    state: dict[str, Any],
+    *,
+    cycle_schema: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate one legacy cache and return its canonical durable form.
+
+    The one historical cache-binding recovery provenance field is accepted
+    only on this deterministic normalization path. Every other top-level and
+    nested field remains governed by the common cycle-cache schema.
+    """
+
+    normalized = dict(state)
+    if LEGACY_CACHE_BINDING_RECOVERY_FIELD in normalized:
+        validate_schema(
+            normalized.pop(LEGACY_CACHE_BINDING_RECOVERY_FIELD),
+            _LEGACY_CACHE_BINDING_RECOVERY_SCHEMA,
+            f"$.{LEGACY_CACHE_BINDING_RECOVERY_FIELD}",
+        )
+    validate_schema(normalized, cycle_schema)
+    return normalized
 
 
 def validated_canonical_projection_binding(
@@ -152,6 +188,7 @@ def _bind_terminal_cycle_cache(
         raise RecoveryError("cycle cache semantic state disagrees with terminal projection")
 
     finalized = dict(state)
+    finalized.pop(LEGACY_CACHE_BINDING_RECOVERY_FIELD, None)
     finalized.update(
         {
             "kernel_transaction_id": transaction_id,

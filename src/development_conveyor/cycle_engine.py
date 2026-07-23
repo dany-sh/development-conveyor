@@ -20,6 +20,7 @@ from .errors import (
     ProjectionError,
     QueueError,
     RecoveryError,
+    SchemaValidationError,
     SessionError,
     TransactionError,
 )
@@ -104,6 +105,8 @@ from .integration_executor import (
 from .workflow_lease import WorkflowWriterLease
 from .command_authority import CommandAuthority
 from .cycle_cache import (
+    LEGACY_CACHE_BINDING_RECOVERY_FIELD,
+    normalize_cycle_cache_for_rebinding,
     validated_canonical_projection_binding,
     write_terminal_cycle_cache,
 )
@@ -4789,16 +4792,34 @@ class CycleEngine:
         try:
             integrity = ledger.verify()
             canonical_projection = projection_engine.rebuild(persist_cache=False)
-            cycle = (
+            loaded_cycle = (
                 json.loads(cycle_path.read_text(encoding="utf-8"))
                 if cycle_exists
                 else {}
             )
-        except (OSError, ValueError, json.JSONDecodeError, ProjectionError):
+            cycle = (
+                normalize_cycle_cache_for_rebinding(
+                    loaded_cycle,
+                    cycle_schema=self.cycle_store.schema,
+                )
+                if cycle_exists and isinstance(loaded_cycle, dict)
+                else loaded_cycle
+            )
+        except (
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+            ProjectionError,
+            SchemaValidationError,
+        ):
             return None
         if not isinstance(cycle, dict):
             return None
-        unsigned = dict(cycle)
+        legacy_provenance_present = (
+            cycle_exists
+            and LEGACY_CACHE_BINDING_RECOVERY_FIELD in loaded_cycle
+        )
+        unsigned = dict(loaded_cycle)
         claimed_fingerprint = unsigned.pop("kernel_cache_fingerprint", None)
         fingerprint_invalid = (
             cycle_exists
@@ -4881,7 +4902,12 @@ class CycleEngine:
                 "kernel_projection_fingerprint": canonical_binding.projection_fingerprint,
             }.items()
         )
-        if cycle_exists and not fingerprint_invalid and not durable_binding_invalid:
+        if (
+            cycle_exists
+            and not fingerprint_invalid
+            and not durable_binding_invalid
+            and not legacy_provenance_present
+        ):
             return None
         if (
             queue_bound_projection.get("current_state") != current_state
@@ -5001,10 +5027,6 @@ class CycleEngine:
                 "last_successful_checkpoint": "cache_binding_recovery_terminal",
                 "next_safe_action": plan["ordinary_next_action"],
                 "last_verified_git_state": self._git_checkpoint(inspector),
-                "cache_binding_recovery": {
-                    "source_transaction": plan["source_transaction"],
-                    "recovery_run_id": run_id,
-                },
                 "updated_at": utc_now(),
             })
             identity = inspector.identity()
