@@ -729,7 +729,9 @@ class ConsistencyChecker:
         cycle_binding: dict[str, Any] = {"path": str(cycle_path), "exists": cycle_path.exists()}
         cycle_binding_failure: str | None = None
         cycle_binding_classification = ConsistencyClassification.RECOVERABLE_INCONSISTENCY
-        if cycle_path.exists() and integrity is not None:
+        if not cycle_path.exists() and integrity is not None:
+            cycle_binding_failure = "cycle cache is missing"
+        elif cycle_path.exists() and integrity is not None:
             try:
                 cycle = json.loads(cycle_path.read_text(encoding="utf-8"))
                 keys = {
@@ -891,6 +893,7 @@ class ConsistencyChecker:
             )
             compatibility_state = None
             compatibility_projection_fingerprint = None
+            status: dict[str, Any] | None = None
             if compatibility_path.is_file():
                 try:
                     compatibility_value = json.loads(compatibility_path.read_text(encoding="utf-8"))
@@ -1194,6 +1197,47 @@ class ConsistencyChecker:
                         "actual_projection_fingerprint": compatibility_projection_fingerprint,
                     },
                 }
+            if (
+                isinstance(status, dict)
+                and status.get("workflow_type") == "cache_binding_recovery"
+                and canonical_projection is not None
+            ):
+                source_transaction = status.get("source_transaction")
+                recovery_checks = {
+                    "workflow_precedence": status.get("proposed_next_action")
+                    == "cache_binding_recovery",
+                    "transaction_mode": status.get("transaction_mode") == "recovery",
+                    "canonical_state": status.get("current_state")
+                    == canonical_projection.get("current_state"),
+                    "canonical_current_feature": status.get("current_feature")
+                    == canonical_projection.get("current_feature"),
+                    "canonical_selected_feature": status.get("selected_feature")
+                    == (
+                        canonical_projection.get("selected_next_feature")
+                        or canonical_projection.get("current_feature")
+                    ),
+                    "ordinary_action_preserved": status.get("ordinary_next_action")
+                    == canonical_projection.get("allowed_next_action"),
+                    "ledger_sequence": status.get("ledger_sequence")
+                    == canonical_projection.get("ledger_sequence"),
+                    "ledger_fingerprint": status.get("ledger_fingerprint")
+                    == canonical_projection.get("ledger_fingerprint"),
+                    "projection_fingerprint": status.get("projection_fingerprint")
+                    == canonical_projection.get("projection_fingerprint"),
+                    "terminal_source_transaction": isinstance(source_transaction, str)
+                    and self.ledger.terminal_event(source_transaction) is not None,
+                    "no_models": status.get("models_planned") == 0
+                    and status.get("model_sessions_that_would_launch") == [],
+                    "no_children": status.get("child_sessions_planned") == 0
+                    and status.get("child_sessions_that_would_launch") == [],
+                    "no_sessions": status.get("sessions_that_would_launch") == [],
+                }
+                agreement = all(recovery_checks.values())
+                agreement_evidence = {
+                    "checks": recovery_checks,
+                    "cache_binding_recovery_precedes_ordinary_routing": agreement,
+                }
+                observation_source = "cache_binding_recovery_plan"
             agreement_evidence["observation_source"] = observation_source
             add(
                 "execution_plan_projection_agreement",

@@ -105,6 +105,7 @@ from .cycle_cache import (
     validated_canonical_projection_binding,
     write_terminal_cycle_cache,
 )
+from .consistency import ConsistencyChecker
 from .workflow_recovery import RecoveryPlanner
 from .validation import SafetyPolicy
 from .cost_policy import build_run_plan
@@ -1166,6 +1167,11 @@ class CycleEngine:
         }
 
     def project_plan(self, project: Project) -> dict[str, Any]:
+        return self._project_plan(project, allow_cache_binding_recovery=True)
+
+    def _project_plan(
+        self, project: Project, *, allow_cache_binding_recovery: bool
+    ) -> dict[str, Any]:
         effective = self.effective_project(project)
         persisted = self.load_project_state(project)
         plan = build_project_plan(effective, self.configuration.conveyor, self.root)
@@ -1181,14 +1187,15 @@ class CycleEngine:
         context = self._authoritative_execution_context(project)
         if context is not None:
             authoritative, executable, superseded = context
-            cache_recovery = self._cache_binding_recovery_plan(project)
-            if cache_recovery is not None:
-                cache_recovery.update({
-                    "kernel_projection": authoritative,
-                    "executable_plan": executable.to_dict(),
-                    "superseded_cycles": superseded,
-                })
-                return cache_recovery
+            if allow_cache_binding_recovery:
+                cache_recovery = self._cache_binding_recovery_plan(project)
+                if cache_recovery is not None:
+                    cache_recovery.update({
+                        "kernel_projection": authoritative,
+                        "executable_plan": executable.to_dict(),
+                        "superseded_cycles": superseded,
+                    })
+                    return cache_recovery
             legacy_plan = dict(plan)
             plan.update(authoritative_status_fields(
                 authoritative,
@@ -4751,12 +4758,14 @@ class CycleEngine:
                 return {"plan_path": plan_path, "evidence": evidence}
         return None
 
-    def _cache_binding_recovery_plan(self, project: Project) -> dict[str, Any] | None:
-        """Return a deterministic repair plan for one corrupt terminal cache.
+    def _cache_binding_recovery_plan(
+        self, project: Project, *, allow_missing: bool = False
+    ) -> dict[str, Any] | None:
+        """Return a deterministic repair plan for one stale or missing cache.
 
         The repository-local cycle document is compatibility state, not an
-        authority to start work.  A bad signature must therefore be repaired
-        before authoritative dispatch can construct a feature session plan.
+        authority to start work. Its binding must be repaired from the valid
+        ledger projection before ordinary resume dispatch.
         """
         inspector = RepositoryInspector(project.repository)
         identity = inspector.identity()
@@ -4770,11 +4779,18 @@ class CycleEngine:
             repository_path_fingerprint=identity["path_fingerprint"],
         )
         projection_engine = ProjectionEngine(ledger, state_root / "projection-cache.json")
+        cycle_path = inspector.cycle_state_path()
+        cycle_exists = cycle_path.exists()
+        if not cycle_exists and not allow_missing:
+            return None
         try:
             integrity = ledger.verify()
             canonical_projection = projection_engine.rebuild(persist_cache=False)
-            cycle_path = inspector.cycle_state_path()
-            cycle = json.loads(cycle_path.read_text(encoding="utf-8"))
+            cycle = (
+                json.loads(cycle_path.read_text(encoding="utf-8"))
+                if cycle_exists
+                else {}
+            )
         except (OSError, ValueError, json.JSONDecodeError, ProjectionError):
             return None
         if not isinstance(cycle, dict):
@@ -4782,32 +4798,35 @@ class CycleEngine:
         unsigned = dict(cycle)
         claimed_fingerprint = unsigned.pop("kernel_cache_fingerprint", None)
         fingerprint_invalid = (
-            not isinstance(claimed_fingerprint, str)
-            or claimed_fingerprint != fingerprint(unsigned)
+            cycle_exists
+            and (
+                not isinstance(claimed_fingerprint, str)
+                or claimed_fingerprint != fingerprint(unsigned)
+            )
         )
         queue = FeatureQueue.from_location(project.repository, project.queue_location)
         selected = canonical_projection.get(
             "selected_next_feature"
         ) or canonical_projection.get("current_feature")
-        selection = queue.select_next(project.active_milestone or "")
+        current_feature = canonical_projection.get("current_feature")
+        current_state = canonical_projection.get("current_state")
+        ordinary_next_action = canonical_projection.get("allowed_next_action")
         writer = inspect_repository_writer_lock(
             inspector.writer_lock_path(self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]),
             project.repository,
         )
         if (
             canonical_projection.get("active_transaction") is not None
-            or canonical_projection.get("current_state") != "feature_ready"
-            or not isinstance(selected, str)
-            or selection is None
-            or selection.feature_id != selected
+            or not isinstance(current_state, str)
+            or not isinstance(ordinary_next_action, str)
+            or selected is not None and not isinstance(selected, str)
+            or current_feature is not None and not isinstance(current_feature, str)
             or not inspector.is_clean
-            or inspector.current_branch != project.milestone_branch
-            or inspector.head != inspector.rev_parse(project.milestone_branch or "", check=False)
             or writer.exists
             or any(inspector.git_operation_state().values())
         ):
             return None
-        selected_queue_feature = queue.feature(selected)
+        selected_queue_feature = queue.feature(selected) if selected is not None else None
         observed_projection = projection_engine.rebuild(
             persist_cache=False,
             observations=build_projection_observations(
@@ -4821,16 +4840,23 @@ class CycleEngine:
         queue_bound_projection = bind_projection_to_queue(
             observed_projection, queue, str(project.active_milestone or "")
         )
+        terminal_states = {
+            "completed", "blocked", "human_decision_required", "retryable_failure",
+            "terminal_failure", "superseded",
+        }
         terminals = [
-            event for event in ledger.read()
-            if event["event_type"] in {"TransactionCompleted", "TransactionBlocked", "TransactionSuperseded", "HumanGateRaised"}
-            and event["workflow_type"] == WorkflowType.RECOVERY.value
+            transaction
+            for transaction in canonical_projection.get("transactions", [])
+            if isinstance(transaction, dict)
+            and transaction.get("state") in terminal_states
+            and isinstance(transaction.get("transaction_id"), str)
+            and isinstance(transaction.get("last_sequence"), int)
         ]
         if not terminals:
             return None
-        source = terminals[-1]
+        source = max(terminals, key=lambda item: item["last_sequence"])
         source_transaction = source["transaction_id"]
-        if ledger.terminal_event(source_transaction) != source:
+        if ledger.terminal_event(source_transaction) is None:
             return None
         try:
             canonical_binding = validated_canonical_projection_binding(
@@ -4852,26 +4878,45 @@ class CycleEngine:
                 "kernel_projection_fingerprint": canonical_binding.projection_fingerprint,
             }.items()
         )
-        if not fingerprint_invalid and not durable_binding_invalid:
+        if cycle_exists and not fingerprint_invalid and not durable_binding_invalid:
             return None
         if (
-            cycle.get("current_phase") != "feature_ready"
-            or cycle.get("current_feature") != selected
-            or queue_bound_projection.get("current_state") != "feature_ready"
-            or queue_bound_projection.get("selected_next_feature") != selected
+            queue_bound_projection.get("current_state") != current_state
+            or queue_bound_projection.get("current_feature") != current_feature
+            or queue_bound_projection.get("selected_next_feature")
+            != canonical_projection.get("selected_next_feature")
+        ):
+            return None
+        consistency = ConsistencyChecker(
+            controller_root=self.root,
+            project=project,
+            planner_observer=lambda: self._project_plan(
+                project, allow_cache_binding_recovery=False
+            ),
+        ).check()
+        failed = consistency.get("failed_invariants") or []
+        if (
+            consistency.get("classification") != "RECOVERABLE_INCONSISTENCY"
+            or len(failed) != 1
+            or failed[0].get("invariant") != "cycle_cache_binding"
+            or failed[0].get("classification") != "RECOVERABLE_INCONSISTENCY"
         ):
             return None
         queue_path = resolve_queue_path(project.repository, project.queue_location)
-        selected_feature_execution_plan = build_run_plan(
-            {
-                "proposed_next_action": "feature_cycle",
-                "selected_feature": selected,
-                "application_mutation_expected": True,
-            },
-            self.root,
-            project=project,
-            profile_configuration=self.configuration.execution_profiles or None,
-            override_profile=self.execution_profile_override,
+        selected_feature_execution_plan = (
+            build_run_plan(
+                {
+                    "proposed_next_action": "feature_cycle",
+                    "selected_feature": selected,
+                    "application_mutation_expected": True,
+                },
+                self.root,
+                project=project,
+                profile_configuration=self.configuration.execution_profiles or None,
+                override_profile=self.execution_profile_override,
+            )
+            if selected is not None
+            else None
         )
         return {
             "project_id": project.project_id,
@@ -4879,8 +4924,10 @@ class CycleEngine:
             "transaction_mode": "recovery",
             "proposed_next_action": "cache_binding_recovery",
             "next_action": "cache_binding_recovery",
-            "current_state": "feature_ready",
+            "current_state": current_state,
+            "current_feature": current_feature,
             "selected_feature": selected,
+            "ordinary_next_action": ordinary_next_action,
             "source_transaction": source_transaction,
             "ledger_sequence": canonical_binding.ledger_sequence,
             "ledger_fingerprint": canonical_binding.ledger_fingerprint,
@@ -4921,29 +4968,35 @@ class CycleEngine:
         reservation.acquire(make_lock_record(
             project_id=project.project_id,
             repository_identity=inspector.identity()["repository_id"], run_id=run_id,
-            current_feature=str(plan["selected_feature"]), current_phase="cache_binding_recovery",
+            current_feature=plan.get("selected_feature"),
+            current_phase="cache_binding_recovery",
         ))
         try:
-            refreshed = self._cache_binding_recovery_plan(project)
+            refreshed = self._cache_binding_recovery_plan(
+                project, allow_missing=not inspector.cycle_state_path().exists()
+            )
             immutable = (
                 "source_transaction", "ledger_sequence", "ledger_fingerprint", "projection_fingerprint",
-                "repository_branch", "repository_head", "queue_fingerprint", "selected_feature",
+                "repository_branch", "repository_head", "queue_fingerprint", "current_state",
+                "current_feature", "selected_feature", "ordinary_next_action",
             )
             if refreshed is None or any(refreshed.get(key) != plan.get(key) for key in immutable):
                 raise RecoveryError("cache-binding recovery evidence changed before signing")
             queue = FeatureQueue.from_location(project.repository, project.queue_location)
-            feature = queue.feature(str(plan["selected_feature"]))
-            if feature is None:
+            feature_identity = plan.get("selected_feature") or plan.get("current_feature")
+            feature = queue.feature(str(feature_identity)) if feature_identity is not None else None
+            if feature_identity is not None and feature is None:
                 raise RecoveryError("cache-binding recovery selected feature disappeared")
             state = self._new_cycle_state(project, run_id, inspector, feature)
             state.update({
-                "current_feature": plan["selected_feature"],
+                "current_feature": plan["current_feature"],
                 "selected_feature": plan["selected_feature"],
-                "current_phase": "feature_ready",
+                "current_phase": plan["current_state"],
                 "conveyor_run_id": run_id,
                 "feature_session_id": None,
                 "session_id": None,
                 "last_successful_checkpoint": "cache_binding_recovery_terminal",
+                "next_safe_action": plan["ordinary_next_action"],
                 "last_verified_git_state": self._git_checkpoint(inspector),
                 "cache_binding_recovery": {
                     "source_transaction": plan["source_transaction"],
@@ -4973,8 +5026,10 @@ class CycleEngine:
                 observations=build_projection_observations(
                     branch=inspector.current_branch, head=inspector.head, clean=inspector.is_clean,
                     git_operations=inspector.git_operation_state(),
-                    queue_feature=feature.get("id"),
-                    queue_integration_status=feature.get("integration_status"),
+                    queue_feature=feature.get("id") if feature is not None else None,
+                    queue_integration_status=(
+                        feature.get("integration_status") if feature is not None else None
+                    ),
                     lease_transaction=None, lease_valid=True, live_session_id=None,
                 ),
             )
@@ -4982,10 +5037,14 @@ class CycleEngine:
                 observed_projection, queue, str(project.active_milestone or "")
             )
             if (
-                canonical_projection.get("current_state") != "feature_ready"
+                canonical_projection.get("current_state") != plan["current_state"]
+                or canonical_projection.get("current_feature") != plan["current_feature"]
                 or canonical_projection.get("selected_next_feature")
                 != plan["selected_feature"]
-                or queue_bound_projection.get("current_state") != "feature_ready"
+                or canonical_projection.get("allowed_next_action")
+                != plan["ordinary_next_action"]
+                or queue_bound_projection.get("current_state") != plan["current_state"]
+                or queue_bound_projection.get("current_feature") != plan["current_feature"]
                 or queue_bound_projection.get("selected_next_feature")
                 != plan["selected_feature"]
             ):
@@ -4994,22 +5053,26 @@ class CycleEngine:
                 )
             # A final pre-write comparison catches queue, branch, ledger, and
             # projection drift after the short-lived reservation was acquired.
-            final_plan = self._cache_binding_recovery_plan(project)
+            final_plan = self._cache_binding_recovery_plan(
+                project, allow_missing=not inspector.cycle_state_path().exists()
+            )
             if final_plan is None or any(final_plan.get(key) != plan.get(key) for key in immutable):
                 raise RecoveryError("cache-binding recovery evidence changed before atomic write")
             write_terminal_cycle_cache(
                 inspector.cycle_state_path(), state, ledger=ledger,
                 projection_engine=projection_engine,
                 transaction_id=str(plan["source_transaction"]),
-                expected_feature=str(plan["selected_feature"]),
+                expected_feature=plan["selected_feature"],
             )
             return {
                 "project_id": project.project_id,
                 "outcome": "cache_binding_recovered",
                 "workflow_type": "cache_binding_recovery",
                 "transaction_mode": "recovery",
-                "current_state": "feature_ready",
+                "current_state": plan["current_state"],
+                "current_feature": plan["current_feature"],
                 "selected_feature": plan["selected_feature"],
+                "ordinary_next_action": plan["ordinary_next_action"],
                 "source_transaction": plan["source_transaction"],
                 "recovery_run_id": run_id,
                 "models_launched": 0,
@@ -7462,7 +7525,11 @@ class CycleEngine:
             reservation.release(resolution_id)
 
     def run_project(self, project: Project, mode: str, *, dry_run: bool = False) -> dict[str, Any]:
-        cache_recovery = self._cache_binding_recovery_plan(project)
+        cache_recovery = (
+            self._cache_binding_recovery_plan(project, allow_missing=True)
+            if mode in {"resume", "audit"}
+            else None
+        )
         if cache_recovery is not None:
             if dry_run or mode == "audit":
                 return cache_recovery

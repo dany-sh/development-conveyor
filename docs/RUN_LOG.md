@@ -752,3 +752,23 @@ This log records model configuration and deterministic deployment evidence. It n
 - Focused validation: 33 affected finalization, feature-result recovery, two-ref recovery, deterministic integration-preflight, projection, consistency, and duplicate-integration tests passed in `84.603s`. The six new accepted-commit tests passed again in `10.462s` after raw-byte hashing was added.
 - Requested commands: `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, `scripts/conveyor verify-consistency --project interview-companion --json`, `scripts/conveyor resume --project interview-companion --dry-run`, and `git diff --check` exited zero before commit. Interview Companion remained `CONSISTENT` at ledger sequence 213, and the resume dry-run planned zero model sessions with `milestone_integration` as the next action.
 - Content audit: the profile-aware audit scanned 182 files without truncation and reported no hard gate.
+
+### Model execution — 2026-07-23T04:16:34+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `featureless_cache_rebinding`
+- Safety and autonomy contracts unchanged: `true`
+
+### Featureless cycle-cache rebinding — 2026-07-22
+
+- Scope and execution: one direct parent controller-maintenance session; zero child or named-agent sessions, no application tests, no real Conveyor resume, no queue reconciliation, no F004 rerun or integration, and no complete controller suite.
+- Defect and correction: cache recovery previously required `feature_ready`, a string selected feature, a matching ready-queue selection, and a recovery-workflow terminal transaction. Recovery now binds to any internally valid canonical projection whose sole failed invariant is `cycle_cache_binding`, carries optional current/selected feature identity, uses the latest terminal transaction, and preserves the canonical ordinary next action while deterministic recovery takes routing precedence.
+- Featureless representation: the live read-only plan reports `current_state: queue_reconciliation`, `current_feature: null`, `selected_feature: null`, and `ordinary_next_action: queue_reconciliation`. It binds terminal milestone-integration transaction `ac2e5eff-147f-445f-90c7-f78b6d4324bd`, ledger sequence 237, and launches zero model or child sessions.
+- Focused validation: 30 selected cache-binding, routing, cycle-engine dry-run, projection/consistency, transactional consistency, and recovery tests passed. The 11 cache-specific tests passed again in `61.440s`, and five projection/consistency tests passed again in `49.211s` after the recovery-plan agreement correction.
+- Requested commands: `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, `scripts/conveyor verify-consistency --project interview-companion --json`, `scripts/conveyor resume --project interview-companion --dry-run`, and `git diff --check` exited zero. Consistency reported only the expected recoverable `cycle_cache_binding` invariant; dry-run selected `cache_binding_recovery`.
+- Isolation evidence: Interview Companion remained clean on `codex/m0-foundation` at `f0b210baab63ece29a307934907124a56097e89d`; Case Manager remained clean on `codex/p0-foundation` at `f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0`. Interview Companion ledger sequence remained 237 with SHA-256 `953f36dd20ffb57216bb10eb23daa2045f2ca0b2372cf27747a7590228c6223e`; its projection cache and repository cycle-cache hashes also remained unchanged.
+- Content audit: the `personal_private` profile scan covered all 132 tracked controller files and found no high-confidence secret or tracked-binary gate.

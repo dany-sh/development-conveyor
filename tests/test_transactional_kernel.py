@@ -13,6 +13,7 @@ from unittest import mock
 
 from development_conveyor.command_authority import CommandAuthority
 from development_conveyor.cycle_engine import CycleEngine
+from development_conveyor.cycle_cache import write_terminal_cycle_cache
 from development_conveyor.consistency import ConsistencyChecker
 from development_conveyor.contracts import (
     CommandCategory,
@@ -1857,10 +1858,61 @@ if dirty:
                 project=simulator.project,
                 planner_observer=lambda: observer_engine.project_plan(simulator.project),
             )
+            projection = checker.projection.rebuild(persist_cache=True)
+            terminal = max(
+                (
+                    transaction
+                    for transaction in projection["transactions"]
+                    if transaction["state"]
+                    in {
+                        "completed",
+                        "blocked",
+                        "human_decision_required",
+                        "retryable_failure",
+                        "terminal_failure",
+                        "superseded",
+                    }
+                ),
+                key=lambda transaction: transaction["last_sequence"],
+            )
+            selected_feature = (
+                projection.get("selected_next_feature")
+                or projection.get("current_feature")
+            )
+            inspector = RepositoryInspector(simulator.repository)
+            inspector.ensure_runtime_ignored()
+            feature = (
+                FeatureQueue.from_location(
+                    simulator.project.repository,
+                    simulator.project.queue_location,
+                ).feature(selected_feature)
+                if selected_feature is not None
+                else None
+            )
+            cycle = observer_engine._new_cycle_state(
+                simulator.project,
+                "consistency-cache-fixture",
+                inspector,
+                feature,
+            )
+            cycle.update({
+                "current_phase": projection["current_state"],
+                "current_feature": projection.get("current_feature"),
+                "selected_feature": selected_feature,
+            })
+            write_terminal_cycle_cache(
+                inspector.cycle_state_path(),
+                cycle,
+                ledger=checker.ledger,
+                projection_engine=checker.projection,
+                transaction_id=terminal["transaction_id"],
+                expected_feature=selected_feature,
+            )
             self.assertEqual("CONSISTENT", checker.check()["classification"])
 
             cache = simulator.controller / "state/projects/synthetic/projection-cache.json"
             cache.unlink()
+            inspector.cycle_state_path().unlink()
             recoverable = checker.check()
             self.assertEqual("RECOVERABLE_INCONSISTENCY", recoverable["classification"])
             self.assertIn("projection_cache_agreement", {
