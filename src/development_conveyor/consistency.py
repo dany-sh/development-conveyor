@@ -103,6 +103,8 @@ class ConsistencyChecker:
         canonical_projection: dict[str, Any] | None = None
         observed_projection: dict[str, Any] | None = None
         queue_bound_projection: dict[str, Any] | None = None
+        planner_status: dict[str, Any] | None = None
+        planner_observer_failed = False
         integrity = None
         ledger_events: list[dict[str, Any]] = []
         if ledger_exists:
@@ -158,6 +160,17 @@ class ConsistencyChecker:
             evidence={"configured_milestone": self.project.active_milestone, "queue_has_milestone": milestone is not None},
             diagnostic="configured active milestone is absent from the queue",
         )
+        if self.planner_observer is not None:
+            try:
+                planner_status = self.planner_observer()
+            except (
+                CorruptEvidenceError,
+                OSError,
+                ProjectionError,
+                QueueError,
+                RecoveryError,
+            ):
+                planner_observer_failed = True
 
         git_operations = self.inspector.git_operation_state()
         add(
@@ -275,7 +288,37 @@ class ConsistencyChecker:
         )
 
         dirty = not self.inspector.is_clean
-        recoverable_dirty = bool(active_transaction and (ledger_projection or {}).get("session_resume_eligible"))
+        planning_recovery = (
+            planner_status.get("planning_finalization_recovery")
+            if isinstance(planner_status, dict)
+            else None
+        )
+        recovery_checks = (
+            planning_recovery.get("checks")
+            if isinstance(planning_recovery, dict)
+            else None
+        )
+        recorded_recovery_paths = (
+            (planning_recovery.get("existing_planning_changes") or {}).get("paths")
+            if isinstance(planning_recovery, dict)
+            else None
+        )
+        exact_planning_recovery = bool(
+            isinstance(planner_status, dict)
+            and planner_status.get("proposed_next_action") == "planning_finalization"
+            and planner_status.get("transaction_mode") == "recovery"
+            and isinstance(recovery_checks, dict)
+            and recovery_checks
+            and all(recovery_checks.values())
+            and recorded_recovery_paths
+            == sorted(self.inspector.tracked_changed_paths())
+            and not self.inspector.untracked_file_hashes()
+        )
+        recoverable_dirty = bool(
+            active_transaction
+            and (ledger_projection or {}).get("session_resume_eligible")
+            or exact_planning_recovery
+        )
         add(
             "worktree_status",
             not dirty or recoverable_dirty,
@@ -284,6 +327,7 @@ class ConsistencyChecker:
                 "clean": not dirty,
                 "dirty_entries": len(self.inspector.dirty_entries),
                 "exact_recorded_transaction": recoverable_dirty,
+                "planning_finalization_recovery": exact_planning_recovery,
             },
             diagnostic="dirty worktree is not explained by an active transaction",
         )
@@ -908,15 +952,21 @@ class ConsistencyChecker:
                     compatibility_state = None
             if self.planner_observer is not None:
                 observation_source = "planner_observer"
-                try:
-                    status = self.planner_observer()
-                except (CorruptEvidenceError, OSError, ProjectionError, QueueError):
+                if planner_observer_failed:
                     agreement = False
                     agreement_evidence = {
                         "checks": {"planner_observation_succeeded": False},
                         "observer_error_category": "authoritative_planner_unavailable",
                     }
                 else:
+                    status = planner_status
+                    if not isinstance(status, dict):
+                        agreement = False
+                        agreement_evidence = {
+                            "checks": {"planner_observation_succeeded": False},
+                            "observer_error_category": "authoritative_planner_unavailable",
+                        }
+                        status = {}
                     observed_projection = status.get("kernel_projection")
                     if not isinstance(observed_projection, dict):
                         observed_projection = routing_projection
@@ -1238,6 +1288,45 @@ class ConsistencyChecker:
                     "cache_binding_recovery_precedes_ordinary_routing": agreement,
                 }
                 observation_source = "cache_binding_recovery_plan"
+            if (
+                isinstance(status, dict)
+                and status.get("workflow_type")
+                in {
+                    "queue_reconciliation recovery/finalization",
+                    "queue reconciliation committed-finalization recovery",
+                }
+                and canonical_projection is not None
+            ):
+                recovery = status.get("planning_finalization_recovery") or {}
+                exact_checks = recovery.get("checks") or {}
+                recovery_paths = (
+                    (recovery.get("existing_planning_changes") or {}).get("paths")
+                )
+                planning_checks = {
+                    "workflow_precedence": status.get("proposed_next_action")
+                    == "planning_finalization",
+                    "transaction_mode": status.get("transaction_mode") == "recovery",
+                    "canonical_state": status.get("current_state")
+                    == canonical_projection.get("current_state")
+                    == "validation_failed",
+                    "original_transaction": status.get("original_transaction_id")
+                    == recovery.get("original_transaction_id"),
+                    "exact_recovery_checks": isinstance(exact_checks, dict)
+                    and bool(exact_checks)
+                    and all(exact_checks.values()),
+                    "exact_changed_paths": recovery_paths
+                    == sorted(self.inspector.tracked_changed_paths()),
+                    "no_untracked_paths": not self.inspector.untracked_file_hashes(),
+                    "no_models": status.get("model_sessions_that_would_launch") == [],
+                    "no_children": status.get("child_sessions_that_would_launch") == [],
+                    "no_sessions": status.get("sessions_that_would_launch") == [],
+                }
+                agreement = all(planning_checks.values())
+                agreement_evidence = {
+                    "checks": planning_checks,
+                    "planning_finalization_recovery_precedes_ordinary_routing": agreement,
+                }
+                observation_source = "planning_finalization_recovery_plan"
             agreement_evidence["observation_source"] = observation_source
             add(
                 "execution_plan_projection_agreement",

@@ -34,7 +34,9 @@ from .planning import (
     ALLOWED_PLANNING_PREFIXES,
     PLANNING_CLASSIFICATIONS,
     allowed_planning_path,
+    authoritative_queue_validation_evidence,
     capture_planning_start,
+    compare_queue_validation_evidence,
     finalize_planning_commit,
     inspect_planning_finalization_recovery,
     load_planning_transaction,
@@ -4090,11 +4092,12 @@ class CycleEngine:
             raise SessionError(message)
 
         validation = queue_result_evidence.get("queue_validation", {})
-        if (
-            validation.get("valid") is not True
-            or validation.get("milestone_found") != summary["milestone_found"]
-            or validation.get("feature_count") != summary["feature_count"]
-        ):
+        try:
+            compare_queue_validation_evidence(
+                validation,
+                authoritative_queue_validation_evidence(project, queue),
+            )
+        except RecoveryError as exc:
             message = f"structured queue-validation evidence disagrees with deterministic parsing; report={result.report_path}"
             projected = kernel.block(
                 state=TransactionState.TERMINAL_FAILURE,
@@ -4107,7 +4110,7 @@ class CycleEngine:
                 kernel_owned=True,
                 kernel_projection=projection_evidence(projected),
             )
-            raise SessionError(message)
+            raise SessionError(f"{message}; {exc}") from exc
 
         targets = {
             "reconciled_ready_work": "feature_ready",
@@ -5591,7 +5594,12 @@ class CycleEngine:
         workflow_lease = WorkflowWriterLease(inspector.writer_lock_path(
             self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
         ))
-        selected_feature = str(expected_plan["selected_feature"])
+        selected_feature = expected_plan.get("selected_feature")
+        if selected_feature is not None and (
+            not isinstance(selected_feature, str) or not selected_feature
+        ):
+            raise RecoveryError("planning recovery selected-feature evidence is malformed")
+        next_state = "feature_ready" if selected_feature else "paused"
         expected_paths = tuple(expected_plan["existing_planning_changes"]["paths"])
         existing_commit = expected_plan.get("existing_commit")
         committed_recovery = isinstance(existing_commit, str)
@@ -5599,7 +5607,7 @@ class CycleEngine:
             allowed_paths=expected_paths,
             allow_untracked=False,
             commit_subject=planning_commit_subject(effective, selected_feature),
-            next_state="feature_ready",
+            next_state=next_state,
             require_clean_start=committed_recovery,
         )
         kernel = WorkflowKernel(
@@ -5660,8 +5668,9 @@ class CycleEngine:
                 commit = kernel.adopt_committed_planning_recovery(
                     original_transaction_id=expected_plan["original_transaction_id"], commit=existing_commit,
                     expected_parent=expected_plan["starting_commit"], expected_paths=expected_paths,
-                    expected_subject="factory: reconcile M0 queue", plan_fingerprint=expected_plan["plan_fingerprint"],
-                    selected_feature=selected_feature,
+                    expected_subject=planning_commit_subject(effective, selected_feature),
+                    plan_fingerprint=expected_plan["plan_fingerprint"],
+                    selected_feature=selected_feature, next_state=next_state,
                 )
             else:
                 validation = validate_planning_changes(
@@ -5676,7 +5685,7 @@ class CycleEngine:
                     original_transaction_id=expected_plan["original_transaction_id"], changed_paths=expected_paths,
                     expected_diff_fingerprint=expected_plan["mutation_fingerprint"], plan_fingerprint=expected_plan["plan_fingerprint"],
                     validation_evidence={"commands": [{"validator": inventory.get("validator"), "exit_code": inventory.get("exit_code")}, {"validator": "git diff --check", "exit_code": 0}], "warnings": validation_warnings},
-                    selected_feature=selected_feature,
+                    selected_feature=selected_feature, next_state=next_state,
                 )
             committed = {
                 **validation,
@@ -5687,14 +5696,14 @@ class CycleEngine:
                 "planning_commit_subject": inspector.commit_subject(commit),
                 "planning_commit_would_be_created": False,
                 "repository_clean": True,
-                "selected_feature_starting_commit": commit,
+                "selected_feature_starting_commit": commit if selected_feature else None,
                 "recovery": True,
                 "recovery_transaction_id": transaction.transaction_id,
                 "original_transaction_id": expected_plan["original_transaction_id"],
                 "model_sessions_launched": [],
                 "child_sessions_launched": [],
                 "nonfatal_warnings": validation_warnings,
-                "next_state": "feature_ready",
+                "next_state": next_state,
                 "committed_at": utc_now(),
             }
             completed = kernel.complete(
@@ -5733,6 +5742,7 @@ class CycleEngine:
                 "child_sessions_launched": [],
                 "deterministic_only": True,
                 "outcome": "planning_recovery_committed",
+                "ordinary_queue_reconciliation_available": True,
                 "created_at": utc_now(),
             })
             document = self.load_project_state(project) or self._project_document(
@@ -5747,7 +5757,7 @@ class CycleEngine:
             self._transition_project(
                 effective,
                 document,
-                "feature_ready",
+                next_state,
                 run_id=recovery_run_id,
                 checkpoint="planning_finalization_recovered",
                 feature=selected_feature,
@@ -5768,7 +5778,8 @@ class CycleEngine:
                 )
             cycle.update({
                 "current_feature": selected_feature,
-                "current_phase": "feature_ready",
+                "selected_feature": selected_feature,
+                "current_phase": next_state,
                 "conveyor_run_id": recovery_run_id,
                 "kernel_transaction_id": transaction.transaction_id,
                 "kernel_ledger_sequence": completed["projection"]["ledger_sequence"],
@@ -5783,12 +5794,13 @@ class CycleEngine:
                 projection_engine=ProjectionEngine(
                     ledger, ledger.path.parent / "projection-cache.json"
                 ),
-                transaction_id=transaction.transaction_id, expected_feature=selected_feature,
+                transaction_id=transaction.transaction_id,
+                expected_feature=selected_feature,
             )
             return {
                 "project_id": project.project_id,
                 "outcome": "planning_recovery_committed",
-                "current_state": "feature_ready",
+                "current_state": next_state,
                 "selected_feature": selected_feature,
                 "planning_result_commit": commit,
                 "planning_transaction": committed,
@@ -5798,6 +5810,10 @@ class CycleEngine:
                 "nonfatal_warnings": validation_warnings,
                 "model_sessions_launched": [],
                 "child_sessions_launched": [],
+                "ordinary_queue_reconciliation_available": True,
+                "next_action_after_consistency": (
+                    "feature_cycle" if selected_feature else "planning_refinement"
+                ),
                 "feature_factory_would_launch": False,
                 "milestone_integrator_would_launch": False,
                 "application_source_written": False,
@@ -5829,6 +5845,58 @@ class CycleEngine:
         expected_paths = sorted(set(expected_changed_paths))
         if len(expected_paths) != len(expected_changed_paths):
             raise RecoveryError("expected planning paths must be unique")
+        ledger_path = (
+            self.root
+            / "state/projects"
+            / project.project_id
+            / "evidence-ledger.jsonl"
+        )
+        if ledger_path.exists() and not (
+            existing and existing.get("planning_commit_status") == "committed"
+        ):
+            projection = self._authoritative_projection(project)
+            if projection is None:
+                raise RecoveryError("transactional planning recovery projection is unavailable")
+            plan = self._planning_finalization_recovery_plan(effective, projection)
+            if plan is None:
+                raise RecoveryError(
+                    "no deterministic transactional planning recovery is available"
+                )
+            checks = {
+                "run_id": plan.get("original_run_id") == run_id,
+                "session_id": plan.get("original_session_id") == expected_session_id,
+                "starting_head": plan.get("starting_commit") == expected_starting_head,
+                "diff_fingerprint": plan.get("mutation_fingerprint")
+                == expected_diff_fingerprint,
+                "changed_paths": (
+                    (plan.get("existing_planning_changes") or {}).get("paths")
+                    == expected_paths
+                ),
+            }
+            if not all(checks.values()):
+                failed = ", ".join(
+                    key for key, passed in checks.items() if not passed
+                )
+                raise RecoveryError(
+                    "transactional planning recovery expectation disagrees: " + failed
+                )
+            if dry_run:
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "planning_recovery_validated",
+                    "applied": False,
+                    "checks": checks,
+                    "planning_finalization_recovery": plan,
+                    "model_sessions_that_would_launch": [],
+                    "child_sessions_that_would_launch": [],
+                    "feature_factory_would_launch": False,
+                    "milestone_integrator_would_launch": False,
+                    "application_source_written": False,
+                }
+            return self._recover_terminal_planning_finalization(
+                project,
+                expected_plan=plan,
+            )
         if existing and existing.get("planning_commit_status") == "committed":
             commit = existing.get("planning_result_commit")
             checks = {
@@ -5859,10 +5927,6 @@ class CycleEngine:
                 "milestone_integrator_would_launch": False,
                 "application_source_written": False,
             }
-        if (self.root / "state/projects" / project.project_id / "evidence-ledger.jsonl").exists():
-            raise RecoveryError(
-                "legacy planning recovery is disabled after transactional-ledger cutover; use resume"
-            )
         if (
             existing
             and existing.get("status") == "planning_changes_committing"

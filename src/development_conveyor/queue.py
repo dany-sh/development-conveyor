@@ -415,6 +415,8 @@ class FeatureQueue:
             "resolved_milestone": milestone.get("id") if milestone else None,
             "feature_count": len(milestone_features),
             "total_feature_count": len(self.features),
+            "global_feature_count": len(self.features),
+            "global_milestone_count": len(self.milestones),
             "status_counts": counts,
             "active_features": [item["id"] for item in self.active_features(milestone_id)],
             "completed_features": [item["id"] for item in milestone_features if item["status"] in COMPLETE_STATUSES],

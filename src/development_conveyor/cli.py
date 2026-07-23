@@ -227,6 +227,8 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
                     "resolved_queue_path": str(queue_path),
                     "milestone_found": queue.milestone(project.active_milestone or "") is not None,
                     "feature_count": len(queue.features_for_milestone(project.active_milestone or "")),
+                    "global_feature_count": len(queue.features),
+                    "global_milestone_count": len(queue.milestones),
                 })
             except ConveyorError as exc:
                 item.update({"queue_valid": False, "queue_error": str(exc), "resolved_queue_path": None})

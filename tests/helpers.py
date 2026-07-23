@@ -194,7 +194,13 @@ class SyntheticLauncher:
                 "classification": "reconciled_ready_work",
                 "summary": "Synthetic queue reconciled.",
                 "next_action": "feature_cycle",
-                "queue_validation": {"valid": True, "milestone_found": True, "feature_count": 1},
+                "queue_validation": {
+                    "valid": True,
+                    "milestone_found": True,
+                    "feature_count": 1,
+                    "global_feature_count": 1,
+                    "global_milestone_count": 1,
+                },
                 "retryable": False,
                 "human_decision": None,
             }

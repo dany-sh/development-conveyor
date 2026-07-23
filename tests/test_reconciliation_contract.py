@@ -30,7 +30,13 @@ def contract(classification: str, feature_count: int = 1, *, human=None, retryab
         "classification": classification,
         "summary": f"Synthetic {classification} result.",
         "next_action": "safe_checkpoint",
-        "queue_validation": {"valid": True, "milestone_found": True, "feature_count": feature_count},
+        "queue_validation": {
+            "valid": True,
+            "milestone_found": True,
+            "feature_count": feature_count,
+            "global_feature_count": feature_count,
+            "global_milestone_count": 1,
+        },
         "retryable": retryable,
         "human_decision": human,
     }

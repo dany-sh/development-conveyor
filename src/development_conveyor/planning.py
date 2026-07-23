@@ -254,20 +254,52 @@ def _classify_inventory_validation(
     }
 
 
+def authoritative_queue_validation_evidence(
+    project: Project,
+    queue: FeatureQueue | None = None,
+) -> dict[str, Any]:
+    """Return the one authoritative milestone-local/global queue count contract."""
+
+    queue = queue or FeatureQueue.from_location(project.repository, project.queue_location)
+    configured = project.active_milestone
+    if not isinstance(configured, str) or not configured:
+        raise RecoveryError("active milestone cannot be resolved for queue validation")
+    milestone = queue.milestone(configured)
+    if milestone is None:
+        raise RecoveryError(
+            f"active milestone {configured!r} cannot be resolved in the authoritative queue"
+        )
+    active = [item for item in queue.milestones if item.get("status") == "active"]
+    if len(active) != 1 or active[0].get("id") != milestone.get("id"):
+        raise RecoveryError(
+            "authoritative queue active milestone differs from the configured active milestone"
+        )
+    summary = queue.summary(configured)
+    return {
+        "ok": True,
+        "valid": True,
+        "milestone_found": True,
+        "active_milestone": milestone["id"],
+        "feature_count": summary["feature_count"],
+        "global_feature_count": len(queue.features),
+        "global_milestone_count": len(queue.milestones),
+        "ready": summary["ready_features"],
+        "active": summary["active_features"],
+    }
+
+
 def _inventory_validation(project: Project) -> dict[str, Any]:
     root = project.repository
+    queue = FeatureQueue.from_location(root, project.queue_location)
+    authoritative = authoritative_queue_validation_evidence(project, queue)
     if not all((root / relative).exists() for relative in FULL_INVENTORY_PATHS):
-        queue = FeatureQueue.from_location(root, project.queue_location)
-        summary = queue.summary(project.active_milestone or "")
         return _classify_inventory_validation(
             exit_code=0,
             value={
-            "ok": summary.get("milestone_found") is True,
-            "errors": [] if summary.get("milestone_found") is True else ["active milestone is absent"],
-            "warnings": [],
-            "feature_count": summary.get("feature_count"),
-            "ready": summary.get("ready_features", []),
-            "validator": "controller_queue_validator",
+                **authoritative,
+                "errors": [],
+                "warnings": [],
+                "validator": "controller_queue_validator",
             },
             blocking_warning_patterns=project.inventory_blocking_warning_patterns,
         )
@@ -291,7 +323,31 @@ def _inventory_validation(project: Project) -> dict[str, Any]:
         value=value,
         blocking_warning_patterns=project.inventory_blocking_warning_patterns,
     )
-    return {**classified, "validator": str(validator)}
+    reported_global_features = classified.get("global_feature_count", classified.get("feature_count"))
+    reported_global_milestones = classified.get(
+        "global_milestone_count", classified.get("milestone_count")
+    )
+    if reported_global_features != authoritative["global_feature_count"]:
+        raise RecoveryError(
+            "deterministic inventory global feature count disagrees with the authoritative queue"
+        )
+    if reported_global_milestones != authoritative["global_milestone_count"]:
+        raise RecoveryError(
+            "deterministic inventory global milestone count disagrees with the authoritative queue"
+        )
+    return {
+        **classified,
+        **authoritative,
+        "errors": classified["errors"],
+        "warnings": classified["warnings"],
+        "raw_inventory_counts": {
+            "feature_count": classified.get("feature_count"),
+            "milestone_count": classified.get("milestone_count"),
+            "global_feature_count": classified.get("global_feature_count"),
+            "global_milestone_count": classified.get("global_milestone_count"),
+        },
+        "validator": str(validator),
+    }
 
 
 def _diff_check(project: Project) -> dict[str, Any]:
@@ -353,28 +409,61 @@ def _selected_feature_evidence(
     }
 
 
-def _warning_only_inventory_failure(transaction: dict[str, Any]) -> dict[str, Any]:
+def _recoverable_planning_validation_failure(transaction: dict[str, Any]) -> dict[str, Any]:
     message = transaction.get("error")
     prefix = "deterministic inventory validation failed: "
-    if not isinstance(message, str) or not message.startswith(prefix):
-        raise RecoveryError("blocked planning transaction is not a deterministic inventory failure")
-    try:
-        failure = json.loads(message.removeprefix(prefix))
-    except json.JSONDecodeError as exc:
-        raise RecoveryError("blocked planning inventory failure evidence is malformed") from exc
-    if not isinstance(failure, dict):
-        raise RecoveryError("blocked planning inventory failure evidence is malformed")
-    errors = failure.get("errors")
-    warnings = failure.get("warnings")
-    if (
-        failure.get("exit_code") != 0
-        or errors != []
-        or not isinstance(warnings, list)
-        or not warnings
-        or not all(isinstance(item, str) for item in warnings)
-    ):
-        raise RecoveryError("blocked planning failure is not warning-only deterministic validation")
-    return {"exit_code": 0, "errors": [], "warnings": warnings}
+    semantic_prefix = "queue validation evidence disagrees semantically: "
+    if isinstance(message, str) and message.startswith(prefix):
+        try:
+            failure = json.loads(message.removeprefix(prefix))
+        except json.JSONDecodeError as exc:
+            raise RecoveryError("blocked planning inventory failure evidence is malformed") from exc
+        if not isinstance(failure, dict):
+            raise RecoveryError("blocked planning inventory failure evidence is malformed")
+        errors = failure.get("errors")
+        warnings = failure.get("warnings")
+        if (
+            failure.get("exit_code") != 0
+            or errors != []
+            or not isinstance(warnings, list)
+            or not warnings
+            or not all(isinstance(item, str) for item in warnings)
+        ):
+            raise RecoveryError(
+                "blocked planning failure is not warning-only deterministic validation"
+            )
+        return {
+            "classification": "warning_only_inventory_failure",
+            "exit_code": 0,
+            "errors": [],
+            "warnings": warnings,
+            "historical_disagreements": [],
+        }
+    if isinstance(message, str) and message.startswith(semantic_prefix):
+        disagreements = sorted(
+            {item.strip() for item in message.removeprefix(semantic_prefix).split(",") if item.strip()}
+        )
+        count_fields = {
+            "feature_count",
+            "global_feature_count",
+            "global_milestone_count",
+            "milestone_count",
+            "configured_milestone_feature_count",
+        }
+        if not disagreements or not set(disagreements).issubset(count_fields):
+            raise RecoveryError(
+                "blocked planning semantic failure is not count-validation-only"
+            )
+        return {
+            "classification": "historical_count_semantics_failure",
+            "exit_code": 0,
+            "errors": [],
+            "warnings": [],
+            "historical_disagreements": disagreements,
+        }
+    raise RecoveryError(
+        "blocked planning transaction is not a recoverable deterministic validation failure"
+    )
 
 
 def normalize_queue_validation_evidence(value: dict[str, Any]) -> dict[str, Any]:
@@ -401,7 +490,9 @@ def normalize_queue_validation_evidence(value: dict[str, Any]) -> dict[str, Any]
         items = value[present]
         if not isinstance(items, list) or not all(isinstance(item, str) and item for item in items):
             raise RecoveryError(f"queue validation {present} is malformed")
-        return sorted(set(items))
+        if len(items) != len(set(items)):
+            raise RecoveryError(f"queue validation {present} contains duplicate feature IDs")
+        return sorted(items)
 
     def integer(*names: str) -> int | None:
         present = next((name for name in names if name in value), None)
@@ -418,15 +509,36 @@ def normalize_queue_validation_evidence(value: dict[str, Any]) -> dict[str, Any]
     usage = value.get("project_usage")
     if usage is not None and not isinstance(usage, str):
         raise RecoveryError("queue validation project_usage is malformed")
+    milestone_name = next(
+        (
+            name
+            for name in (
+                "active_milestone",
+                "resolved_milestone",
+                "configured_milestone",
+                "milestone",
+            )
+            if name in value
+        ),
+        None,
+    )
+    milestone = value.get(milestone_name) if milestone_name else None
+    if milestone is not None and (not isinstance(milestone, str) or not milestone):
+        raise RecoveryError(f"queue validation {milestone_name} is malformed")
+    milestone_found = value.get("milestone_found")
+    if milestone_found is not None and not isinstance(milestone_found, bool):
+        raise RecoveryError("queue validation milestone_found is malformed")
     return {
         "ok": ok,
+        "milestone_found": milestone_found,
+        "active_milestone": milestone,
         "errors": count("errors"),
         "warnings": count("warnings"),
         "ready_features": feature_ids("ready_features", "ready"),
         "active_features": feature_ids("active_features", "active"),
         "feature_count": integer("feature_count"),
-        "milestone_count": integer("milestone_count"),
-        "configured_milestone_feature_count": integer("feature_count_in_configured_milestone"),
+        "global_feature_count": integer("global_feature_count"),
+        "global_milestone_count": integer("global_milestone_count", "milestone_count"),
         "project_usage": usage,
     }
 
@@ -439,13 +551,26 @@ def compare_queue_validation_evidence(
     normalized_deterministic = normalize_queue_validation_evidence(deterministic)
     disagreements: list[str] = []
     for name in (
-        "ok", "errors", "warnings", "ready_features", "active_features",
-        "feature_count", "milestone_count", "configured_milestone_feature_count",
+        "ok",
+        "milestone_found",
+        "active_milestone",
+        "errors",
+        "warnings",
+        "ready_features",
+        "active_features",
+        "feature_count",
+        "global_feature_count",
+        "global_milestone_count",
         "project_usage",
     ):
         left, right = normalized_structured[name], normalized_deterministic[name]
         if left is not None and right is not None and left != right:
             disagreements.append(name)
+    for name in ("feature_count", "global_feature_count", "global_milestone_count"):
+        if normalized_structured[name] is None:
+            disagreements.append(f"missing_{name}")
+        if normalized_deterministic[name] is None:
+            disagreements.append(f"missing_deterministic_{name}")
     if normalized_structured["errors"] not in {None, 0} or normalized_deterministic["errors"] not in {None, 0}:
         disagreements.append("nonzero_errors")
     if disagreements:
@@ -611,7 +736,7 @@ def inspect_planning_finalization_recovery(
     planning_paths = sorted(planning_transaction.get("changed_paths") or [])
     envelope_paths = sorted(envelope.get("changed_paths") or [])
     mutation_fingerprint = inspector.planning_diff_fingerprint()
-    warning_failure = _warning_only_inventory_failure(planning_transaction)
+    recoverable_failure = _recoverable_planning_validation_failure(planning_transaction)
     policy = start_payload.get("allowed_mutation_policy") or {}
     allowed_paths = set(policy.get("allowed_paths") or [])
     allowed_prefixes = tuple(str(item).rstrip("/") for item in policy.get("allowed_prefixes") or [])
@@ -647,7 +772,6 @@ def inspect_planning_finalization_recovery(
         "terminal_branch": terminal_snapshot.get("branch") == starting_branch,
         "terminal_head": terminal_snapshot.get("head") == starting_head,
         "changed_paths": current_paths == recorded_paths == planning_paths == envelope_paths,
-        "exact_allowed_path_count": len(current_paths) == 7,
         "planning_paths_only": bool(current_paths) and all(allowed_planning_path(path) for path in current_paths),
         "original_policy_authorizes_paths": policy_authorized,
         "no_production_or_test_paths": not any(
@@ -664,11 +788,13 @@ def inspect_planning_finalization_recovery(
             and planning_transaction.get("run_id") == run_id
             and planning_transaction.get("session_id") == session_id
             and planning_transaction.get("planning_start_commit") == starting_head
-            and planning_transaction.get("result_classification") == "RECONCILED_READY_WORK"
+            and planning_transaction.get("result_classification")
+            == report_evidence["terminal_classification"]
         ),
         "session_report_identity": (
             session_report.get("structured_output_validation") == "valid"
-            and session_report.get("result_classification") == "RECONCILED_READY_WORK"
+            and session_report.get("result_classification")
+            == report_evidence["terminal_classification"]
             and session_report.get("parsed_structured_result") == envelope
             and session_report.get("terminal_marker_found") is True
             and envelope.get("starting_branch") == starting_branch
@@ -676,7 +802,7 @@ def inspect_planning_finalization_recovery(
             and envelope.get("current_commit") == starting_head
         ),
         "writer_lease_absent": writer_lease_exists is False,
-        "warning_only_failure": bool(warning_failure["warnings"]),
+        "recoverable_validation_failure": bool(recoverable_failure["classification"]),
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
@@ -691,32 +817,52 @@ def inspect_planning_finalization_recovery(
     selection = _selected_feature_evidence(project, queue, report_evidence["classification"])
     selected = selection.get("selected_feature")
     result_queue = (report_evidence.get("structured_result") or {}).get("queue_validation") or {}
+    inventory = _inventory_validation(project)
+    queue_comparison = compare_queue_validation_evidence(result_queue, inventory)
+    nonfatal_warnings = list(
+        dict.fromkeys(
+            [
+                *recoverable_failure["warnings"],
+                *list(inventory.get("nonfatal_warnings") or []),
+            ]
+        )
+    )
+    reported_ready = result_queue.get("ready_features", result_queue.get("ready"))
     if (
         result_queue.get("selected_feature") != selected
-        or list(result_queue.get("ready_features") or []) != selection["ready_features"]
-        or result_queue.get("dependencies_complete") is not True
+        or list(reported_ready or []) != selection["ready_features"]
+        or (
+            selected is not None
+            and result_queue.get("dependencies_complete") is not True
+        )
     ):
         raise RecoveryError("session queue evidence disagrees with deterministic recovery selection")
 
-    baseline_text = inspector.file_at_commit(starting_head, project.queue_location)
-    try:
-        baseline_queue = FeatureQueue(json.loads(baseline_text or ""))
-    except (json.JSONDecodeError, QueueError, ValueError) as exc:
-        raise RecoveryError("starting commit lacks authoritative queue evidence") from exc
-    selected_before = baseline_queue.feature(str(selected))
-    selected_after = queue.feature(str(selected))
-    if (
-        not isinstance(selected_before, dict)
-        or not isinstance(selected_after, dict)
-        or selected_before.get("status") != "proposed"
-        or selected_after.get("status") != "ready"
-        or any(selected_after.get(key) for key in ("branch", "accepted_commit", "integrated_commit"))
-    ):
-        raise RecoveryError("selected feature is not proposed-to-ready planning work only")
+    baseline_queue: FeatureQueue | None = None
+    if selected is not None:
+        baseline_text = inspector.file_at_commit(starting_head, project.queue_location)
+        try:
+            baseline_queue = FeatureQueue(json.loads(baseline_text or ""))
+        except (json.JSONDecodeError, QueueError, ValueError) as exc:
+            raise RecoveryError("starting commit lacks authoritative queue evidence") from exc
+        selected_before = baseline_queue.feature(str(selected))
+        selected_after = queue.feature(str(selected))
+        if (
+            not isinstance(selected_before, dict)
+            or not isinstance(selected_after, dict)
+            or selected_before.get("status") != "proposed"
+            or selected_after.get("status") != "ready"
+            or any(
+                selected_after.get(key)
+                for key in ("branch", "accepted_commit", "integrated_commit")
+            )
+        ):
+            raise RecoveryError("selected feature is not proposed-to-ready planning work only")
     dependency_evidence: dict[str, Any] = {}
     for dependency in selection["dependencies"]:
         current = queue.feature(dependency) or {}
-        baseline = baseline_queue.feature(dependency) or {}
+        baseline = baseline_queue.feature(dependency) if baseline_queue else {}
+        baseline = baseline or {}
         commit = baseline.get("integrated_commit") or baseline.get("commit")
         evidence = {
             "baseline_status": baseline.get("status"),
@@ -759,7 +905,13 @@ def inspect_planning_finalization_recovery(
             for item in queue.features_for_milestone(project.active_milestone or "")
             if item.get("status") in {"done", "integrated"} and isinstance(item.get("id"), str)
         ),
-        "nonfatal_warnings": warning_failure["warnings"],
+        "inventory_validation": inventory,
+        "queue_validation_evidence": queue_comparison,
+        "recovered_failure_classification": recoverable_failure["classification"],
+        "historical_count_disagreements": recoverable_failure[
+            "historical_disagreements"
+        ],
+        "nonfatal_warnings": nonfatal_warnings,
         "checks": checks,
         "model_sessions_that_would_launch": [],
         "child_sessions_that_would_launch": [],

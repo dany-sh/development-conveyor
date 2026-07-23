@@ -786,7 +786,8 @@ class WorkflowKernel:
         expected_diff_fingerprint: str,
         plan_fingerprint: str,
         validation_evidence: dict[str, Any],
-        selected_feature: str,
+        selected_feature: str | None,
+        next_state: str,
     ) -> str:
         """Commit one exact dirty planning baseline without inventing a model session."""
 
@@ -913,13 +914,13 @@ class WorkflowKernel:
                 "model_session_launched": False,
             },
         )
-        transaction.next_project_state = "feature_ready"
+        transaction.next_project_state = next_state
         return commit
 
     def adopt_committed_planning_recovery(
         self, *, original_transaction_id: str, commit: str, expected_parent: str,
         expected_paths: tuple[str, ...], expected_subject: str, plan_fingerprint: str,
-        selected_feature: str,
+        selected_feature: str | None, next_state: str,
     ) -> str:
         """Record fresh terminal evidence for an existing, verified planning commit."""
         transaction = self._require()
@@ -957,7 +958,7 @@ class WorkflowKernel:
             workflow_type=transaction.workflow_type, payload={"recovered_transaction_id": original_transaction_id,
                 "classification": "queue_reconciliation_committed_finalization_recovery",
                 "selected_feature": selected_feature, "model_session_launched": False})
-        transaction.next_project_state = "feature_ready"
+        transaction.next_project_state = next_state
         return commit
 
     def finalize_deterministic_feature_recovery(

@@ -445,15 +445,28 @@ def _validate_reconciliation_result(value: Any) -> dict[str, Any]:
     validation = value.get("queue_validation")
     if not isinstance(validation, dict):
         raise SessionError("structured result $.queue_validation: expected an object")
-    for key in ("valid", "milestone_found", "feature_count"):
+    for key in (
+        "valid",
+        "milestone_found",
+        "feature_count",
+        "global_feature_count",
+        "global_milestone_count",
+    ):
         if key not in validation:
             raise SessionError(f"structured result $.queue_validation: missing key {key}")
     if not isinstance(validation["valid"], bool):
         raise SessionError("structured result $.queue_validation.valid: expected a boolean")
     if not isinstance(validation["milestone_found"], bool):
         raise SessionError("structured result $.queue_validation.milestone_found: expected a boolean")
-    if not isinstance(validation["feature_count"], int) or isinstance(validation["feature_count"], bool) or validation["feature_count"] < 0:
-        raise SessionError("structured result $.queue_validation.feature_count: expected a non-negative integer")
+    for key in ("feature_count", "global_feature_count", "global_milestone_count"):
+        if (
+            not isinstance(validation[key], int)
+            or isinstance(validation[key], bool)
+            or validation[key] < 0
+        ):
+            raise SessionError(
+                f"structured result $.queue_validation.{key}: expected a non-negative integer"
+            )
     if not isinstance(value.get("retryable"), bool):
         raise SessionError("structured result $.retryable: expected a boolean")
     human = value.get("human_decision")
