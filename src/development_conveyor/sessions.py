@@ -19,6 +19,7 @@ from .compatibility import (
     resolve_model_selection,
 )
 from .errors import SessionError
+from .warning_evidence import WarningEvidenceError, normalize_warning_evidence
 from .redaction import redact_text
 from .registry import Project
 from .repository import RepositoryInspector
@@ -489,6 +490,10 @@ def _validate_reconciliation_result(value: Any) -> dict[str, Any]:
             raise SessionError(
                 f"structured result $.queue_validation.{key}: expected a non-negative integer"
             )
+    try:
+        normalize_warning_evidence(validation, source="structured")
+    except WarningEvidenceError as exc:
+        raise SessionError(f"structured result $.queue_validation: {exc}") from exc
     if not isinstance(value.get("retryable"), bool):
         raise SessionError("structured result $.retryable: expected a boolean")
     human = value.get("human_decision")

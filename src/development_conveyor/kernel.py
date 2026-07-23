@@ -33,6 +33,7 @@ from .repository import RepositoryInspector
 from .snapshots import capture_repository_snapshot
 from .workflow_lease import WorkflowWriterLease
 from .accepted_commit import finalize_accepted_commit
+from .warning_evidence import WarningEvidenceError, normalize_warning_evidence
 
 
 InterruptionHook = Callable[[str, PhaseTransaction], None]
@@ -2034,6 +2035,15 @@ class QueueReconciliationAdapter(PhaseAdapter):
             raise TransactionError(
                 "queue terminal classification does not authorize its projected next state"
             )
+        validation = envelope.evidence.get("queue_validation")
+        if not isinstance(validation, dict):
+            raise TransactionError(
+                "queue reconciliation result lacks queue-validation evidence"
+            )
+        try:
+            normalize_warning_evidence(validation, source="structured")
+        except WarningEvidenceError as exc:
+            raise TransactionError(str(exc)) from exc
 
 
 class FeaturePreparationAdapter(PhaseAdapter):

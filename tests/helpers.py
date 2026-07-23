@@ -200,6 +200,7 @@ class SyntheticLauncher:
                     "feature_count": 1,
                     "global_feature_count": 1,
                     "global_milestone_count": 1,
+                    "warning_count": 0,
                 },
                 "retryable": False,
                 "human_decision": None,

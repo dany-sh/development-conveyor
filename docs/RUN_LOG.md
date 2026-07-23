@@ -811,3 +811,24 @@ This log records model configuration and deterministic deployment evidence. It n
 - Deterministic gates: existing IDs and dependencies must survive; new IDs must be absent before the session and created exactly once; unrequested feature metadata cannot change; dependency IDs and cycles, milestone schema, execution profiles, specification headings, acceptance criteria, exact changed paths, production/test/runtime exclusions, single-ready outcome, and `git diff --check` all fail closed.
 - Recovery and stop: successful apply creates one planning-only commit, leaves the repository clean, projects `feature_ready`, and never starts feature preparation or execution. `recover-scope-features` validates an exact retained diff and uses the existing zero-model planning finalizer, including an authorized requested new specification, without launching a parent or child session.
 - Focused validation: 218 affected scoping, queue, execution-profile, planning-transaction, recovery, projection/consistency, cache-binding, CLI compatibility, configuration, and transactional-kernel tests passed. `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, `scripts/conveyor scope-features --help`, and `git diff --check` exited zero. Configuration validation reported both registered application queues valid.
+
+### Model execution — 2026-07-23T17:03:24+00:00
+
+- Agent role: `default_interactive`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `warning_evidence_normalization_repair`
+- Safety and autonomy contracts unchanged: `true`
+
+### Queue warning-evidence normalization and retained F009 recovery — 2026-07-23
+
+- Scope: controller-only repair on `codex/m1-3-warning-evidence-normalization` from `96391c4d7107e18beac272cfa7bcd6b5a218c6fb`; both registered application repositories remained outside the production write boundary.
+- Root cause: the structured session envelope accepted an unconstrained `queue_validation`, while later semantic comparison treated `warnings` as an exact list. The recorded Interview Companion result used the prose summary `"M1-M9 preparation metadata warnings only"`, so structured validation passed and planning finalization rejected it as malformed.
+- Canonical contract: new results require non-negative `warning_count`; may use explanatory `warnings_scope`; may use string-array `blocking_warnings`; and may include `warnings` only as a string array. The deterministic warning list owns the actual count and configured blocking classification.
+- Shared normalization: the same helper now governs typed session-result parsing, queue-reconciliation semantic validation, report comparison, planning recovery, and consistency classification. Count mismatch, malformed arrays, and blocking disagreement fail closed.
+- Historical boundary: the prose warning summary is accepted only for project `interview-companion`, transaction `13b0828a-68e7-48a6-8c74-af5d3d411d26`, run `826d9612-0cb1-441d-91ca-7531e64295bd`, session `019f8e4c-19b4-7341-b860-90a784efa190`, the exact eight retained paths, and the recorded malformed-warning failure. It remains a scope summary, never an exact warning list.
+- Exact dry run: all branch, HEAD, run, session, transaction, path, diff, policy, source/test exclusion, lease absence, queue count, dependency, and ready-feature checks passed. The deterministic validator reported 18 nonblocking M1-M9 preparation warnings; F002 and F008 were integrated with passed evidence; F009 was the sole selected ready feature.
+- Recovery behavior: zero models and zero children; one planning-only commit; recovery transaction and projection terminalize to `feature_ready`; compatibility cache derives its active semantics from the terminal projection; feature execution and milestone integration remain disabled.
+- Validation boundary: only affected warning, queue-reconciliation, planning-finalization, structured-envelope, consistency, and routing tests plus `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, `scripts/conveyor recover-planning --help`, and `git diff --check`. No application test, complete controller suite, real resume, queue reconciliation, live recovery apply, feature execution, or milestone integration.

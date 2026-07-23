@@ -1960,6 +1960,7 @@ if dirty:
             git(repository, "add", project.queue_location)
             git(repository, "commit", "-m", "test: use canonical phase milestone")
             aliased = replace(project, active_milestone="P0")
+            controller_configuration(root, aliased)
 
             result = ConsistencyChecker(
                 controller_root=root / "controller", project=aliased
@@ -2295,7 +2296,12 @@ kernel.acquire_lease(); kernel.capture_snapshot()
                     "current_commit": transaction.starting_head,
                     "feature_id": None,
                     "changed_paths": ["docs/FEATURE_QUEUE.yaml"],
-                    "evidence": {"adapter": "queue_reconciliation"},
+                    "evidence": {
+                        "adapter": "queue_reconciliation",
+                        "queue_validation": {
+                            "warning_count": 0,
+                        },
+                    },
                     "next_state": "feature_ready",
                 }))
 

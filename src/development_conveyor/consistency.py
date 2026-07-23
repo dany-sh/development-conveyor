@@ -40,6 +40,7 @@ from .cycle_cache import (
     validated_canonical_projection_binding,
 )
 from .logging import JsonStateStore
+from .warning_evidence import WarningEvidenceError, compare_warning_evidence
 
 
 SEVERITY_ORDER = {
@@ -1339,6 +1340,20 @@ class ConsistencyChecker:
                 recovery_paths = (
                     (recovery.get("existing_planning_changes") or {}).get("paths")
                 )
+                queue_comparison = recovery.get("queue_validation_evidence") or {}
+                try:
+                    warning_comparison = compare_warning_evidence(
+                        queue_comparison.get("raw_structured") or {},
+                        queue_comparison.get("raw_deterministic") or {},
+                        legacy_summary=(
+                            recovery.get("warnings_scope")
+                            if recovery.get("historical_warning_compatibility") is True
+                            else None
+                        ),
+                    )
+                    warning_evidence_agrees = not warning_comparison["disagreements"]
+                except WarningEvidenceError:
+                    warning_evidence_agrees = False
                 planning_checks = {
                     "workflow_precedence": status.get("proposed_next_action")
                     == "planning_finalization",
@@ -1357,6 +1372,7 @@ class ConsistencyChecker:
                     "no_models": status.get("model_sessions_that_would_launch") == [],
                     "no_children": status.get("child_sessions_that_would_launch") == [],
                     "no_sessions": status.get("sessions_that_would_launch") == [],
+                    "warning_evidence": warning_evidence_agrees,
                 }
                 agreement = all(planning_checks.values())
                 agreement_evidence = {

@@ -20,5 +20,41 @@
     "evidence": {"type": "object"},
     "next_state": {"type": "string", "minLength": 1}
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "workflow_type": {"const": "queue_reconciliation"}
+        },
+        "required": ["workflow_type"]
+      },
+      "then": {
+        "properties": {
+          "evidence": {
+            "type": "object",
+            "required": ["queue_validation"],
+            "properties": {
+              "queue_validation": {
+                "type": "object",
+                "required": ["warning_count"],
+                "properties": {
+                  "warning_count": {"type": "integer", "minimum": 0},
+                  "warnings_scope": {"type": "string", "minLength": 1},
+                  "blocking_warnings": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1}
+                  },
+                  "warnings": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

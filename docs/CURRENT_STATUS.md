@@ -1,8 +1,25 @@
 # Current Status
 
-Last updated: 2026-07-22
+Last updated: 2026-07-23
 
 ## Summary
+
+The queue-reconciliation warning-evidence repair is prepared on
+`codex/m1-3-warning-evidence-normalization` from required starting commit
+`96391c4d7107e18beac272cfa7bcd6b5a218c6fb`. New structured results use
+`warning_count`, optional `warnings_scope`, optional `blocking_warnings`, and
+an optional string-array `warnings`; schema parsing and semantic comparison now
+share the same normalizer. Exact historical compatibility is limited to
+Interview Companion run `826d9612-0cb1-441d-91ca-7531e64295bd`.
+
+Its live non-mutating recovery preflight validates the retained eight-file
+planning diff, starting HEAD `2b48544aa1d9f5ae01aa16e189581405ac8ff317`,
+session `019f8e4c-19b4-7341-b860-90a784efa190`, 18 deterministic nonblocking
+M1-M9 preparation warnings, integrated F002/F008 dependencies, and F009 as the
+sole ready feature. Apply remains intentionally unexecuted; the recovery plans
+zero model and child sessions, one planning-only commit, atomic ledger,
+projection, and compatibility-cache finalization, and a stop at
+`feature_ready` before feature execution.
 
 The bounded `scope-features` controller command is implemented on
 `codex/m1-3-scope-features-command` from required starting commit `ebfd6e9`.
@@ -40,19 +57,20 @@ M1 — Transactional workflow kernel
 
 ## Active feature
 
-M1-003 — Bounded feature scoping command (`implementation prepared`)
+M1-003 — Bounded feature scoping command (`warning-evidence recovery repair prepared`)
 
 ## Next boundary
 
-Commit the bounded controller command. Do not apply it to Interview Companion
-during implementation, begin feature execution, merge a default branch, push,
-tag, publish, deploy, release, or run a real Conveyor resume.
+Commit the warning-evidence normalization repair. Do not apply the retained
+Interview Companion recovery during controller development, begin feature
+execution, merge a default branch, push, tag, publish, deploy, release, or run
+a real Conveyor resume.
 
 ## Validation scope
 
-Validation is limited to affected scoping CLI, planning transaction, queue,
-execution-profile, validation, recovery, projection/consistency, and
-cache-binding tests; `compileall`; configuration validation; command help; and
-`git diff --check`. Application tests, the complete controller suite, a real
-scoping apply, ordinary resume, queue reconciliation, and milestone integration
-are intentionally excluded.
+Validation is limited to affected warning schema, planning transaction, queue
+reconciliation, recovery, consistency, and routing tests; the exact retained
+recovery dry run; `compileall`; configuration validation; command help; and
+`git diff --check`. Application tests, the complete controller suite, live
+recovery apply, ordinary resume, queue reconciliation, and milestone
+integration are intentionally excluded.

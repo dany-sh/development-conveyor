@@ -59,6 +59,7 @@ def assistant_result(classification: str, feature_count: int) -> tuple[dict, str
             "feature_count": feature_count,
             "global_feature_count": feature_count,
             "global_milestone_count": 1,
+            "warning_count": 0,
         },
         "retryable": False,
         "human_decision": None,
@@ -350,6 +351,7 @@ class PlanningTransactionTests(unittest.TestCase):
                 "feature_count": 14,
                 "global_feature_count": 14,
                 "global_milestone_count": 1,
+                "warning_count": 1,
                 "selected_feature": "P0-003",
                 "ready_features": ["P0-003"],
                 "dependencies_complete": True,
@@ -548,6 +550,7 @@ class PlanningTransactionTests(unittest.TestCase):
                 "feature_count": 12,
                 "global_feature_count": 97,
                 "global_milestone_count": 10,
+                "warning_count": 0,
                 "ready": [],
             },
             "retryable": False,
@@ -925,7 +928,25 @@ class PlanningTransactionTests(unittest.TestCase):
             )
             status_before = git(repository, "status", "--porcelain=v1", "--branch")
             ledger_before = ledger.path.read_bytes()
-            with patch.object(engine, "_compatibility_snapshot", return_value={}) as compatibility:
+            inventory = {
+                "ok": True,
+                "exit_code": 0,
+                "errors": [],
+                "warnings": warnings,
+                "nonfatal_warnings": warnings,
+                "blocking_warnings": [],
+                "feature_count": 14,
+                "global_feature_count": 14,
+                "global_milestone_count": 1,
+                "validator": "synthetic inventory validator",
+            }
+            with (
+                patch.object(engine, "_compatibility_snapshot", return_value={}) as compatibility,
+                patch(
+                    "development_conveyor.planning._inventory_validation",
+                    return_value=inventory,
+                ),
+            ):
                 plan = engine.run_project(project, "resume", dry_run=True)
             compatibility.assert_not_called()
             self.assertEqual(git(repository, "status", "--porcelain=v1", "--branch"), status_before)
@@ -1082,6 +1103,7 @@ class PlanningTransactionTests(unittest.TestCase):
                 "feature_count": 12,
                 "global_feature_count": 97,
                 "global_milestone_count": 10,
+                "warning_count": 0,
                 "ready": [],
             }
             comparison = compare_queue_validation_evidence(
@@ -1107,6 +1129,9 @@ class PlanningTransactionTests(unittest.TestCase):
             "feature_count": 12,
             "global_feature_count": 97,
             "global_milestone_count": 10,
+            "warning_count": 0,
+            "warnings": [],
+            "blocking_warnings": [],
             "ready": [],
         }
         cases = {

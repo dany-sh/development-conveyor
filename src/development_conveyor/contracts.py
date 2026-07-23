@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 from .errors import SchemaValidationError, TransactionError
+from .warning_evidence import WarningEvidenceError, normalize_warning_evidence
 
 
 class WorkflowType(str, Enum):
@@ -444,6 +445,19 @@ class SessionResultEnvelope:
         evidence = value["evidence"]
         if not isinstance(evidence, dict):
             raise SchemaValidationError("session-result evidence must be an object")
+        if workflow == WorkflowType.QUEUE_RECONCILIATION:
+            queue_validation = evidence.get("queue_validation")
+            if not isinstance(queue_validation, dict):
+                raise SchemaValidationError(
+                    "queue-reconciliation evidence.queue_validation must be an object"
+                )
+            try:
+                normalize_warning_evidence(
+                    queue_validation,
+                    source="structured",
+                )
+            except WarningEvidenceError as exc:
+                raise SchemaValidationError(str(exc)) from exc
         strings = (
             "project_id", "repository_identity", "transaction_id", "run_id", "session_id",
             "starting_branch", "starting_commit", "current_commit", "next_state",

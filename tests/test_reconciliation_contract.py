@@ -36,6 +36,7 @@ def contract(classification: str, feature_count: int = 1, *, human=None, retryab
             "feature_count": feature_count,
             "global_feature_count": feature_count,
             "global_milestone_count": 1,
+            "warning_count": 0,
         },
         "retryable": retryable,
         "human_decision": human,

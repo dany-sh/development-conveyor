@@ -5674,7 +5674,7 @@ class CycleEngine:
             transaction = kernel.begin(
                 workflow_type=WorkflowType.RECOVERY,
                 milestone=project.active_milestone,
-                feature_id=None,
+                feature_id=selected_feature,
                 run_id=recovery_run_id,
                 policy=adapter.policy,
                 start_evidence={
@@ -5834,6 +5834,9 @@ class CycleEngine:
                 "last_successful_checkpoint": "committed_queue_reconciliation_recovery_terminal",
                 "updated_at": utc_now(),
             })
+            cycle.update(
+                cycle_cache_semantics_from_projection(completed["projection"])
+            )
             inspector.ensure_runtime_ignored()
             finalized = write_terminal_cycle_cache(
                 cycle_path, cycle, ledger=ledger,
