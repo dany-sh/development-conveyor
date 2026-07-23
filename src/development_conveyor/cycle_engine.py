@@ -42,6 +42,7 @@ from .planning import (
     finalize_planning_commit,
     inspect_planning_finalization_recovery,
     load_planning_transaction,
+    normalize_corroborated_queue_reconciliation_report,
     normalize_legacy_planning_warning_evidence,
     persist_planning_transaction,
     planning_commit_subject,
@@ -644,15 +645,34 @@ class CycleEngine:
             not in {"validation_failed", "human_decision_required"}
         ):
             return None
-        latest = next((item for item in reversed(projection.get("transactions") or [])
-            if item.get("workflow_type") == WorkflowType.QUEUE_RECONCILIATION.value
-            and item.get("state") == "terminal_failure"
-            and item.get("terminal_classification") in {"PLANNING_VALIDATION_FAILED", "PLANNING_SEMANTIC_CONFLICT"}), {})
+        latest = next((
+            item
+            for item in reversed(projection.get("transactions") or [])
+            if item.get("workflow_type")
+            == WorkflowType.QUEUE_RECONCILIATION.value
+            and (
+                (
+                    item.get("state") == "terminal_failure"
+                    and item.get("terminal_classification")
+                    in {"PLANNING_VALIDATION_FAILED", "PLANNING_SEMANTIC_CONFLICT"}
+                )
+                or (
+                    item.get("state") == "retryable_failure"
+                    and item.get("terminal_classification")
+                    == "RETRYABLE_PLANNING_FAILURE"
+                )
+            )
+        ), {})
         if (
             latest.get("workflow_type") != WorkflowType.QUEUE_RECONCILIATION.value
-            or latest.get("state") != "terminal_failure"
-            or latest.get("terminal_classification") not in {
-                "PLANNING_VALIDATION_FAILED", "PLANNING_SEMANTIC_CONFLICT",
+            or (
+                latest.get("state"),
+                latest.get("terminal_classification"),
+            )
+            not in {
+                ("terminal_failure", "PLANNING_VALIDATION_FAILED"),
+                ("terminal_failure", "PLANNING_SEMANTIC_CONFLICT"),
+                ("retryable_failure", "RETRYABLE_PLANNING_FAILURE"),
             }
         ):
             return None
@@ -672,6 +692,7 @@ class CycleEngine:
             session_report = json.loads(session_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RecoveryError("terminal planning recovery lacks its session report") from exc
+        source_session_report_fingerprint = fingerprint(session_report)
         recorded_report = planning_transaction.get("reconciliation_report")
         if recorded_report is not None and (
             not isinstance(recorded_report, str) or Path(recorded_report).resolve() != session_path
@@ -679,6 +700,36 @@ class CycleEngine:
             raise RecoveryError("persisted planning transaction points to a different session report")
         inspector = RepositoryInspector(project.repository)
         identity = inspector.identity()
+        latest_snapshot = latest.get("starting_snapshot") or {}
+        latest_sessions = list(latest.get("session_ids") or [])
+        session_id = planning_transaction.get("session_id")
+        if session_id is None and len(latest_sessions) == 1:
+            session_id = latest_sessions[0]
+        starting_branch = (
+            planning_transaction.get("branch")
+            or latest_snapshot.get("branch")
+        )
+        starting_commit = (
+            planning_transaction.get("planning_start_commit")
+            or latest_snapshot.get("head")
+        )
+        if not all(
+            isinstance(item, str) and item
+            for item in (session_id, starting_branch, starting_commit)
+        ):
+            raise RecoveryError(
+                "terminal planning recovery lacks controller-owned session identity"
+            )
+        session_report = normalize_corroborated_queue_reconciliation_report(
+            session_report,
+            project=project,
+            repository_identity=identity["repository_id"],
+            transaction_id=original_transaction_id,
+            run_id=run_id,
+            session_id=session_id,
+            starting_branch=starting_branch,
+            starting_commit=starting_commit,
+        )
         state_root = self.root / "state/projects" / project.project_id
         ledger = EvidenceLedger(
             state_root / "evidence-ledger.jsonl",
@@ -734,7 +785,10 @@ class CycleEngine:
             "planning_transaction_path": str(planning_path),
             "session_report_path": str(session_path),
             "planning_transaction_fingerprint": fingerprint(planning_transaction),
-            "session_report_fingerprint": fingerprint(session_report),
+            "session_report_fingerprint": source_session_report_fingerprint,
+            "normalized_terminal_fingerprint": fingerprint(
+                session_report["structured_result"]
+            ),
             "failed_recovery_supersession": failed_recovery,
         })
         plan["plan_fingerprint"] = fingerprint(plan)
@@ -5887,6 +5941,12 @@ class CycleEngine:
                     "original_ledger_fingerprint": expected_plan["original_ledger_fingerprint"],
                     "planning_transaction_fingerprint": expected_plan["planning_transaction_fingerprint"],
                     "session_report_fingerprint": expected_plan["session_report_fingerprint"],
+                    "normalized_terminal_fingerprint": expected_plan[
+                        "normalized_terminal_fingerprint"
+                    ],
+                    "historical_child_session_attempts": expected_plan.get(
+                        "historical_child_session_attempts", []
+                    ),
                     "supersedes_failed_recovery": (
                         (expected_plan.get("failed_recovery_supersession") or {}).get(
                             "transaction_id"
@@ -5906,6 +5966,9 @@ class CycleEngine:
                 "diff_fingerprint": expected_plan.get("mutation_fingerprint") or expected_plan.get("existing_commit"),
                 "selected_feature": selected_feature,
                 "model_session_launched": False,
+                "historical_child_session_attempts": expected_plan.get(
+                    "historical_child_session_attempts", []
+                ),
             })
             try:
                 session_report = json.loads(
@@ -5913,6 +5976,30 @@ class CycleEngine:
                 )
             except (OSError, json.JSONDecodeError) as exc:
                 raise RecoveryError("planning recovery session report changed") from exc
+            if (
+                fingerprint(session_report)
+                != expected_plan["session_report_fingerprint"]
+            ):
+                raise RecoveryError(
+                    "planning recovery source session report changed after checkpoint"
+                )
+            session_report = normalize_corroborated_queue_reconciliation_report(
+                session_report,
+                project=effective,
+                repository_identity=identity["repository_id"],
+                transaction_id=expected_plan["original_transaction_id"],
+                run_id=expected_plan["original_run_id"],
+                session_id=expected_plan["original_session_id"],
+                starting_branch=expected_plan["starting_branch"],
+                starting_commit=expected_plan["starting_commit"],
+            )
+            if (
+                fingerprint(session_report.get("structured_result"))
+                != expected_plan["normalized_terminal_fingerprint"]
+            ):
+                raise RecoveryError(
+                    "planning recovery normalized terminal result changed"
+                )
             if committed_recovery:
                 inventory = expected_plan.get("inventory_validation") or {}
                 validation_warnings = list(inventory.get("nonfatal_warnings") or [])
@@ -6047,6 +6134,9 @@ class CycleEngine:
                     "planning_result_commit": commit,
                     "recovered_transaction_id": expected_plan["original_transaction_id"],
                     "model_session_launched": False,
+                    "historical_child_session_attempts": expected_plan.get(
+                        "historical_child_session_attempts", []
+                    ),
                     "nonfatal_warnings": validation_warnings,
                     "human_merge_gate": None,
                 },
@@ -6074,6 +6164,9 @@ class CycleEngine:
                 "nonfatal_warnings": validation_warnings,
                 "model_sessions_launched": [],
                 "child_sessions_launched": [],
+                "historical_child_session_attempts": expected_plan.get(
+                    "historical_child_session_attempts", []
+                ),
                 "deterministic_only": True,
                 "outcome": "planning_recovery_committed",
                 "ordinary_queue_reconciliation_available": True,
@@ -6147,6 +6240,9 @@ class CycleEngine:
                 "nonfatal_warnings": validation_warnings,
                 "model_sessions_launched": [],
                 "child_sessions_launched": [],
+                "historical_child_session_attempts": expected_plan.get(
+                    "historical_child_session_attempts", []
+                ),
                 "ordinary_queue_reconciliation_available": True,
                 "next_action_after_consistency": (
                     "feature_cycle" if selected_feature else "planning_refinement"

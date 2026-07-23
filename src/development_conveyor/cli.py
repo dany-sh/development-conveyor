@@ -121,8 +121,9 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="exact changed path; repeat once per authorized planning file",
     )
-    recover_planning.add_argument("--apply", action="store_true")
-    recover_planning.add_argument("--dry-run", action="store_true")
+    mode = recover_planning.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
     recover_feature_result = subparsers.add_parser(
         "recover-feature-result",
         help="validate and finalize one exact terminal feature-session implementation without a model",
@@ -358,8 +359,6 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
         return engine.recover_feature_branch(registry.get(args.project), dry_run=args.dry_run)
 
     if args.command == "recover-planning":
-        if args.apply and args.dry_run:
-            raise ConveyorError("--apply and --dry-run are mutually exclusive")
         return engine.recover_planning_transaction(
             registry.get(args.project),
             run_id=args.run_id,

@@ -853,3 +853,22 @@ This log records model configuration and deterministic deployment evidence. It n
 - Focused validation: 76 accepted-commit, feature-acceptance, recovery, transaction, projection, consistency, and integration-preflight tests passed in `105.874s`; the 13 directly changed finalization/recovery tests passed again after final identity tightening. The exact live F009 dry-run passed all 28 bound checks with `application_repository_written: false`.
 - Requested commands: `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, `scripts/conveyor recover-accepted-commit --help`, and `git diff --check` exited zero. Configuration validation reported both registered application queues valid.
 - Isolation and content: Interview Companion remained on `codex/F009-transcription-engine-abstraction` at candidate `777ff201` with exactly the retained three-file fingerprint `23ec1510`; Case Manager remained clean on `codex/p0-foundation` at `f85f7da`. The final profile-aware controller audit found no hard content gate.
+
+### Model execution — 2026-07-23T19:53:38+00:00
+
+- Agent role: `parent-controller-repair`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `queue_result_recovery_child_budget`
+- Safety and autonomy contracts unchanged: `true`
+
+### Queue-result normalization, zero-child enforcement, and retained F010 recovery — 2026-07-23
+
+- Scope and execution: controller-only repair on `codex/m1-4-queue-result-recovery-child-budget` from exact starting commit `d8db9a47a4f1428b83364b3dc3c09a0f16352382`; one direct parent `gpt-5.6-sol`/`medium` session and zero child or named-agent sessions. No application test, ordinary resume, queue reconciliation, recovery apply, F010 preparation or implementation, milestone integration, or complete controller suite ran.
+- Terminal normalization: queue reconciliation alone may map `repository` to `repository_identity`, `result` to `classification`, and supply missing `project_id` and `workflow_type` from the invoked controller transaction. Run, session, transaction, repository, branch, and HEAD must remain present and exact; conflicting canonical/alternate or controller identities fail closed. `RECONCILED_READY_WORK` canonically transitions to `feature_ready`, including the recorded legacy `feature_preparation` spelling.
+- Runtime child budget: zero-child argv now includes `agents.enabled=false` plus both multi-agent feature disables. A model-free prompt-input probe proves collaboration instructions absent before launch, and the live JSONL observer kills the parent on any collaboration tool event. The historical failed run's completed child-launch attempts remain diagnostic evidence in the recovery plan and terminal recovery records.
+- Exact recovery: the live dry-run authenticated run `f5a92b3b-8aa8-4a62-9d05-fc5754351435`, session `019f9056-3267-7181-acf9-5596767837c5`, transaction `3250bdab-b2bb-4e46-9710-139f67509aa9`, branch `codex/m0-foundation`, starting HEAD `9a32da31f9c387ea2085f27399eaf028d4170d6e`, ten retained planning paths, and binary diff `9997ec3dad03145a0265c52bc1ad321d930c80f79b6792a6cebd9de68814d861`. It selected F010, preserved F009 integrated and F006/F011/F097 human-decision state, planned zero models/children, and stopped before feature preparation.
+- Focused validation: 91/91 terminal-contract, queue-reconciliation, cost-policy, zero-child, exact-recovery, rollback, and planning-finalization tests passed. `compileall`, configuration validation, `recover-planning --help`, zero-child capability validation, and `git diff --check` passed. The complete controller suite was intentionally not run.
+- Isolation: before/after SHA-256 inventories proved every controller runtime file byte-identical across the live dry-run. Interview Companion retained the exact ten-file dirty diff on `codex/m0-foundation` at `9a32da31`; Case Manager remained clean on `codex/p0-foundation` at `f85f7dad`. Neither application repository, writer lease, Git operation, ledger, projection cache, compatibility cache, human gate, or runtime record was modified.

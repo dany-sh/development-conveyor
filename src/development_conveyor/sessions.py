@@ -1093,6 +1093,7 @@ class SessionLauncher:
 
         argv = [
             executable,
+            "-c", "agents.enabled=false",
             "-c", "features.multi_agent=false",
             "-c", "features.multi_agent_v2=false",
             "features", "list",
@@ -1116,6 +1117,56 @@ class SessionLauncher:
         if observed != {"multi_agent": False, "multi_agent_v2": False}:
             raise SessionError(
                 "installed Codex CLI cannot mechanically remove collaboration tools"
+            )
+        prompt_probe = [
+            executable,
+            "-c", "agents.enabled=false",
+            "-c", "features.multi_agent=false",
+            "-c", "features.multi_agent_v2=false",
+            "debug", "prompt-input", "zero-child-capability-probe",
+        ]
+        SafetyPolicy.validate_controller_command(
+            prompt_probe, cwd=cwd, registered_repository=cwd, allow_codex=True
+        )
+        probe = subprocess.run(
+            prompt_probe, cwd=cwd, text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False,
+        )
+        if probe.returncode != 0 or any(
+            marker in probe.stdout
+            for marker in (
+                "functions.collaboration.spawn_agent",
+                "You can use `spawn_agent`",
+                "Tools for spawning and managing sub-agents",
+            )
+        ):
+            raise SessionError(
+                "installed Codex CLI cannot prove collaboration tools absent"
+            )
+
+    @staticmethod
+    def _collaboration_tool_call(line: str) -> str | None:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        item = event.get("item") if isinstance(event, dict) else None
+        if not isinstance(item, dict) or item.get("type") != "collab_tool_call":
+            return None
+        tool = item.get("tool")
+        return tool if isinstance(tool, str) and tool else "unknown_collaboration_tool"
+
+    @classmethod
+    def _enforce_child_session_budget(
+        cls, line: str, child_session_budget: int | None
+    ) -> None:
+        if child_session_budget != 0:
+            return
+        collaboration_tool = cls._collaboration_tool_call(line)
+        if collaboration_tool is not None:
+            raise SessionError(
+                "zero-child execution plan observed prohibited collaboration "
+                f"tool call: {collaboration_tool}"
             )
 
     @staticmethod
@@ -1336,6 +1387,7 @@ class SessionLauncher:
         )
         policy_args = self._launch_policy_args(planned_model, planned_reasoning)
         zero_child_args = (
+            "-c", "agents.enabled=false",
             "--disable", "multi_agent", "--disable", "multi_agent_v2", "--strict-config"
         ) if collaboration_tools_removed else ()
         if request.session_id:
@@ -1414,6 +1466,7 @@ class SessionLauncher:
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
         callback_errors: list[BaseException] = []
+        budget_violations: list[str] = []
         observed_session: list[str] = []
         observer_lock = threading.Lock()
 
@@ -1421,6 +1474,17 @@ class SessionLauncher:
             try:
                 for line in iter(stream.readline, ""):
                     destination.append(line)
+                    if observe and request.child_session_budget == 0:
+                        try:
+                            self._enforce_child_session_budget(
+                                line, request.child_session_budget
+                            )
+                        except SessionError:
+                            budget_violations.append(
+                                self._collaboration_tool_call(line)
+                                or "unknown_collaboration_tool"
+                            )
+                            raise
                     if observe and on_session_started is not None:
                         session = self._session_id(line)
                         if session:
@@ -1461,6 +1525,10 @@ class SessionLauncher:
             stderr_reader.join()
             if callback_errors:
                 raise callback_errors[0]
+            if budget_violations:
+                raise SessionError(
+                    "zero-child execution plan exceeded its collaboration boundary"
+                )
             if on_session_started is not None and not observed_session:
                 raise SessionError("typed workflow completed without an early session identity")
             result = subprocess.CompletedProcess(
@@ -1501,7 +1569,19 @@ class SessionLauncher:
             "milestone_integration", "milestone_gate",
         }:
             try:
-                envelope = extract_terminal_envelope(result.stdout)
+                envelope = extract_terminal_envelope(
+                    result.stdout,
+                    corroborated={
+                        "workflow_type": request.action,
+                        "project_id": request.project.project_id,
+                        "repository_identity": str(request.repository_identity or ""),
+                        "transaction_id": str(request.transaction_id or ""),
+                        "run_id": request.run_id,
+                        "session_id": str(session_id or request.session_id or ""),
+                        "starting_branch": str(request.starting_branch or ""),
+                        "starting_commit": str(request.starting_commit or ""),
+                    },
+                )
                 parsed_structured_result = envelope.to_dict()
                 structured = parsed_structured_result
                 if request.action == "milestone_integration":

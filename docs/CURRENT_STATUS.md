@@ -4,6 +4,28 @@ Last updated: 2026-07-23
 
 ## Summary
 
+The queue-result recovery and zero-child enforcement repair is prepared on
+`codex/m1-4-queue-result-recovery-child-budget` from required starting commit
+`d8db9a47a4f1428b83364b3dc3c09a0f16352382`. Compatible legacy queue terminal
+fields normalize only under exact controller run, session, transaction,
+repository, branch, and HEAD corroboration. `RECONCILED_READY_WORK` now forces
+the canonical `feature_ready` transition.
+
+Zero-child launches set `agents.enabled=false`, disable both multi-agent feature
+variants, verify the model-visible prompt contains no collaboration tool
+contract, and terminate on any observed collaboration call. The failed
+Interview Companion run's historical child attempts remain diagnostic evidence
+and are not relaunched.
+
+The exact retained ten-file dry-run passed for run
+`f5a92b3b-8aa8-4a62-9d05-fc5754351435`, session
+`019f9056-3267-7181-acf9-5596767837c5`, transaction
+`3250bdab-b2bb-4e46-9710-139f67509aa9`, starting HEAD `9a32da31`, and binary
+diff `9997ec3d`. It selected F010, preserved F009 as integrated and
+F006/F011/F097 as human-decision work, planned zero models and children, and
+left both application repositories plus all controller runtime files
+byte-identical. Apply remains intentionally unexecuted.
+
 The accepted-feature semantic-status and partial-finalization recovery repair is
 prepared on `codex/m1-3-semantic-accepted-status-recovery` from required
 starting commit `a69aa12ac2be68c7b3a353a376f8d34d744b3595`. Acceptance now resolves
@@ -72,20 +94,22 @@ M1 — Transactional workflow kernel
 
 ## Active feature
 
-M1-003 — Bounded feature scoping command (`semantic accepted-status recovery repair prepared`)
+M1-003 — Bounded feature scoping command (`queue-result recovery and child-budget repair prepared`)
 
 ## Next boundary
 
-Commit the semantic accepted-status recovery repair. Do not apply the retained
-Interview Companion F009 recovery during controller development, rerun F009,
-begin milestone integration, merge a default branch, push, tag, publish,
+Commit the queue-result recovery and zero-child enforcement repair. Do not
+apply the retained Interview Companion planning recovery, prepare or implement
+F010, rerun queue reconciliation, begin milestone integration, merge a default
+branch, push, tag, publish,
 deploy, release, or run an ordinary Conveyor resume.
 
 ## Validation scope
 
-Validation is limited to affected accepted-commit, feature-acceptance,
-recovery, transaction, projection, consistency, and integration-preflight
-tests; the exact retained F009 recovery dry run; `compileall`; configuration
-validation; command help; and `git diff --check`. Application tests, the
-complete controller suite, live recovery apply, ordinary resume, F009 rerun,
+Validation is limited to terminal normalization, queue-reconciliation,
+child-budget, planning-finalization, recovery, and transactional-kernel focused
+tests; the exact retained planning recovery dry run; `compileall`;
+configuration validation; command help; and `git diff --check`. Application
+tests, the complete controller suite, live recovery apply, ordinary resume,
+queue reconciliation rerun, F010 preparation or implementation,
 and milestone integration are intentionally excluded.

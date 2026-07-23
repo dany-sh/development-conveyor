@@ -239,6 +239,7 @@ class CostPolicyTests(unittest.TestCase):
                 plan = launcher.plan(request)
             capability.assert_called_once()
             self.assertIn("--disable", plan.argv)
+            self.assertIn("agents.enabled=false", plan.argv)
             self.assertIn("multi_agent", plan.argv)
             self.assertIn("multi_agent_v2", plan.argv)
             self.assertTrue(plan.collaboration_tools_removed)

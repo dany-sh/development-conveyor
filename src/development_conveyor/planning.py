@@ -9,7 +9,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
-from .contracts import fingerprint
+from .contracts import extract_terminal_envelope, fingerprint
 from .errors import QueueError, RecoveryError
 from .execution_profiles import validate_feature_execution_policy
 from .logging import atomic_write_json, utc_now
@@ -93,6 +93,76 @@ LEGACY_WARNING_SUMMARY_COMPATIBILITY = {
         "docs/features/F009-transcription-engine-abstraction.md",
     ],
 }
+
+
+def normalize_corroborated_queue_reconciliation_report(
+    report: dict[str, Any],
+    *,
+    project: Project,
+    repository_identity: str,
+    transaction_id: str,
+    run_id: str,
+    session_id: str,
+    starting_branch: str,
+    starting_commit: str,
+) -> dict[str, Any]:
+    """Reconstruct a compatible terminal result from immutable controller metadata."""
+
+    if (
+        report.get("structured_output_validation") == "valid"
+        and isinstance(report.get("structured_result"), dict)
+    ):
+        return report
+    envelope = extract_terminal_envelope(
+        str(report.get("redacted_stdout") or ""),
+        corroborated={
+            "workflow_type": "queue_reconciliation",
+            "project_id": project.project_id,
+            "repository_identity": repository_identity,
+            "transaction_id": transaction_id,
+            "run_id": run_id,
+            "session_id": session_id,
+            "starting_branch": starting_branch,
+            "starting_commit": starting_commit,
+        },
+    ).to_dict()
+    child_attempts: list[dict[str, Any]] = []
+    for line in str(report.get("redacted_stdout") or "").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        item = event.get("item") if isinstance(event, dict) else None
+        if (
+            not isinstance(item, dict)
+            or item.get("type") != "collab_tool_call"
+            or item.get("tool") not in {"spawn_agent", "resume_agent"}
+        ):
+            continue
+        child_attempts.append({
+            "event_type": event.get("type"),
+            "tool": item.get("tool"),
+            "receiver_thread_ids": list(item.get("receiver_thread_ids") or []),
+            "status": item.get("status"),
+        })
+    return {
+        **report,
+        "structured_result": envelope,
+        "parsed_structured_result": envelope,
+        "structured_output_validation": "valid",
+        "result_classification": envelope["classification"],
+        "structured_output_errors": [],
+        "failed_semantic_checks": [],
+        "controller_terminal_normalization": {
+            "source_structured_output_validation": report.get(
+                "structured_output_validation"
+            ),
+            "source_result_classification": report.get("result_classification"),
+            "classification": envelope["classification"],
+            "next_state": envelope["next_state"],
+            "child_session_attempts": child_attempts,
+        },
+    }
 
 
 def stable_fingerprint(value: Any) -> str:
@@ -870,6 +940,15 @@ def inspect_planning_finalization_recovery(
     envelope = session_report.get("structured_result")
     if not isinstance(envelope, dict):
         raise RecoveryError("blocked planning session lacks its typed result")
+    normalization = session_report.get("controller_terminal_normalization")
+    compatible_terminal_recovered = (
+        isinstance(normalization, dict)
+        and normalization.get("source_structured_output_validation") == "invalid"
+        and normalization.get("source_result_classification")
+        == "structured_output_invalid"
+        and normalization.get("classification") == "RECONCILED_READY_WORK"
+        and normalization.get("next_state") == "feature_ready"
+    )
     current_paths = sorted(
         set(inspector.tracked_changed_paths()) | set(inspector.untracked_file_hashes())
     )
@@ -877,7 +956,17 @@ def inspect_planning_finalization_recovery(
     planning_paths = sorted(planning_transaction.get("changed_paths") or [])
     envelope_paths = sorted(envelope.get("changed_paths") or [])
     mutation_fingerprint = inspector.planning_diff_fingerprint()
-    recoverable_failure = _recoverable_planning_validation_failure(planning_transaction)
+    recoverable_failure = (
+        {
+            "classification": "compatible_terminal_envelope_recovered",
+            "exit_code": 0,
+            "errors": [],
+            "warnings": [],
+            "historical_disagreements": [],
+        }
+        if compatible_terminal_recovered
+        else _recoverable_planning_validation_failure(planning_transaction)
+    )
     policy = start_payload.get("allowed_mutation_policy") or {}
     allowed_paths = set(policy.get("allowed_paths") or [])
     allowed_prefixes = tuple(str(item).rstrip("/") for item in policy.get("allowed_prefixes") or [])
@@ -897,13 +986,34 @@ def inspect_planning_finalization_recovery(
         "latest_transaction_is_original": latest_transaction.get("transaction_id") == original_transaction_id,
         "latest_transaction_is_terminal_planning_failure": (
             latest_transaction.get("workflow_type") == "queue_reconciliation"
-            and latest_transaction.get("state") == "terminal_failure"
-            and latest_transaction.get("terminal_classification") == "PLANNING_VALIDATION_FAILED"
+            and (
+                (
+                    latest_transaction.get("state") == "terminal_failure"
+                    and latest_transaction.get("terminal_classification")
+                    == "PLANNING_VALIDATION_FAILED"
+                )
+                or (
+                    compatible_terminal_recovered
+                    and latest_transaction.get("state") == "retryable_failure"
+                    and latest_transaction.get("terminal_classification")
+                    == "RETRYABLE_PLANNING_FAILURE"
+                )
+            )
         ),
         "terminal_classification": (
-            blocked_payload.get("classification") == "PLANNING_VALIDATION_FAILED"
-            and blocked_payload.get("terminal_state") == "terminal_failure"
-            and blocked_payload.get("next_state") == "validation_failed"
+            (
+                blocked_payload.get("classification")
+                == "PLANNING_VALIDATION_FAILED"
+                and blocked_payload.get("terminal_state") == "terminal_failure"
+                and blocked_payload.get("next_state") == "validation_failed"
+            )
+            or (
+                compatible_terminal_recovered
+                and blocked_payload.get("classification")
+                == "RETRYABLE_PLANNING_FAILURE"
+                and blocked_payload.get("terminal_state") == "retryable_failure"
+                and blocked_payload.get("next_state") == "validation_failed"
+            )
         ),
         "terminal_projection": (
             (projected.get("payload") or {}).get("current_state") == "validation_failed"
@@ -925,12 +1035,22 @@ def inspect_planning_finalization_recovery(
             == planning_transaction.get("diff_fingerprint")
         ),
         "planning_transaction_identity": (
-            planning_transaction.get("status") == "planning_validation_failed"
+            planning_transaction.get("status")
+            in {"planning_validation_failed", "terminal_planning_failure"}
             and planning_transaction.get("run_id") == run_id
             and planning_transaction.get("session_id") == session_id
             and planning_transaction.get("planning_start_commit") == starting_head
-            and planning_transaction.get("result_classification")
-            == report_evidence["terminal_classification"]
+            and (
+                planning_transaction.get("result_classification")
+                == report_evidence["terminal_classification"]
+                or (
+                    compatible_terminal_recovered
+                    and planning_transaction.get("result_classification")
+                    == "structured_output_invalid"
+                    and planning_transaction.get("failure_classification")
+                    == "structured_output_invalid"
+                )
+            )
         ),
         "session_report_identity": (
             session_report.get("structured_output_validation") == "valid"
@@ -941,6 +1061,9 @@ def inspect_planning_finalization_recovery(
             and envelope.get("starting_branch") == starting_branch
             and envelope.get("starting_commit") == starting_head
             and envelope.get("current_commit") == starting_head
+        ),
+        "compatible_terminal_normalization": (
+            not isinstance(normalization, dict) or compatible_terminal_recovered
         ),
         "writer_lease_absent": writer_lease_exists is False,
         "recoverable_validation_failure": bool(recoverable_failure["classification"]),
@@ -993,6 +1116,10 @@ def inspect_planning_finalization_recovery(
                 historical_warning_compatibility
                 and "selected_feature" not in result_queue
             )
+            and not (
+                compatible_terminal_recovered
+                and "selected_feature" not in result_queue
+            )
         )
         or list(reported_ready or []) != selection["ready_features"]
         or (
@@ -1000,6 +1127,10 @@ def inspect_planning_finalization_recovery(
             and result_queue.get("dependencies_complete") is not True
             and not (
                 historical_warning_compatibility
+                and "dependencies_complete" not in result_queue
+            )
+            and not (
+                compatible_terminal_recovered
                 and "dependencies_complete" not in result_queue
             )
         )
@@ -1080,6 +1211,12 @@ def inspect_planning_finalization_recovery(
             "historical_disagreements"
         ],
         "historical_warning_compatibility": historical_warning_compatibility,
+        "terminal_normalization": normalization,
+        "historical_child_session_attempts": (
+            list(normalization.get("child_session_attempts") or [])
+            if isinstance(normalization, dict)
+            else []
+        ),
         "warnings_scope": canonical_result_queue.get("warnings_scope"),
         "nonfatal_warnings": nonfatal_warnings,
         "checks": checks,

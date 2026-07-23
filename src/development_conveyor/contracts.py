@@ -504,7 +504,90 @@ class SessionResultEnvelope:
 TERMINAL_ENVELOPE_MARKER = "CONVEYOR_TRANSACTION_RESULT="
 
 
-def extract_terminal_envelope(output: str) -> SessionResultEnvelope:
+def _normalize_corroborated_terminal_envelope(
+    value: dict[str, Any],
+    corroborated: dict[str, str],
+) -> dict[str, Any]:
+    """Normalize one compatible legacy envelope without weakening identity checks."""
+
+    normalized = dict(value)
+    expected_workflow = corroborated["workflow_type"]
+    compatible_queue = (
+        expected_workflow == WorkflowType.QUEUE_RECONCILIATION.value
+    )
+    expected_identity = {
+        "project_id": corroborated["project_id"],
+        "repository_identity": corroborated["repository_identity"],
+        "transaction_id": corroborated["transaction_id"],
+        "run_id": corroborated["run_id"],
+        "session_id": corroborated["session_id"],
+        "starting_branch": corroborated["starting_branch"],
+        "starting_commit": corroborated["starting_commit"],
+    }
+    aliases = (
+        {
+            "repository_identity": "repository",
+            "classification": "result",
+            "feature_id": "feature",
+        }
+        if compatible_queue
+        else {}
+    )
+    for canonical, alias in aliases.items():
+        canonical_value = normalized.get(canonical)
+        alias_value = normalized.get(alias)
+        if (
+            canonical_value is not None
+            and alias_value is not None
+            and canonical_value != alias_value
+        ):
+            raise SchemaValidationError(
+                f"terminal session-result envelope has conflicting {canonical} and {alias}"
+            )
+        if canonical not in normalized and alias in normalized:
+            normalized[canonical] = alias_value
+        normalized.pop(alias, None)
+
+    for key, expected in expected_identity.items():
+        observed = normalized.get(key)
+        if observed is None and not (compatible_queue and key == "project_id"):
+            raise SchemaValidationError(
+                f"terminal session-result envelope {key} is absent"
+            )
+        if observed is not None and observed != expected:
+            raise SchemaValidationError(
+                f"terminal session-result envelope {key} conflicts with controller metadata"
+            )
+        if observed is None:
+            normalized[key] = expected
+
+    observed_workflow = normalized.get("workflow_type")
+    if observed_workflow is None and not compatible_queue:
+        raise SchemaValidationError(
+            "terminal session-result envelope workflow_type is absent"
+        )
+    if observed_workflow is not None and observed_workflow != expected_workflow:
+        raise SchemaValidationError(
+            "terminal session-result envelope workflow_type conflicts with invoked workflow"
+        )
+    if observed_workflow is None:
+        normalized["workflow_type"] = expected_workflow
+
+    if (
+        compatible_queue
+        and normalized.get("classification") == "RECONCILED_READY_WORK"
+        and normalized.get("next_state")
+        in {"feature_preparation", "feature_preparing", "feature_ready"}
+    ):
+        normalized["next_state"] = "feature_ready"
+    return normalized
+
+
+def extract_terminal_envelope(
+    output: str,
+    *,
+    corroborated: dict[str, str] | None = None,
+) -> SessionResultEnvelope:
     """Accept one envelope only from the final assistant result in a JSON event stream."""
 
     assistant_messages: list[str] = []
@@ -537,6 +620,22 @@ def extract_terminal_envelope(output: str) -> SessionResultEnvelope:
         raise SchemaValidationError("terminal session-result envelope is invalid JSON") from exc
     if not isinstance(value, dict):
         raise SchemaValidationError("terminal session-result envelope must be an object")
+    if corroborated is not None:
+        required = {
+            "workflow_type", "project_id", "repository_identity", "transaction_id",
+            "run_id", "session_id", "starting_branch", "starting_commit",
+        }
+        missing = sorted(required - set(corroborated))
+        invalid = [
+            key for key in required
+            if not isinstance(corroborated.get(key), str) or not corroborated[key]
+        ]
+        if missing or invalid:
+            raise SchemaValidationError(
+                "controller corroboration metadata is incomplete: "
+                + ", ".join(sorted(set(missing + invalid)))
+            )
+        value = _normalize_corroborated_terminal_envelope(value, corroborated)
     return SessionResultEnvelope.from_dict(value)
 
 
