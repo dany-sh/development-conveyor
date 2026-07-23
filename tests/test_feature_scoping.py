@@ -8,7 +8,12 @@ from unittest.mock import patch
 
 from development_conveyor.cli import _parser
 from development_conveyor.errors import QueueError, RecoveryError
-from development_conveyor.feature_scoping import FeatureScoper, _assert_acyclic
+from development_conveyor.feature_scoping import (
+    FeatureScoper,
+    _assert_acyclic,
+    _brief_policy,
+    _brief_sections,
+)
 from development_conveyor.kernel import WorkflowKernel
 from development_conveyor.queue import FeatureQueue
 from development_conveyor.repository import RepositoryInspector
@@ -113,7 +118,12 @@ def scope_fixture(root: Path):
         )
         blocks.append(
             f"## {feature_id} — {TITLES[feature_id]}\n\n"
-            f"Execution policy: {PROFILES[feature_id]}\n"
+            "```yaml\n"
+            "execution_policy:\n"
+            f"  profile: {PROFILES[feature_id]}\n"
+            "  parent_sessions: 1\n"
+            "  child_sessions: 0\n"
+            "```\n"
             f"Dependencies: {dependencies}\n\n"
             f"Define {TITLES[feature_id]}.\n"
         )
@@ -238,6 +248,50 @@ class ScopeLauncher:
 
 
 class FeatureScopingTests(unittest.TestCase):
+    def test_00a_feature_headings_are_bounded_to_one_physical_line(self):
+        brief = (
+            "# F097 — Imported Audio Transcription Workflow\r\n\r\n"
+            "## Dependencies\r\n\r\n"
+            "- F005 — Persistent Data Store\r\n\r\n"
+            "## Product scope\r\n"
+            "Body\r\n"
+            "## Acceptance criteria\r\n"
+            "More body\r\n"
+        )
+        sections = _brief_sections(brief)
+        self.assertEqual(["F097"], list(sections))
+        self.assertEqual("Imported Audio Transcription Workflow", sections["F097"][0])
+        self.assertIn("## Dependencies", sections["F097"][1])
+        self.assertIn("## Product scope", sections["F097"][1])
+        self.assertIn("## Acceptance criteria", sections["F097"][1])
+
+    def test_00b_fenced_policy_preserves_budgets_and_optional_escalation(self):
+        body = (
+            "```yaml\n"
+            "execution_policy:\n"
+            "  profile: multi_module_precise\n"
+            "  parent_sessions: 1\n"
+            "  child_sessions: 0\n"
+            "  escalation:\n"
+            "    trigger: material_import_persistence_or_session_authority_ambiguity\n"
+            "    profile: generic_or_architectural\n"
+            "```\n"
+        )
+        self.assertEqual(
+            {
+                "profile": "multi_module_precise",
+                "parent_sessions": 1,
+                "child_sessions": 0,
+                "escalation": {
+                    "trigger": "material_import_persistence_or_session_authority_ambiguity",
+                    "profile": "generic_or_architectural",
+                },
+            },
+            _brief_policy("F097", body),
+        )
+        with self.assertRaisesRegex(QueueError, "exactly one"):
+            _brief_policy("F097", body + "\n" + body)
+
     def test_00_cli_requires_exactly_one_mode(self):
         common = [
             "scope-features", "--project", "synthetic", "--feature", "F006",
@@ -293,11 +347,11 @@ class FeatureScopingTests(unittest.TestCase):
                 )
             git(repository, "restore", "docs/FEATURE_QUEUE.yaml")
             invalid = brief.read_text(encoding="utf-8").replace(
-                "Execution policy: bounded_precise",
-                "Execution policy: invented_profile",
+                "profile: bounded_precise",
+                "profile: invented_profile",
             )
             brief.write_text(invalid, encoding="utf-8")
-            with self.assertRaisesRegex(QueueError, "unsupported execution profile"):
+            with self.assertRaisesRegex(QueueError, "unsupported profile"):
                 scoper.inspect(
                     project=project, existing_features=TARGETS,
                     new_features=("F097",), ready_feature="F008", brief_path=brief,
