@@ -32,6 +32,7 @@ from .registry import Project
 from .repository import RepositoryInspector
 from .snapshots import capture_repository_snapshot
 from .workflow_lease import WorkflowWriterLease
+from .accepted_commit import finalize_accepted_commit
 
 
 InterruptionHook = Callable[[str, PhaseTransaction], None]
@@ -1105,6 +1106,186 @@ class WorkflowKernel:
         transaction.next_project_state = "integration_pending"
         return commit
 
+    def finalize_deterministic_accepted_commit(
+        self,
+        *,
+        candidate_commit: str,
+        milestone_id: str,
+        milestone_branch: str,
+        milestone_base: str,
+        feature_branch: str,
+        metadata_paths: tuple[str, ...],
+        validation_evidence: dict[str, Any],
+        recovery_evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Reconstruct one direct-child accepted commit without a model session."""
+
+        transaction = self._require()
+        if transaction.workflow_type not in {
+            WorkflowType.FEATURE_ACCEPTANCE,
+            WorkflowType.RECOVERY,
+        }:
+            raise TransactionError(
+                "accepted-commit finalization requires feature_acceptance or recovery"
+            )
+        if transaction.current_state != TransactionState.ACTIVE:
+            raise TransactionError(
+                "accepted-commit finalization requires an active transaction"
+            )
+        if transaction.session_ids:
+            raise TransactionError(
+                "deterministic accepted-commit finalization cannot own a model session"
+            )
+        if transaction.starting_head != candidate_commit:
+            raise TransactionError(
+                "accepted-commit candidate differs from the transaction start"
+            )
+        if tuple(sorted(metadata_paths)) != metadata_paths:
+            raise TransactionError(
+                "accepted-commit metadata paths must be sorted and unique"
+            )
+        transaction.allowed_mutation_policy.validate(metadata_paths)
+        if not all(
+            validation_evidence.get(key) is True
+            for key in ("tests_passed", "review_passed", "documentation_current")
+        ):
+            raise TransactionError(
+                "accepted-commit finalization lacks complete validation evidence"
+            )
+        self._revalidate_lease()
+        observed_paths = tuple(self.inspector.tracked_changed_paths())
+        if observed_paths != metadata_paths or self.inspector.untracked_file_hashes():
+            raise TransactionError(
+                "accepted-commit metadata differs from the authorized worktree"
+            )
+
+        transaction.transition(TransactionState.RESULT_PENDING)
+        self.ledger.append(
+            event_type="DeterministicExecutionStarted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "execution_mode": "immutable_accepted_commit_finalization",
+                "candidate_implementation_commit": candidate_commit,
+                "model_session_launched": False,
+                **(recovery_evidence or {}),
+            },
+        )
+        transaction.transition(TransactionState.VALIDATING)
+        self.ledger.append(
+            event_type="DeterministicResultAccepted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "classification": (
+                    "RECOVERY_APPLIED"
+                    if transaction.workflow_type == WorkflowType.RECOVERY
+                    else "FEATURE_ACCEPTED"
+                ),
+                "candidate_implementation_commit": candidate_commit,
+                "changed_paths": list(metadata_paths),
+                "model_session_launched": False,
+            },
+        )
+        metadata_fingerprint = self.inspector.content_diff_fingerprint(metadata_paths)
+        self.ledger.append(
+            event_type="ChangesDetected",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "changed_paths": list(metadata_paths),
+                "diff_fingerprint": metadata_fingerprint,
+                "authorized_acceptance_metadata": True,
+            },
+        )
+        self.ledger.append(
+            event_type="ValidationStarted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "candidate_implementation_commit": candidate_commit,
+                "changed_paths": list(metadata_paths),
+                "executor": "deterministic_accepted_commit_finalizer",
+            },
+        )
+        transaction.transition(TransactionState.FINALIZING)
+        finalization = finalize_accepted_commit(
+            project=self.project,
+            controller_project_id=transaction.project_id,
+            feature_id=str(transaction.feature_id),
+            feature_branch=feature_branch,
+            milestone_id=milestone_id,
+            milestone_branch=milestone_branch,
+            milestone_base=milestone_base,
+            candidate_commit=candidate_commit,
+            metadata_paths=metadata_paths,
+            commit_subject=str(
+                transaction.allowed_mutation_policy.commit_subject
+                or f"{transaction.feature_id}: accepted feature"
+            ),
+        )
+        self.ledger.append(
+            event_type="ValidationPassed",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "executor": "deterministic_accepted_commit_finalizer",
+                "validation_evidence": validation_evidence,
+                "immutable_metadata_validation": finalization[
+                    "immutable_metadata_validation"
+                ],
+                "implementation_tree_equivalent": finalization[
+                    "implementation_tree_equivalent"
+                ],
+            },
+        )
+        finalized = str(finalization["finalized_accepted_commit"])
+        self.final_commit = finalized
+        self.ledger.append(
+            event_type="CommitFinalized",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "commit": finalized,
+                "parent": milestone_base,
+                "changed_paths": finalization["accepted_changed_paths"],
+                "diff_fingerprint": self.inspector.patch_fingerprint(finalized),
+                "commit_subject": transaction.allowed_mutation_policy.commit_subject,
+                "accepted_commit_finalization": True,
+                **{
+                    key: finalization[key]
+                    for key in (
+                        "candidate_implementation_commit",
+                        "finalized_accepted_commit",
+                        "candidate_changed_paths",
+                        "authorized_metadata_paths",
+                        "candidate_to_finalized_changed_paths",
+                        "candidate_implementation_tree_fingerprint",
+                        "finalized_implementation_tree_fingerprint",
+                        "implementation_tree_equivalent",
+                        "branch_movement",
+                    )
+                },
+            },
+        )
+        if transaction.workflow_type == WorkflowType.RECOVERY:
+            self.ledger.append(
+                event_type="RecoveryApplied",
+                transaction_id=transaction.transaction_id,
+                workflow_type=transaction.workflow_type,
+                payload={
+                    "classification": "accepted_commit_reconstruction",
+                    "selected_feature": transaction.feature_id,
+                    "candidate_implementation_commit": candidate_commit,
+                    "finalized_accepted_commit": finalized,
+                    "accepted_feature_commit": finalized,
+                    "model_session_launched": False,
+                    **(recovery_evidence or {}),
+                },
+            )
+        transaction.next_project_state = "integration_ready"
+        return finalization
+
     def record_file_mutation_boundary(self) -> None:
         transaction = self._require()
         if any(
@@ -1407,7 +1588,15 @@ class WorkflowKernel:
             "terminal_snapshot": terminal_snapshot,
             **(evidence or {}),
         }
-        if transaction.workflow_type in {WorkflowType.FEATURE_EXECUTION, WorkflowType.FEATURE_ACCEPTANCE}:
+        candidate_only = bool(
+            transaction.workflow_type == WorkflowType.FEATURE_EXECUTION
+            and (evidence or {}).get("candidate_implementation_commit")
+        )
+        if (
+            transaction.workflow_type
+            in {WorkflowType.FEATURE_EXECUTION, WorkflowType.FEATURE_ACCEPTANCE}
+            and not candidate_only
+        ):
             if not payload.get("accepted_feature_commit"):
                 payload["accepted_feature_commit"] = self.final_commit
         if transaction.workflow_type == WorkflowType.MILESTONE_INTEGRATION:

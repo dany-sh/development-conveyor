@@ -43,7 +43,28 @@ def synthetic_repository(
     (repository / ".factory").mkdir()
     (repository / "docs/features").mkdir(parents=True)
     (repository / "app.txt").write_text("baseline\n", encoding="utf-8")
-    (repository / "docs/features/F001.md").write_text("# F001\n\nAdd a synthetic feature.\n", encoding="utf-8")
+    (repository / "docs/features/F001.md").write_text(
+        "# F001\n\n"
+        "- Factory status: Ready\n\n"
+        "- [ ] Add a synthetic feature.\n",
+        encoding="utf-8",
+    )
+    (repository / "docs/CURRENT_STATUS.md").write_text(
+        "# Current Status\n\n"
+        "- Active feature: F001 — Synthetic Feature "
+        "(implementation complete; controller acceptance pending)\n",
+        encoding="utf-8",
+    )
+    (repository / "docs/FEATURE_CATALOG.md").write_text(
+        "# Feature Catalog\n\n"
+        "| Feature ID | Name | Status | Milestone |\n"
+        "| --- | --- | --- | --- |\n"
+        "| F001 | Synthetic Feature | Ready | M0 |\n",
+        encoding="utf-8",
+    )
+    (repository / "docs/RUN_LOG.md").write_text(
+        "# Run Log\n", encoding="utf-8"
+    )
     (repository / "docs/AUTONOMY_CONTRACT.md").write_text("# Autonomy\n\nContinue through M0.\n", encoding="utf-8")
     adapter = {
         "schema_version": 1,
@@ -289,23 +310,6 @@ class SyntheticLauncher:
     def _accept_feature(self, project: Project) -> None:
         repository = project.repository
         (repository / "app.txt").write_text("baseline\nF001 integrated behavior\n", encoding="utf-8")
-        queue_path = repository / project.queue_location
-        queue = json.loads(queue_path.read_text(encoding="utf-8"))
-        feature = queue["features"][0]
-        feature.update({
-            "status": "integration_pending",
-            "implementation_status": "Completed",
-            "branch": git(repository, "branch", "--show-current"),
-            "integration_base_commit": git(repository, "rev-parse", "HEAD"),
-            "accepted_commit": "SELF",
-            "integration_status": "pending",
-            "acceptance": {
-                "tests_passed": True,
-                "review_passed": True,
-                "documentation_current": True,
-            },
-        })
-        write_json(queue_path, queue)
 
     def _integrate_feature(self, project: Project) -> None:
         repository = project.repository

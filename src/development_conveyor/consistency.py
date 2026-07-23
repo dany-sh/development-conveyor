@@ -446,6 +446,65 @@ class ConsistencyChecker:
 
         accepted_by_feature: dict[str, set[str]] = {}
         integrations_by_feature: dict[str, list[dict[str, Any]]] = {}
+        accepted_reconstructions: dict[str, dict[str, str]] = {}
+        reconstruction_failures: list[dict[str, Any]] = []
+        candidate_only_transactions = {
+            event["transaction_id"]
+            for event in ledger_events
+            if event["event_type"] == "TransactionCompleted"
+            and event["workflow_type"] == "feature_execution"
+            and isinstance(
+                event["payload"].get("candidate_implementation_commit"), str
+            )
+            and not event["payload"].get("accepted_feature_commit")
+        }
+        for event in ledger_events:
+            if (
+                event["event_type"] != "RecoveryApplied"
+                or event["payload"].get("classification")
+                != "accepted_commit_reconstruction"
+            ):
+                continue
+            payload = event["payload"]
+            feature_id = payload.get("selected_feature")
+            candidate = payload.get("candidate_implementation_commit")
+            finalized = payload.get("finalized_accepted_commit")
+            transaction_commits = [
+                item["payload"]
+                for item in ledger_events
+                if item["transaction_id"] == event["transaction_id"]
+                and item["event_type"] == "CommitFinalized"
+            ]
+            valid = bool(
+                isinstance(feature_id, str)
+                and isinstance(candidate, str)
+                and isinstance(finalized, str)
+                and candidate != finalized
+                and len(transaction_commits) == 1
+                and transaction_commits[0].get("candidate_implementation_commit")
+                == candidate
+                and transaction_commits[0].get("finalized_accepted_commit")
+                == finalized
+                and transaction_commits[0].get("accepted_commit_finalization")
+                is True
+            )
+            prior = accepted_reconstructions.get(str(feature_id))
+            if (
+                not valid
+                or prior is not None
+                and prior != {"candidate": candidate, "finalized": finalized}
+            ):
+                reconstruction_failures.append(
+                    {
+                        "transaction_id": event["transaction_id"],
+                        "feature_id": feature_id,
+                    }
+                )
+                continue
+            accepted_reconstructions[str(feature_id)] = {
+                "candidate": candidate,
+                "finalized": finalized,
+            }
         for transaction in effective_projection.get("transactions", []):
             transaction_id = transaction.get("transaction_id")
             feature_id = transaction.get("feature_id")
@@ -455,7 +514,12 @@ class ConsistencyChecker:
             for event in tx_events:
                 payload = event["payload"]
                 candidate = None
-                if event["event_type"] == "CommitFinalized" and event["workflow_type"] in {"feature_execution", "feature_acceptance"}:
+                if (
+                    event["event_type"] == "CommitFinalized"
+                    and event["workflow_type"]
+                    in {"feature_execution", "feature_acceptance"}
+                    and event["transaction_id"] not in candidate_only_transactions
+                ):
                     candidate = payload.get("commit")
                 if event["event_type"] == "TransactionCompleted":
                     candidate = payload.get("accepted_feature_commit") or candidate
@@ -463,6 +527,22 @@ class ConsistencyChecker:
                         integrations_by_feature.setdefault(feature_id, []).append(payload)
                 if candidate:
                     accepted_by_feature.setdefault(feature_id, set()).add(candidate)
+        for feature_id, reconstruction in accepted_reconstructions.items():
+            commits = accepted_by_feature.get(feature_id, set())
+            if reconstruction["finalized"] in commits:
+                commits.discard(reconstruction["candidate"])
+        add(
+            "accepted_commit_reconstruction_evidence",
+            not reconstruction_failures,
+            ConsistencyClassification.CORRUPT_EVIDENCE,
+            evidence={
+                "reconstructions": accepted_reconstructions,
+                "failures": reconstruction_failures,
+            },
+            diagnostic=(
+                "accepted-commit reconstruction evidence is incomplete or contradictory"
+            ),
+        )
         immutable_acceptance = all(len(commits) <= 1 for commits in accepted_by_feature.values())
         add(
             "accepted_commit_immutability",

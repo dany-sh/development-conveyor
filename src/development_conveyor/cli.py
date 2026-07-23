@@ -22,6 +22,7 @@ from .consistency import ConsistencyChecker
 from .migration import LegacyStateMigrator
 from .integration_executor import execute_integration_plan
 from .feature_result_recovery import FeatureResultRecovery
+from .accepted_commit_recovery import AcceptedCommitRecovery
 from .execution_profiles import PROFILE_NAMES
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
@@ -133,6 +134,23 @@ def _parser() -> argparse.ArgumentParser:
     recover_feature_result.add_argument("--expected-branch", required=True)
     recover_feature_result.add_argument("--expected-head", required=True)
     mode = recover_feature_result.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    recover_accepted = subparsers.add_parser(
+        "recover-accepted-commit",
+        help=(
+            "reconstruct one exact direct-child accepted commit from a completed "
+            "candidate without launching a model"
+        ),
+    )
+    recover_accepted.add_argument("--project", required=True)
+    recover_accepted.add_argument("--feature", required=True)
+    recover_accepted.add_argument("--candidate-commit", required=True)
+    recover_accepted.add_argument("--milestone-base", required=True)
+    recover_accepted.add_argument("--feature-branch", required=True)
+    recover_accepted.add_argument("--feature-transaction-id", required=True)
+    recover_accepted.add_argument("--acceptance-transaction-id", required=True)
+    mode = recover_accepted.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
     verify = subparsers.add_parser(
@@ -323,6 +341,28 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
             **plan,
             "outcome": "recovery_ready",
             "application_repository_written": False,
+        }
+
+    if args.command == "recover-accepted-commit":
+        recovery = AcceptedCommitRecovery(
+            controller_root=controller_root,
+            configuration=configuration.conveyor,
+            project=registry.get(args.project),
+        )
+        recovery_plan = recovery.inspect(
+            feature_id=args.feature,
+            candidate_commit=args.candidate_commit,
+            milestone_base=args.milestone_base,
+            feature_branch=args.feature_branch,
+            feature_transaction_id=args.feature_transaction_id,
+            acceptance_transaction_id=args.acceptance_transaction_id,
+        )
+        return recovery.apply(recovery_plan) if args.apply else {
+            **recovery_plan,
+            "outcome": "recovery_ready",
+            "application_repository_written": False,
+            "model_sessions_launched": 0,
+            "child_sessions_launched": 0,
         }
 
     if args.command == "run":

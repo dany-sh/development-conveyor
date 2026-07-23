@@ -732,3 +732,23 @@ This log records model configuration and deterministic deployment evidence. It n
 - Requested commands: `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, both registered-project consistency commands, the Interview Companion dry-run, and `git diff --check` exited zero. Interview Companion reported `CONSISTENT`; Case Manager retained its pre-existing read-only `RECOVERABLE_INCONSISTENCY` for stale projection-cache agreement.
 - Live dry-run: Interview Companion selected F004 and exposed `multi_module_precise`, source `reconciled_feature_profile`, `gpt-5.6-terra`, high reasoning, one parent, zero children, 28 focused context files, all 9 acceptance criteria, and 8 final gates. Dry-run executed zero models, children, mutations, tests, builds, leases, or transactions.
 - Isolation and content: Case Manager remained clean on `codex/p0-foundation` at `f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0`; Interview Companion remained clean on `codex/m0-foundation` at `7a754a4b4741b85ac51b8b516cebd25cae1eec69`. Both queue hashes matched their pre-run baselines, no application writer lease existed, and the post-change content audit scanned 177 files with no hard gate.
+
+### Model execution — 2026-07-23T03:15:35+00:00
+
+- Agent role: `standalone_controller_accepted_commit_repair`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `user_directed_accepted_commit_finalization_recovery`
+- Safety and autonomy contracts unchanged: `true`
+
+### Immutable accepted-commit finalization repair — 2026-07-22
+
+- Scope and execution: one direct parent `gpt-5.6-sol`/`high` controller-maintenance session; zero child sessions, no named agent, no application test, no F004 model rerun, no real Conveyor resume, no milestone integration, and no complete controller suite.
+- Architecture: model output is preserved as candidate implementation evidence. Deterministic controller acceptance reconstructs one authoritative sibling commit whose only parent is the planned milestone base and whose tree combines the candidate implementation with the established acceptance metadata. The committed queue uses `accepted_commit: SELF`; a metadata-only child of the candidate remains invalid.
+- Normal lifecycle: candidate and finalized commit identities, the authorized metadata paths, implementation-tree fingerprints, immutable metadata checks, and atomic feature-ref movement are recorded separately. `TransactionCompleted` and `integration_ready` are unavailable until the finalized commit passes the existing two-ref integration validator.
+- Protected F004 recovery: the read-only plan binds candidate `8ae5c94df59119d89d3c2ac6fd7508a47a426ff6`, base `7a754a4b4741b85ac51b8b516cebd25cae1eec69`, branch `codex/F004-navigation-and-workspace-restoration`, feature transaction `6886b13b-b655-40a9-ab9c-7f9115f9ad7f`, acceptance transaction `0d53e634-32c0-4c3d-97c0-9702fc513432`, all 213 historical ledger fingerprints, raw Git blob hashes for eight source/test paths, and five authorized metadata paths. Dry-run launched no session and wrote nothing.
+- Focused validation: 33 affected finalization, feature-result recovery, two-ref recovery, deterministic integration-preflight, projection, consistency, and duplicate-integration tests passed in `84.603s`. The six new accepted-commit tests passed again in `10.462s` after raw-byte hashing was added.
+- Requested commands: `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, `scripts/conveyor verify-consistency --project interview-companion --json`, `scripts/conveyor resume --project interview-companion --dry-run`, and `git diff --check` exited zero before commit. Interview Companion remained `CONSISTENT` at ledger sequence 213, and the resume dry-run planned zero model sessions with `milestone_integration` as the next action.
+- Content audit: the profile-aware audit scanned 182 files without truncation and reported no hard gate.

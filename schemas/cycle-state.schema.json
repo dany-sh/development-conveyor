@@ -23,6 +23,7 @@
     "session_completion_evidence": {"type": ["object", "null"]},
     "branch_recovery": {"type": ["object", "null"]},
     "feature_starting_commit": {"type": ["string", "null"]},
+    "candidate_implementation_commit": {"type": ["string", "null"]},
     "accepted_feature_commit": {"type": ["string", "null"]},
     "milestone_branch": {"type": ["string", "null"]},
     "milestone_pre_integration_commit": {"type": ["string", "null"]},

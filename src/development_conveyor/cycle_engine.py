@@ -109,6 +109,10 @@ from .workflow_recovery import RecoveryPlanner
 from .validation import SafetyPolicy
 from .cost_policy import build_run_plan
 from .feature_branches import canonical_feature_branch
+from .accepted_commit import (
+    acceptance_metadata_paths,
+    materialize_acceptance_metadata,
+)
 
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 DETERMINISTIC_COMPATIBILITY_FAILURES = {
@@ -3455,7 +3459,11 @@ class CycleEngine:
                 authority=feature_authority, command_results=feature_commands,
                 semantic_validator=feature_adapter.semantic_validate,
             )
-            accepted = feature_kernel.finalize()
+            candidate = feature_kernel.finalize()
+            if not isinstance(candidate, str):
+                raise TransactionError(
+                    "feature execution did not create a candidate implementation commit"
+                )
             self._advance_cycle(
                 cycle_path, state, "feature_in_progress", inspector, "kernel_feature_commit",
                 kernel=feature_kernel,
@@ -3468,20 +3476,22 @@ class CycleEngine:
                 cycle_path, state, "feature_accepted", inspector, "kernel_feature_accepted",
                 kernel=feature_kernel,
             )
-            self._advance_cycle(
-                cycle_path, state, "integration_pending", inspector, "kernel_integration_pending",
-                kernel=feature_kernel,
-            )
-            state["accepted_feature_commit"] = accepted
+            state["candidate_implementation_commit"] = candidate
+            state["accepted_feature_commit"] = None
             feature_completion = feature_kernel.complete(
-                evidence={"accepted_feature_commit": accepted, "integration_status": "pending"}
+                evidence={
+                    "candidate_implementation_commit": candidate,
+                    "controller_acceptance_pending": True,
+                }
             )
             self._materialize_terminal_cycle_cache(
                 cycle_path, state, feature_transaction.transaction_id, feature_completion, phase_ledger
             )
 
+            metadata_paths = acceptance_metadata_paths(project, selection.feature)
             acceptance_adapter = FeatureAcceptanceAdapter(
-                allowed_paths=(), commit_subject=f"factory: accept {selection.feature_id}",
+                allowed_paths=metadata_paths,
+                commit_subject=f"{selection.feature_id}: {selection.title}",
                 next_state="integration_ready",
             )
             acceptance_kernel = WorkflowKernel(
@@ -3498,38 +3508,69 @@ class CycleEngine:
                 run_id=run_id, policy=acceptance_adapter.policy,
             )
             acceptance_kernel.acquire_lease(); acceptance_kernel.capture_snapshot()
-            acceptance_session = f"deterministic-feature-acceptance:{acceptance_transaction.transaction_id}"
-            acceptance_kernel.session_launched(acceptance_session)
-            acceptance_envelope = SessionResultEnvelope.from_dict({
-                "schema_version": 1, "workflow_type": "feature_acceptance",
-                "classification": "FEATURE_ACCEPTED", "project_id": project.project_id,
-                "repository_identity": identity["repository_id"],
-                "transaction_id": acceptance_transaction.transaction_id, "run_id": run_id,
-                "session_id": acceptance_session,
-                "starting_branch": acceptance_transaction.starting_branch,
-                "starting_commit": acceptance_transaction.starting_head,
-                "current_commit": acceptance_transaction.starting_head,
-                "feature_id": selection.feature_id, "changed_paths": [],
-                "evidence": {"accepted_feature_commit": accepted},
-                "next_state": "integration_ready",
-            })
-            if self._route_kernel_result(
-                acceptance_kernel, acceptance_adapter, acceptance_envelope
-            ) is not None:
-                raise RecoveryError("deterministic feature acceptance did not authorize success")
-            acceptance_kernel.record_file_mutation_boundary()
-            acceptance_kernel.validate(
-                authority=CommandAuthority(), command_results=(),
-                semantic_validator=acceptance_adapter.semantic_validate,
+            feature_branch = str(
+                state.get("feature_branch") or inspector.current_branch or ""
             )
-            acceptance_kernel.finalize()
+            milestone_branch = str(project.milestone_branch or "")
+            milestone_id = str(project.active_milestone or "")
+            if not feature_branch or not milestone_branch or not milestone_id:
+                raise TransactionError(
+                    "accepted-commit finalization lacks exact feature and milestone refs"
+                )
+            materialized_paths = materialize_acceptance_metadata(
+                project=project,
+                feature_id=selection.feature_id,
+                feature_branch=feature_branch,
+                milestone_base=feature_transaction.starting_head,
+                candidate_commit=candidate,
+                recovery=False,
+            )
+            if (
+                not materialized_paths
+                or not set(materialized_paths).issubset(metadata_paths)
+            ):
+                raise TransactionError(
+                    "accepted-feature metadata authorization changed during finalization"
+                )
+            finalization = acceptance_kernel.finalize_deterministic_accepted_commit(
+                candidate_commit=candidate,
+                milestone_id=milestone_id,
+                milestone_branch=milestone_branch,
+                milestone_base=feature_transaction.starting_head,
+                feature_branch=feature_branch,
+                metadata_paths=materialized_paths,
+                validation_evidence={
+                    "tests_passed": True,
+                    "review_passed": True,
+                    "documentation_current": True,
+                },
+            )
+            accepted = str(finalization["finalized_accepted_commit"])
+            state["accepted_feature_commit"] = accepted
+            state["candidate_implementation_commit"] = candidate
+            self._advance_cycle(
+                cycle_path,
+                state,
+                "integration_pending",
+                inspector,
+                "kernel_integration_pending",
+                kernel=acceptance_kernel,
+            )
             self._advance_cycle(
                 cycle_path, state, "integration_ready", inspector,
                 "kernel_feature_acceptance", kernel=acceptance_kernel,
             )
-            acceptance_completion = acceptance_kernel.complete(evidence={
-                "accepted_feature_commit": accepted, "integration_status": "pending",
-            })
+            acceptance_completion = acceptance_kernel.complete(
+                classification="FEATURE_ACCEPTED",
+                evidence={
+                    "accepted_feature_commit": accepted,
+                    "candidate_implementation_commit": candidate,
+                    "authorized_metadata_paths": list(materialized_paths),
+                    "permitted_metadata_paths": list(metadata_paths),
+                    "implementation_tree_equivalent": True,
+                    "integration_status": "pending",
+                },
+            )
             self._materialize_terminal_cycle_cache(
                 cycle_path, state, acceptance_transaction.transaction_id,
                 acceptance_completion, phase_ledger,
