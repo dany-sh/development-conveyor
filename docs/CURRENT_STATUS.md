@@ -4,6 +4,22 @@ Last updated: 2026-07-22
 
 ## Summary
 
+The bounded `scope-features` controller command is implemented on
+`codex/m1-3-scope-features-command` from required starting commit `ebfd6e9`.
+Dry-run exposes the exact target IDs, authorized paths, requested new features,
+single ready feature, dependency and execution-policy changes, validators, and
+the fixed `gpt-5.6-sol`/medium one-parent/zero-child plan without mutation.
+Apply uses the existing typed planning lease, workflow kernel, ledger,
+projection, and atomic compatibility-cache binder, creates one planning-only
+commit, and stops at `feature_ready` before feature preparation or execution.
+An exact retained valid diff can be finalized by the zero-model
+`recover-scope-features` path.
+
+The implementation was validated only with disposable synthetic application
+repositories. No real `scope-features --apply`, ordinary resume, queue
+reconciliation, application test, Feature Factory, Milestone Integrator, named
+agent, or child session ran.
+
 The transient cache-recovery provenance repair is prepared on `codex/m1-2-transient-cache-recovery-provenance` from starting commit `f85b84a9de80864dabb6105b8a3a152954817620`. Newly materialized compatibility cycle caches no longer persist `cache_binding_recovery`. Deterministic rebinding alone may normalize the one legacy object when it contains exactly non-empty `source_transaction` and `recovery_run_id` strings; every other unsupported top-level field and every malformed or extra legacy nested field still fails closed.
 
 Completed Interview Companion planning recovery remains authoritative and is not repeated. Its paused/no-feature projection routes the stale compatibility cache to zero-model `cache_binding_recovery`; the later user-applied recovery will rewrite only ignored `.factory/conveyor-state.json` and stop.
@@ -24,12 +40,19 @@ M1 — Transactional workflow kernel
 
 ## Active feature
 
-M1-002 — Transient cache-recovery provenance (`controller repair prepared`)
+M1-003 — Bounded feature scoping command (`implementation prepared`)
 
 ## Next boundary
 
-Commit the controller repair. The user may later run the already-planned cache-binding recovery, which must rewrite only the ignored compatibility cache and stop. Do not repeat planning recovery, merge a default branch, push, tag, publish, deploy, release, run a real Conveyor resume, or rerun F004 implementation.
+Commit the bounded controller command. Do not apply it to Interview Companion
+during implementation, begin feature execution, merge a default branch, push,
+tag, publish, deploy, release, or run a real Conveyor resume.
 
 ## Validation scope
 
-Validation is limited to affected cycle-cache, cache-binding recovery, planning-recovery, consistency, projection, and routing tests; `compileall`; configuration validation; Interview Companion consistency; the Interview Companion resume dry-run; and `git diff --check`. Application tests, the complete controller suite, a real `resume`, live cache recovery, and milestone integration are intentionally excluded.
+Validation is limited to affected scoping CLI, planning transaction, queue,
+execution-profile, validation, recovery, projection/consistency, and
+cache-binding tests; `compileall`; configuration validation; command help; and
+`git diff --check`. Application tests, the complete controller suite, a real
+scoping apply, ordinary resume, queue reconciliation, and milestone integration
+are intentionally excluded.

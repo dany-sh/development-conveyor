@@ -792,3 +792,22 @@ This log records model configuration and deterministic deployment evidence. It n
 - Focused validation: 41 cache-binding and planning-recovery tests passed in `71.523s`; 17 additional recovery, execution-identity, projection, consistency, cache, and routing tests passed in `18.940s`. An initial over-broad test for an unrelated existing `oneOf` schema branch was corrected to the requested legacy normalization boundary before the clean rerun.
 - Requested commands: `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, `scripts/conveyor verify-consistency --project interview-companion --json`, `scripts/conveyor resume --project interview-companion --dry-run`, and `git diff --check` exited zero. Consistency reported only recoverable `cycle_cache_binding`; dry-run selected `cache_binding_recovery`, `current_state: paused`, null current/selected features, and empty model/child session lists.
 - Isolation and content: Interview Companion remained clean on `codex/m0-foundation` at `5fdff173847507e6490fdbba0ceb4c064f6b8f6f`. Its 259-record ledger, projection cache, and compatibility cycle cache retained exact pre-run SHA-256 hashes; the focused eight-file controller diff contained no high-confidence credential or private-key material.
+
+### Model execution — 2026-07-23T07:28:19+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `bounded_scope_features_command`
+- Safety and autonomy contracts unchanged: `true`
+
+### Bounded feature scoping command — 2026-07-23
+
+- Scope and execution: one direct parent `gpt-5.6-sol`/`medium` controller implementation session; zero child, named-agent, Feature Factory, or Milestone Integrator sessions. No application repository was modified, no real `scope-features --apply`, ordinary resume, queue reconciliation, application test, complete controller suite, push, tag, publication, deployment, release, or milestone integration ran.
+- CLI contract: `scope-features` requires explicit existing targets, optional new IDs, one ready ID, a Markdown brief, and exactly one mode. Dry-run exposes exact target/spec/metadata paths, new IDs, dependency changes, execution policies, validators, Sol/medium, one parent, zero children, and the stop-before-execution boundary without writing any repository or controller state.
+- Apply authority: one explicit scope manifest and embedded brief are bound to branch, HEAD, queue and brief hashes, target IDs, exact paths, dependencies, policies, session budgets, and one typed planning transaction. The normal planning writer lease, workflow kernel, append-only ledger, projection, exact-path commit, and atomic compatibility-cache binder remain authoritative.
+- Deterministic gates: existing IDs and dependencies must survive; new IDs must be absent before the session and created exactly once; unrequested feature metadata cannot change; dependency IDs and cycles, milestone schema, execution profiles, specification headings, acceptance criteria, exact changed paths, production/test/runtime exclusions, single-ready outcome, and `git diff --check` all fail closed.
+- Recovery and stop: successful apply creates one planning-only commit, leaves the repository clean, projects `feature_ready`, and never starts feature preparation or execution. `recover-scope-features` validates an exact retained diff and uses the existing zero-model planning finalizer, including an authorized requested new specification, without launching a parent or child session.
+- Focused validation: 218 affected scoping, queue, execution-profile, planning-transaction, recovery, projection/consistency, cache-binding, CLI compatibility, configuration, and transactional-kernel tests passed. `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, `scripts/conveyor scope-features --help`, and `git diff --check` exited zero. Configuration validation reported both registered application queues valid.

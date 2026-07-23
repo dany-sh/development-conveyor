@@ -52,6 +52,32 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-003",
+      "title": "Bounded feature scoping command",
+      "status": "proposed",
+      "priority": 3,
+      "milestone": "M1",
+      "dependencies": ["M1-002"],
+      "spec": "docs/features/M1-003-bounded-feature-scoping.md",
+      "acceptance_criteria": [
+        "Explicit briefs author only the requested feature specifications and planning metadata",
+        "Dry-run is non-mutating and apply creates one recoverable planning-only commit",
+        "One parent, zero children, exact paths, stable IDs, dependencies, profiles, and one ready feature are enforced"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-3-scope-features-command",
+      "integration_base_commit": "ebfd6e9b546a5181d3482aa43f0ba55a30b93617",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

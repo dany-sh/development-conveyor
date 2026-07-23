@@ -24,6 +24,7 @@ from .integration_executor import execute_integration_plan
 from .feature_result_recovery import FeatureResultRecovery
 from .accepted_commit_recovery import AcceptedCommitRecovery
 from .execution_profiles import PROFILE_NAMES
+from .feature_scoping import FeatureScoper
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
 
@@ -170,6 +171,27 @@ def _parser() -> argparse.ArgumentParser:
         help="execute one immutable controller-owned milestone integration plan",
     )
     execute_integration.add_argument("--plan", required=True)
+    scope = subparsers.add_parser(
+        "scope-features",
+        help="author and validate one bounded planning-only feature set from an explicit brief",
+    )
+    scope.add_argument("--project", required=True)
+    scope.add_argument("--feature", action="append", required=True)
+    scope.add_argument("--new-feature", action="append", default=[])
+    scope.add_argument("--ready", required=True)
+    scope.add_argument("--brief", required=True)
+    mode = scope.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    recover_scope = subparsers.add_parser(
+        "recover-scope-features",
+        help="validate or finalize one exact retained scope-features planning diff",
+    )
+    recover_scope.add_argument("--project", required=True)
+    recover_scope.add_argument("--run-id", required=True)
+    mode = recover_scope.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
     return parser
 
 
@@ -209,6 +231,29 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
         launcher,
         execution_profile_override=getattr(args, "execution_profile", None),
     )
+
+    if args.command == "scope-features":
+        scoper = FeatureScoper(configuration, launcher)
+        scope_request = scoper.inspect(
+            project=registry.get(args.project),
+            existing_features=args.feature,
+            new_features=args.new_feature,
+            ready_feature=args.ready,
+            brief_path=Path(args.brief),
+        )
+        return (
+            scoper.apply(scope_request)
+            if args.apply
+            else scope_request.public_plan(dry_run=True)
+        )
+    if args.command == "recover-scope-features":
+        scoper = FeatureScoper(configuration, launcher)
+        recovery_plan = scoper.inspect_recovery(
+            project=registry.get(args.project), run_id=args.run_id
+        )
+        if args.apply:
+            return scoper.recover(recovery_plan)
+        return {key: value for key, value in recovery_plan.items() if key != "_request"}
 
     if args.command == "validate-config":
         projects = []

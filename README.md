@@ -178,6 +178,8 @@ scripts/conveyor status --project case-manager
 scripts/conveyor plan --project case-manager
 scripts/conveyor reconcile --project case-manager --dry-run
 scripts/conveyor reconcile --project PROJECT-ID --resolve-human-decision --reason "Specific approval" --dry-run
+scripts/conveyor scope-features --project PROJECT-ID --feature F006 --new-feature F097 --ready F006 --brief /path/to/brief.md --dry-run
+scripts/conveyor recover-scope-features --project PROJECT-ID --run-id SCOPE-RUN-ID --dry-run
 scripts/conveyor run --project case-manager --mode one_feature
 scripts/conveyor run --project case-manager --mode milestone
 scripts/conveyor resume --project case-manager

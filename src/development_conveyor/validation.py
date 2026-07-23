@@ -311,7 +311,7 @@ class SafetyPolicy:
         if tuple(argv) not in {tuple(allowed), tuple(commit)}:
             raise SafetyViolation("only exact planning-path staging and commit are allowed")
         if argv[:2] == ["git", "commit"] and (
-            not commit_subject.startswith("factory: reconcile ")
+            not commit_subject.startswith(("factory: reconcile ", "factory: scope "))
             or "--amend" in argv
             or "--no-verify" in argv
         ):

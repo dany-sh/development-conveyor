@@ -28,6 +28,7 @@ from .contracts import TERMINAL_ENVELOPE_MARKER, extract_terminal_envelope
 
 ACTION_PROMPTS = {
     "queue_reconciliation": "queue-reconciliation.md",
+    "scope_features": "scope-features.md",
     "feature_cycle": "feature-cycle.md",
     "milestone_integration": "milestone-integration.md",
     "milestone_gate": "milestone-gate.md",
@@ -104,6 +105,7 @@ class SessionRequest:
     planned_reasoning: str | None = None
     model_plan_source: str | None = None
     context_files: tuple[str, ...] = ()
+    embedded_context: str | None = None
 
     def __post_init__(self) -> None:
         if self.action == "milestone_integration" and self.accepted_commit == "SELF":
@@ -145,6 +147,26 @@ class SessionRequest:
                 raise SessionError("direct feature session requires a parent session budget")
             if self.child_session_budget is None:
                 raise SessionError("direct feature session requires a child session budget")
+        if self.action == "scope_features":
+            bindings = {
+                "transaction_id": self.transaction_id,
+                "repository_identity": self.repository_identity,
+                "starting_branch": self.starting_branch,
+                "starting_commit": self.starting_commit,
+            }
+            missing = sorted(
+                key for key, value in bindings.items()
+                if not isinstance(value, str) or not value.strip()
+            )
+            if missing:
+                raise SessionError(
+                    "bounded scoping session lacks authoritative identity: "
+                    + ", ".join(missing)
+                )
+            if self.parent_session_budget != 1:
+                raise SessionError("bounded scoping session requires exactly one parent")
+            if self.child_session_budget != 0:
+                raise SessionError("bounded scoping session requires zero children")
 
 
 @dataclass(frozen=True)
@@ -1174,6 +1196,15 @@ class SessionLauncher:
             except OSError as exc:
                 raise SessionError(f"feature context file cannot be read: {relative}") from exc
             rendered.append(f"### {relative}\n\n```text\n{content.rstrip()}\n```")
+        if request.embedded_context is not None:
+            if not request.embedded_context.strip():
+                raise SessionError("embedded feature context cannot be empty")
+            rendered.insert(
+                0,
+                "### Explicit product brief\n\n```markdown\n"
+                + request.embedded_context.rstrip()
+                + "\n```",
+            )
         if not rendered:
             raise SessionError("direct feature session received an empty context pack")
         return "\n\n".join(rendered)
@@ -1214,7 +1245,7 @@ class SessionLauncher:
             terminal_example=terminal_example,
             focused_context=(
                 self._focused_feature_context(request)
-                if request.action == "feature_cycle"
+                if request.action in {"feature_cycle", "scope_features"}
                 else self._focused_integration_context(request)
                 if request.action == "milestone_integration"
                 else ""
@@ -1264,7 +1295,7 @@ class SessionLauncher:
         return prompt
 
     def plan(self, request: SessionRequest) -> SessionPlan:
-        if request.action == "feature_cycle" and request.child_session_budget not in {0, None}:
+        if request.action in {"feature_cycle", "scope_features"} and request.child_session_budget not in {0, None}:
             raise SessionError(
                 "positive child-session budgets are not enforceable by this direct launcher"
             )
@@ -1460,7 +1491,10 @@ class SessionLauncher:
         failed_semantic_checks: tuple[str, ...] = ()
         validation = "not_required"
         classification = None
-        if request.transaction_id and request.action in {"queue_reconciliation", "feature_cycle", "milestone_integration", "milestone_gate"}:
+        if request.transaction_id and request.action in {
+            "queue_reconciliation", "scope_features", "feature_cycle",
+            "milestone_integration", "milestone_gate",
+        }:
             try:
                 envelope = extract_terminal_envelope(result.stdout)
                 parsed_structured_result = envelope.to_dict()

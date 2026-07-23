@@ -807,7 +807,10 @@ class WorkflowKernel:
         ))
         if observed_paths != tuple(sorted(changed_paths)):
             raise TransactionError("planning recovery changed paths differ from the reserved baseline")
-        if self.inspector.untracked_file_hashes():
+        if (
+            self.inspector.untracked_file_hashes()
+            and not transaction.allowed_mutation_policy.allow_untracked
+        ):
             raise TransactionError("planning recovery refuses untracked application content")
         if self.inspector.planning_diff_fingerprint() != expected_diff_fingerprint:
             raise TransactionError("planning recovery diff differs from the reserved baseline")
