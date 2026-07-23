@@ -4,6 +4,21 @@ Last updated: 2026-07-23
 
 ## Summary
 
+The accepted-feature semantic-status and partial-finalization recovery repair is
+prepared on `codex/m1-3-semantic-accepted-status-recovery` from required
+starting commit `a69aa12ac2be68c7b3a353a376f8d34d744b3595`. Acceptance now resolves
+exactly one supported feature-state bullet inside `## Factory position`,
+renders and validates all five authorized metadata files before writing, and
+rolls the set back if a transactional replacement fails.
+
+The protected F009 dry-run binds candidate `777ff201`, milestone parent
+`639919c`, completed feature transaction
+`3efad53f-fae1-459b-be84-b9d2d7a370f7`, failed acceptance transaction
+`dd695fa7-9713-49da-92ef-f8b40c86ea59`, and exact retained three-file
+fingerprint `23ec1510822e027d10c48fd5ea05122ef0f62de2f1cf1e0c8d1ea11c20743882`.
+All preflight checks pass with zero model or child sessions and no application
+write. Apply remains intentionally unexecuted.
+
 The queue-reconciliation warning-evidence repair is prepared on
 `codex/m1-3-warning-evidence-normalization` from required starting commit
 `96391c4d7107e18beac272cfa7bcd6b5a218c6fb`. New structured results use
@@ -57,20 +72,20 @@ M1 — Transactional workflow kernel
 
 ## Active feature
 
-M1-003 — Bounded feature scoping command (`warning-evidence recovery repair prepared`)
+M1-003 — Bounded feature scoping command (`semantic accepted-status recovery repair prepared`)
 
 ## Next boundary
 
-Commit the warning-evidence normalization repair. Do not apply the retained
-Interview Companion recovery during controller development, begin feature
-execution, merge a default branch, push, tag, publish, deploy, release, or run
-a real Conveyor resume.
+Commit the semantic accepted-status recovery repair. Do not apply the retained
+Interview Companion F009 recovery during controller development, rerun F009,
+begin milestone integration, merge a default branch, push, tag, publish,
+deploy, release, or run an ordinary Conveyor resume.
 
 ## Validation scope
 
-Validation is limited to affected warning schema, planning transaction, queue
-reconciliation, recovery, consistency, and routing tests; the exact retained
-recovery dry run; `compileall`; configuration validation; command help; and
-`git diff --check`. Application tests, the complete controller suite, live
-recovery apply, ordinary resume, queue reconciliation, and milestone
-integration are intentionally excluded.
+Validation is limited to affected accepted-commit, feature-acceptance,
+recovery, transaction, projection, consistency, and integration-preflight
+tests; the exact retained F009 recovery dry run; `compileall`; configuration
+validation; command help; and `git diff --check`. Application tests, the
+complete controller suite, live recovery apply, ordinary resume, F009 rerun,
+and milestone integration are intentionally excluded.

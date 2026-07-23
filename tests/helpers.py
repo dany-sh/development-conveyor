@@ -51,8 +51,11 @@ def synthetic_repository(
     )
     (repository / "docs/CURRENT_STATUS.md").write_text(
         "# Current Status\n\n"
+        "## Factory position\n\n"
         "- Active feature: F001 — Synthetic Feature "
-        "(implementation complete; controller acceptance pending)\n",
+        "(implementation complete; controller acceptance pending)\n\n"
+        "## Verified health\n\n"
+        "- Synthetic fixture is ready for deterministic validation.\n",
         encoding="utf-8",
     )
     (repository / "docs/FEATURE_CATALOG.md").write_text(

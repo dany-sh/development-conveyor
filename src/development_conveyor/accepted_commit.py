@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from .errors import IntegrationPlanError, QueueError, TransactionError
 from .integration_executor import inspect_two_refs
-from .logging import atomic_write_bytes, atomic_write_json
+from .logging import atomic_write_bytes
 from .queue import FeatureQueue
 from .redaction import redact_text
 from .registry import Project
@@ -89,33 +91,77 @@ def _replace_factory_status(text: str, *, feature_id: str) -> str:
     return rendered.replace("- [ ] ", "- [x] ")
 
 
-def _replace_current_status(
-    text: str, *, feature_id: str, title: str
-) -> str:
+def _replace_current_status(text: str, *, feature_id: str, title: str) -> str:
+    """Replace one authoritative feature-state bullet in Factory position."""
+
     replacement = (
         f"- Active feature: {feature_id} — {title} "
         "(accepted; milestone integration pending)"
     )
-    rendered, count = re.subn(
-        rf"(?m)^- Active feature: {re.escape(feature_id)}\b.*$",
-        replacement,
-        text,
-        count=1,
-    )
-    if count != 1:
+    lines = text.splitlines(keepends=True)
+    section_headings = [
+        index
+        for index, line in enumerate(lines)
+        if line.rstrip("\r\n") == "## Factory position"
+    ]
+    if len(section_headings) != 1:
         raise TransactionError(
-            f"docs/CURRENT_STATUS.md lacks exactly one active {feature_id} line"
+            "docs/CURRENT_STATUS.md must contain exactly one Factory position section"
         )
-    rendered = rendered.replace(
-        f"{feature_id} implementation is pending controller acceptance; "
-        "host-level staged-app relaunch and accessibility checks remain outside this session.",
-        f"{feature_id} is accepted from the recorded controller validation; "
-        "milestone integration is pending.",
+    section_start = section_headings[0] + 1
+    section_end = next(
+        (
+            index
+            for index in range(section_start, len(lines))
+            if re.match(r"^##(?:\s|$)", lines[index].rstrip("\r\n"))
+        ),
+        len(lines),
     )
-    return rendered
+    if section_start >= section_end:
+        raise TransactionError(
+            "docs/CURRENT_STATUS.md Factory position section is malformed"
+        )
+
+    state_prefix = re.compile(
+        r"^- (?:Selected next feature|Selected feature|Active feature):"
+    )
+    state_line = re.compile(
+        r"^- (Selected next feature|Selected feature|Active feature): "
+        r"([A-Za-z0-9][A-Za-z0-9.-]*)(?:\s+—\s+.+)?$"
+    )
+    authoritative: list[tuple[int, re.Match[str]]] = []
+    malformed = False
+    for index in range(section_start, section_end):
+        content = lines[index].rstrip("\r\n")
+        match = state_line.fullmatch(content)
+        if match is not None:
+            authoritative.append((index, match))
+        elif state_prefix.match(content):
+            malformed = True
+    if malformed:
+        raise TransactionError(
+            "docs/CURRENT_STATUS.md Factory position section is malformed"
+        )
+    if len(authoritative) != 1:
+        raise TransactionError(
+            f"docs/CURRENT_STATUS.md Factory position must contain exactly one "
+            f"authoritative feature-state line for {feature_id}"
+        )
+    index, match = authoritative[0]
+    if match.group(2) != feature_id:
+        raise TransactionError(
+            "docs/CURRENT_STATUS.md Factory position identifies another feature"
+        )
+    newline = (
+        "\r\n"
+        if lines[index].endswith("\r\n")
+        else ("\n" if lines[index].endswith("\n") else "")
+    )
+    lines[index] = replacement + newline
+    return "".join(lines)
 
 
-def materialize_acceptance_metadata(
+def render_acceptance_metadata(
     *,
     project: Project,
     feature_id: str,
@@ -123,26 +169,18 @@ def materialize_acceptance_metadata(
     milestone_base: str,
     candidate_commit: str,
     recovery: bool,
-) -> tuple[str, ...]:
-    """Apply only deterministic accepted-feature metadata to a clean candidate tree."""
+) -> tuple[tuple[str, ...], dict[str, bytes], dict[str, bytes]]:
+    """Render and validate every accepted-feature metadata file without writing."""
 
     inspector = RepositoryInspector(project.repository)
-    if (
-        inspector.current_branch != feature_branch
-        or inspector.head != candidate_commit
-        or inspector.rev_parse(feature_branch, check=False) != candidate_commit
-        or inspector.tracked_changed_paths()
-        or inspector.untracked_file_hashes()
-        or any(inspector.git_operation_state().values())
-    ):
-        raise TransactionError(
-            "accepted-feature metadata requires the exact clean candidate branch"
-        )
-    queue_path = project.repository / project.queue_location
+    queue_text = inspector.file_at_commit(candidate_commit, project.queue_location)
+    if queue_text is None:
+        raise TransactionError("candidate feature queue is unavailable")
     try:
-        queue_document = json.loads(queue_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        queue_document = json.loads(queue_text)
+    except json.JSONDecodeError as exc:
         raise TransactionError("candidate feature queue is unavailable or invalid") from exc
+    queue_path = project.repository / project.queue_location
     queue = FeatureQueue(queue_document, queue_path, project.repository)
     feature = queue.feature(feature_id)
     if feature is None:
@@ -162,11 +200,15 @@ def materialize_acceptance_metadata(
         raise TransactionError("candidate queue accepted commit conflicts with the plan")
 
     raw_features = queue_document.get("features")
-    matches = [
-        item
-        for item in raw_features
-        if isinstance(item, dict) and item.get("id") == feature_id
-    ] if isinstance(raw_features, list) else []
+    matches = (
+        [
+            item
+            for item in raw_features
+            if isinstance(item, dict) and item.get("id") == feature_id
+        ]
+        if isinstance(raw_features, list)
+        else []
+    )
     if len(matches) != 1:
         raise TransactionError(
             f"candidate queue must contain exactly one feature {feature_id}"
@@ -187,41 +229,37 @@ def materialize_acceptance_metadata(
             },
         }
     )
-    atomic_write_json(queue_path, queue_document)
-
     metadata_paths = acceptance_metadata_paths(project, feature)
     specification = str(
         feature.get("spec") or feature.get("specification") or feature.get("spec_path")
     )
-    specification_path = project.repository / specification
-    atomic_write_bytes(
-        specification_path,
-        _replace_factory_status(
-            specification_path.read_text(encoding="utf-8"),
+    originals: dict[str, bytes] = {}
+    for relative in metadata_paths:
+        content = inspector.file_at_commit(candidate_commit, relative)
+        if content is None:
+            raise TransactionError(
+                f"candidate commit lacks accepted-feature metadata: {relative}"
+            )
+        originals[relative] = content.encode("utf-8")
+
+    rendered: dict[str, bytes] = {
+        project.queue_location: (
+            json.dumps(queue_document, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8"),
+        specification: _replace_factory_status(
+            originals[specification].decode("utf-8"), feature_id=feature_id
+        ).encode("utf-8"),
+        "docs/FEATURE_CATALOG.md": _replace_catalog_status(
+            originals["docs/FEATURE_CATALOG.md"].decode("utf-8"),
             feature_id=feature_id,
         ).encode("utf-8"),
-    )
-
-    catalog = project.repository / "docs/FEATURE_CATALOG.md"
-    atomic_write_bytes(
-        catalog,
-        _replace_catalog_status(
-            catalog.read_text(encoding="utf-8"), feature_id=feature_id
-        ).encode("utf-8"),
-    )
-
-    current_status = project.repository / "docs/CURRENT_STATUS.md"
-    atomic_write_bytes(
-        current_status,
-        _replace_current_status(
-            current_status.read_text(encoding="utf-8"),
+        "docs/CURRENT_STATUS.md": _replace_current_status(
+            originals["docs/CURRENT_STATUS.md"].decode("utf-8"),
             feature_id=feature_id,
             title=str(feature.get("title") or feature_id),
         ).encode("utf-8"),
-    )
-
-    run_log = project.repository / "docs/RUN_LOG.md"
-    existing_log = run_log.read_text(encoding="utf-8").rstrip()
+    }
+    existing_log = originals["docs/RUN_LOG.md"].decode("utf-8").rstrip()
     mode = "recovery" if recovery else "normal finalization"
     entry = [
         "",
@@ -237,20 +275,157 @@ def materialize_acceptance_metadata(
         + ".",
         "",
     ]
-    atomic_write_bytes(
-        run_log,
-        (existing_log + "\n" + "\n".join(entry)).encode("utf-8"),
-    )
-    observed = tuple(inspector.tracked_changed_paths())
+    rendered["docs/RUN_LOG.md"] = (
+        existing_log + "\n" + "\n".join(entry)
+    ).encode("utf-8")
+    if tuple(sorted(rendered)) != metadata_paths:
+        raise TransactionError(
+            "rendered acceptance metadata differs from the authorized path set"
+        )
+    if any(rendered[path] == originals[path] for path in metadata_paths):
+        raise TransactionError(
+            "accepted-feature metadata rendering left an authorized path unchanged"
+        )
+    return metadata_paths, rendered, originals
+
+
+def _write_rendered_metadata_transactionally(
+    root: Path,
+    rendered: dict[str, bytes],
+    worktree_originals: dict[str, bytes],
+    worktree_modes: dict[str, int],
+) -> None:
+    """Prepare every replacement first and roll back the set on any failure."""
+
+    prepared: dict[str, Path] = {}
+    replaced: list[str] = []
+    try:
+        for relative in sorted(rendered):
+            target = root / relative
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{target.name}.acceptance-",
+                dir=target.parent,
+            )
+            temporary = Path(temporary_name)
+            prepared[relative] = temporary
+            try:
+                os.fchmod(descriptor, worktree_modes[relative])
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(rendered[relative])
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except Exception:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                raise
+        for relative in sorted(rendered):
+            os.replace(prepared[relative], root / relative)
+            replaced.append(relative)
+            prepared.pop(relative, None)
+    except Exception:
+        for relative in replaced:
+            atomic_write_bytes(
+                root / relative,
+                worktree_originals[relative],
+                mode=worktree_modes[relative],
+            )
+        raise
+    finally:
+        for temporary in prepared.values():
+            temporary.unlink(missing_ok=True)
+
+
+def materialize_acceptance_metadata(
+    *,
+    project: Project,
+    feature_id: str,
+    feature_branch: str,
+    milestone_base: str,
+    candidate_commit: str,
+    recovery: bool,
+    retained_paths: tuple[str, ...] = (),
+    retained_diff_fingerprint: str | None = None,
+) -> tuple[str, ...]:
+    """Apply one fully rendered accepted-feature metadata transaction."""
+
+    inspector = RepositoryInspector(project.repository)
     if (
-        not observed
-        or not set(observed).issubset(metadata_paths)
+        inspector.current_branch != feature_branch
+        or inspector.head != candidate_commit
+        or inspector.rev_parse(feature_branch, check=False) != candidate_commit
         or inspector.untracked_file_hashes()
+        or any(inspector.git_operation_state().values())
     ):
+        raise TransactionError(
+            "accepted-feature metadata requires the exact candidate branch"
+        )
+    metadata_paths, rendered, candidate_originals = render_acceptance_metadata(
+        project=project,
+        feature_id=feature_id,
+        feature_branch=feature_branch,
+        milestone_base=milestone_base,
+        candidate_commit=candidate_commit,
+        recovery=recovery,
+    )
+    retained_paths = tuple(sorted(retained_paths))
+    if not set(retained_paths).issubset(metadata_paths):
+        raise TransactionError("retained acceptance metadata is outside authorization")
+    observed_before = tuple(inspector.tracked_changed_paths())
+    if observed_before != retained_paths:
+        raise TransactionError(
+            "accepted-feature metadata worktree differs from the retained prefix"
+        )
+    if retained_paths:
+        if (
+            not retained_diff_fingerprint
+            or inspector.planning_diff_fingerprint() != retained_diff_fingerprint
+        ):
+            raise TransactionError("retained acceptance metadata fingerprint changed")
+    elif retained_diff_fingerprint is not None:
+        raise TransactionError(
+            "clean acceptance metadata cannot bind a retained fingerprint"
+        )
+
+    worktree_originals = {
+        path: (project.repository / path).read_bytes() for path in metadata_paths
+    }
+    worktree_modes = {
+        path: (project.repository / path).stat().st_mode & 0o7777
+        for path in metadata_paths
+    }
+    for path in metadata_paths:
+        expected = (
+            rendered[path] if path in retained_paths else candidate_originals[path]
+        )
+        if worktree_originals[path] != expected:
+            raise TransactionError(
+                f"retained acceptance metadata is not the deterministic prefix: {path}"
+            )
+    try:
+        _write_rendered_metadata_transactionally(
+            project.repository, rendered, worktree_originals, worktree_modes
+        )
+        observed = tuple(inspector.tracked_changed_paths())
+        if observed != metadata_paths or inspector.untracked_file_hashes():
+            raise TransactionError(
+                "acceptance metadata mutation differs from the authorized path set"
+            )
+    except Exception:
+        for path, content in worktree_originals.items():
+            if (project.repository / path).read_bytes() != content:
+                atomic_write_bytes(
+                    project.repository / path,
+                    content,
+                    mode=worktree_modes[path],
+                )
+        raise
+    if tuple(inspector.tracked_changed_paths()) != metadata_paths:
         raise TransactionError(
             "acceptance metadata mutation differs from the authorized path set"
         )
-    return observed
+    return metadata_paths
 
 
 def _run_git(root: Path, arguments: list[str]) -> str:

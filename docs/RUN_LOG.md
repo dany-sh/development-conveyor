@@ -832,3 +832,24 @@ This log records model configuration and deterministic deployment evidence. It n
 - Exact dry run: all branch, HEAD, run, session, transaction, path, diff, policy, source/test exclusion, lease absence, queue count, dependency, and ready-feature checks passed. The deterministic validator reported 18 nonblocking M1-M9 preparation warnings; F002 and F008 were integrated with passed evidence; F009 was the sole selected ready feature.
 - Recovery behavior: zero models and zero children; one planning-only commit; recovery transaction and projection terminalize to `feature_ready`; compatibility cache derives its active semantics from the terminal projection; feature execution and milestone integration remain disabled.
 - Validation boundary: only affected warning, queue-reconciliation, planning-finalization, structured-envelope, consistency, and routing tests plus `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, `scripts/conveyor recover-planning --help`, and `git diff --check`. No application test, complete controller suite, real resume, queue reconciliation, live recovery apply, feature execution, or milestone integration.
+
+### Model execution — 2026-07-23T18:31:36+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `semantic_accepted_status_recovery`
+- Safety and autonomy contracts unchanged: `true`
+
+### Semantic accepted-feature status and F009 partial recovery — 2026-07-23
+
+- Scope and execution: one direct parent `gpt-5.6-sol`/`medium` controller-maintenance session from `a69aa12ac2be68c7b3a353a376f8d34d744b3595`; zero child or named-agent sessions, no application tests, no F009 rerun, no ordinary resume, no live recovery apply, no milestone integration, and no complete controller suite.
+- Semantic status: acceptance finds exactly one `Selected next feature`, `Selected feature`, or `Active feature` bullet inside `## Factory position`, requires the expected feature ID, and changes only that line. Missing, duplicate, malformed, or wrong-feature state fails closed.
+- Transactional metadata: all five authorized metadata files are rendered and validated from the candidate commit before any write. Prepared same-filesystem replacements preserve modes, and a mid-set write failure restores the complete original worktree.
+- Protected F009 recovery: the read-only plan binds candidate `777ff201d3752e4be034da87e6c046289b3883ac`, parent `639919c4a89537d9df8e3a80404780c32cb284c9`, feature transaction `3efad53f-fae1-459b-be84-b9d2d7a370f7`, failed acceptance transaction `dd695fa7-9713-49da-92ef-f8b40c86ea59`, the exact three retained paths, and diff fingerprint `23ec1510822e027d10c48fd5ea05122ef0f62de2f1cf1e0c8d1ea11c20743882`. Every retained file equals the deterministic accepted prefix; the remaining two metadata files equal the candidate.
+- Recovery outcome in disposable fixtures: source and test blobs remain byte-identical, candidate evidence remains addressable, the accepted commit is one direct child of the milestone base, the branch moves to it, queue identity is `SELF`, projection and compatibility state end at `integration_ready`, the repository is clean, and zero model or child sessions launch.
+- Focused validation: 76 accepted-commit, feature-acceptance, recovery, transaction, projection, consistency, and integration-preflight tests passed in `105.874s`; the 13 directly changed finalization/recovery tests passed again after final identity tightening. The exact live F009 dry-run passed all 28 bound checks with `application_repository_written: false`.
+- Requested commands: `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, `scripts/conveyor recover-accepted-commit --help`, and `git diff --check` exited zero. Configuration validation reported both registered application queues valid.
+- Isolation and content: Interview Companion remained on `codex/F009-transcription-engine-abstraction` at candidate `777ff201` with exactly the retained three-file fingerprint `23ec1510`; Case Manager remained clean on `codex/p0-foundation` at `f85f7da`. The final profile-aware controller audit found no hard content gate.
