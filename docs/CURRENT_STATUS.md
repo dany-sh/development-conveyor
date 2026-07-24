@@ -4,24 +4,30 @@ Last updated: 2026-07-24
 
 ## Summary
 
-The retained-result cache serialization repair is prepared on
-`codex/m1-7-canonical-cycle-cache-repair` from required starting commit
-`2182d51bb765c345631255fbb32a2ac84f020aec`. General feature-result recovery
-now constructs both compatibility documents through canonical schema-validated
-builders. Projection semantics cross into application cycle state only through
-the explicit field mapping, and the controller compatibility cache is rebuilt
-as a fresh project-state document instead of receiving projection keys.
+Post-transition application cycle-cache finalization is implemented on
+`codex/m1-8-post-transition-cycle-cache-finalization` from required starting
+commit `470f0c3c7cd0894fc37009f053e916a704dd3926`. The repair keeps the M1-7
+malformed controller compatibility-cache path while adding a generalized,
+state-transition-aware application-cache path for completed integration
+transactions.
 
-Read-only preflight proved the reported nine-key schema failure belongs to the
-controller compatibility cache at `state/projects/interview-companion.json`;
-the application cache at `.factory/conveyor-state.json` is already schema-valid
-and bound to F097, ledger sequence 497, and projection fingerprint `922f90cf`.
-The dedicated `repair-cycle-cache` route authenticates both hashes, the exact
-repository/ref/transaction lineage, ledger and projection, clean Git and lock
-state, and the application cache binding. Dry-run writes nothing; apply would
-reserve, revalidate, and atomically replace only the controller compatibility
-cache while preserving its mode. The required live dry-run remains the only
-authorized live repair command; apply and F097 integration remain unexecuted.
+The exact F097 live dry-run recognizes the schema-valid cache at ledger
+sequence 497 as the immediately preceding accepted-feature representation,
+authenticates integration transaction
+`22d297a3-628a-4cc8-af18-bd9022929621`, and derives the canonical
+`queue_reconciliation` replacement at ledger sequence 508 and terminal
+milestone HEAD `4eb4d69b5918644c6291cc466cac0678c1e9715a`. It reports stale SHA-256
+`9312a681abccea7a7b5e6bebfa93a46abda1dd279a1df5a0f89817aa96ed901c`,
+zero model or child sessions, no ledger/projection mutation, and only
+`.factory/conveyor-state.json` as a future ignored mutation. Live apply remains
+unexecuted.
+
+Successful deterministic milestone integration now finalizes the canonical
+application cache after the terminal HEAD and final projection are durable.
+If that derived-cache write fails, successful integration evidence and the
+released writer lease remain intact; the controller reports a recoverable
+derived-cache finalization failure with `repair-cycle-cache --apply` and never
+creates a human product-decision gate or repeats the integration.
 
 The retained feature-result recovery route is generalized on
 `codex/m1-6-general-retained-feature-result-recovery` from starting commit
@@ -147,21 +153,19 @@ M1 — Transactional workflow kernel
 
 ## Active controller repair
 
-Canonical retained-result cache repair (`implementation prepared`)
+Post-transition cycle-cache finalization (`implementation prepared`)
 
 ## Next boundary
 
-Commit the canonical cache repair. Do not run
-`repair-cycle-cache --apply`, prepare or implement another feature, run an
-application Conveyor resume, begin F097 milestone integration, merge a default
-branch, push, tag, publish, deploy, or release.
+Commit the post-transition cache finalization repair. Do not run
+`repair-cycle-cache --apply`, ordinary Conveyor resume, queue reconciliation,
+another integration, merge, push, tag, publish, deploy, or release.
 
 ## Validation scope
 
-Validation is limited to feature-result/F003/F097 regressions, canonical
-cycle-cache and compatibility-cache tests, focused projection/status/
-consistency regressions, the exact Interview Companion repair dry-run,
-`compileall`, configuration validation, command help/mode checks, and
-`git diff --check`. Application tests, the complete controller suite, live
-repair apply, ordinary resume, new feature work, and milestone integration are
-intentionally excluded.
+Validation is limited to M1-6/M1-7 feature-result regressions, canonical
+cycle-cache and deterministic integration tests, focused status/consistency
+regressions, the exact Interview Companion repair dry-run, `compileall`,
+configuration validation, command help/mode checks, and `git diff --check`.
+Application tests, the complete controller suite, live repair apply, ordinary
+resume, new feature work, and milestone integration are intentionally excluded.

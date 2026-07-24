@@ -208,8 +208,8 @@ def _parser() -> argparse.ArgumentParser:
     repair_cycle_cache = subparsers.add_parser(
         "repair-cycle-cache",
         help=(
-            "authenticate and deterministically rebuild one malformed "
-            "projection-derived compatibility cache"
+            "authenticate and deterministically rebuild one stale or malformed "
+            "projection-derived cycle cache"
         ),
     )
     repair_cycle_cache.add_argument("--project", required=True)

@@ -109,6 +109,113 @@ def build_canonical_cycle_cache(
     return canonical
 
 
+def completed_transition_cycle_updates(
+    *,
+    projection: dict[str, Any],
+    run_id: str,
+    milestone_branch: str,
+    pre_transition_head: str,
+    terminal_snapshot: dict[str, Any],
+    queue_fingerprint: str,
+    selected_feature: dict[str, Any] | None,
+    selected_feature_branch: str | None,
+    dependency_statuses: dict[str, str | None] | None,
+    checkpoint: str,
+    updated_at: str,
+) -> dict[str, Any]:
+    """Return deterministic cache fields after one completed branch transition.
+
+    These fields deliberately describe the repository after the completed
+    transaction. Historical feature and session bindings from the preceding
+    cache must not survive merely because the cache document is derived.
+    Projection-owned semantics are applied separately by
+    :func:`build_canonical_cycle_cache`.
+    """
+
+    terminal_branch = terminal_snapshot.get("branch")
+    terminal_head = terminal_snapshot.get("head")
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or not isinstance(milestone_branch, str)
+        or not milestone_branch
+        or terminal_branch != milestone_branch
+        or not isinstance(terminal_head, str)
+        or not terminal_head
+        or terminal_snapshot.get("clean") is not True
+        or not isinstance(queue_fingerprint, str)
+        or not queue_fingerprint
+        or not isinstance(updated_at, str)
+        or not updated_at
+    ):
+        raise RecoveryError("completed transition cache evidence is incomplete")
+    selected_id = projection.get("selected_next_feature")
+    if selected_id is not None:
+        if (
+            not isinstance(selected_feature, dict)
+            or selected_feature.get("id") != selected_id
+            or not isinstance(selected_feature_branch, str)
+            or not selected_feature_branch
+        ):
+            raise RecoveryError(
+                "completed transition selected-feature evidence is incomplete"
+            )
+    elif selected_feature is not None or selected_feature_branch is not None:
+        raise RecoveryError(
+            "completed transition unexpectedly supplied selected-feature evidence"
+        )
+    dependencies = list(selected_feature.get("dependencies", [])) if selected_feature else []
+    statuses = dict(dependency_statuses or {})
+    if set(statuses) != set(dependencies):
+        raise RecoveryError(
+            "completed transition dependency evidence is incomplete"
+        )
+    return {
+        "conveyor_run_id": run_id,
+        "current_feature": projection.get("current_feature"),
+        "selected_feature": selected_id,
+        "feature_dependencies": dependencies,
+        "dependency_evidence": {
+            "declared": dependencies,
+            "statuses": statuses,
+            "all_complete": all(
+                value in {"done", "integrated"} for value in statuses.values()
+            ),
+        },
+        "queue_fingerprint": queue_fingerprint,
+        "feature_branch": selected_feature_branch,
+        "feature_worktree": None,
+        "feature_starting_commit": terminal_head,
+        "accepted_feature_commit": projection.get("accepted_feature_commit"),
+        "milestone_branch": milestone_branch,
+        "milestone_pre_integration_commit": pre_transition_head,
+        "milestone_post_integration_commit": terminal_head,
+        "session_completion_classification": None,
+        "session_completion_flags": [],
+        "session_completion_evidence": None,
+        "branch_recovery": None,
+        "writer_lock_identity": None,
+        "validation_attempts": [],
+        "review_attempts": [],
+        "integration_attempts": [],
+        "last_successful_checkpoint": checkpoint,
+        "last_verified_git_state": terminal_snapshot,
+        "failure_classification": None,
+        "retry_exhausted": False,
+        "stop_reason": None,
+        "human_decision_required": None,
+        "session_id": None,
+        "feature_session_id": None,
+        "integration_session_id": None,
+        "prior_integration_session_ids": [],
+        "integration_status": projection.get("integration_status"),
+        "integration_gate": None,
+        "milestone_gate_session_id": None,
+        "next_safe_action": projection.get("allowed_next_action"),
+        "updated_at": updated_at,
+    }
+
+
 def normalize_cycle_cache_for_rebinding(
     state: dict[str, Any],
     *,
@@ -291,6 +398,7 @@ def write_terminal_cycle_cache(
     transaction_id: str,
     expected_feature: str | None = None,
     cycle_schema: dict[str, Any] | None = None,
+    mode: int = 0o600,
 ) -> dict[str, Any]:
     """Atomically write and read back one canonical terminal cache binding."""
 
@@ -308,7 +416,7 @@ def write_terminal_cycle_cache(
     )
     if cycle_schema is not None:
         validate_schema(finalized, cycle_schema)
-    atomic_write_json(path, finalized)
+    atomic_write_json(path, finalized, mode=mode)
 
     try:
         persisted = json.loads(path.read_text(encoding="utf-8"))

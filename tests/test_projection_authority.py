@@ -328,11 +328,16 @@ class ProjectionAuthorityTests(unittest.TestCase):
             self.assertEqual(accepted, historical[-1]["accepted_commit"])
             self.assertEqual(integrated, historical[-1]["integrated_commit"])
             superseded = plan["superseded_legacy_cycles"]
-            self.assertTrue(any(
-                item.get("feature_id") == "F001"
-                and item.get("classification") == "superseded"
-                for item in superseded
-            ))
+            self.assertEqual([], superseded)
+            finalized_cache = json.loads(cycle_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                plan["kernel_projection"]["ledger_sequence"],
+                finalized_cache["kernel_ledger_sequence"],
+            )
+            self.assertEqual(
+                "queue_reconciliation", finalized_cache["current_phase"]
+            )
+            self.assertIsNone(finalized_cache["current_feature"])
 
     def test_distinct_ready_feature_remains_selectable_after_completed_integration(self):
         with tempfile.TemporaryDirectory() as temporary:

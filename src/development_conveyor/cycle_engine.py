@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import re
+import stat
 import subprocess
 import uuid
 from dataclasses import replace
@@ -109,6 +110,8 @@ from .workflow_lease import WorkflowWriterLease
 from .command_authority import CommandAuthority
 from .cycle_cache import (
     LEGACY_CACHE_BINDING_RECOVERY_FIELD,
+    build_canonical_cycle_cache,
+    completed_transition_cycle_updates,
     cycle_cache_semantic_mismatches,
     cycle_cache_semantics_from_projection,
     normalize_cycle_cache_for_rebinding,
@@ -2300,6 +2303,148 @@ class CycleEngine:
             transaction_id=transaction_id,
             expected_feature=expected_feature,
         )
+
+    def _finalize_completed_integration_cycle_cache(
+        self,
+        *,
+        project: Project,
+        inspector: RepositoryInspector,
+        ledger: EvidenceLedger,
+        transaction_id: str,
+        run_id: str,
+        completion: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bind the application cache to a completed integration projection."""
+
+        terminal = ledger.terminal_event(transaction_id)
+        terminal_projection = completion.get("projection")
+        if (
+            not isinstance(terminal, dict)
+            or terminal.get("event_type") != "TransactionCompleted"
+            or terminal.get("workflow_type")
+            != WorkflowType.MILESTONE_INTEGRATION.value
+            or not isinstance(terminal_projection, dict)
+        ):
+            raise RecoveryError(
+                "integration cache finalization requires completed terminal evidence"
+            )
+        terminal_payload = terminal.get("payload") or {}
+        terminal_snapshot = terminal_payload.get("terminal_snapshot") or {}
+        transaction_events = [
+            event
+            for event in ledger.read()
+            if event.get("transaction_id") == transaction_id
+        ]
+        started = next(
+            (
+                event
+                for event in transaction_events
+                if event.get("event_type") == "TransactionStarted"
+            ),
+            None,
+        )
+        if (
+            terminal_payload.get("classification") != "INTEGRATED"
+            or terminal_snapshot.get("clean") is not True
+            or terminal_snapshot.get("branch") != project.milestone_branch
+            or terminal_snapshot.get("head") != inspector.head
+            or inspector.current_branch != project.milestone_branch
+            or not isinstance(started, dict)
+        ):
+            raise RecoveryError(
+                "integration cache finalization terminal topology changed"
+            )
+        queue = FeatureQueue.from_location(
+            project.repository, project.queue_location
+        )
+        selected_id = terminal_projection.get("selected_next_feature")
+        selected_feature = queue.feature(selected_id) if selected_id else None
+        selected_branch = (
+            canonical_feature_branch(project, selected_feature)
+            if selected_feature is not None
+            else None
+        )
+        cycle_path = inspector.cycle_state_path()
+        state = self.cycle_store.read(cycle_path)
+        original_cache = cycle_path.read_bytes() if cycle_path.exists() else None
+        if state is None:
+            state = self._new_cycle_state(
+                project, run_id, inspector, selected_feature
+            )
+        mode = (
+            stat.S_IMODE(cycle_path.stat().st_mode)
+            if cycle_path.exists()
+            else 0o600
+        )
+        start_payload = started.get("payload") or {}
+        updates = completed_transition_cycle_updates(
+            projection=terminal_projection,
+            run_id=run_id,
+            milestone_branch=str(project.milestone_branch),
+            pre_transition_head=str(start_payload.get("starting_head")),
+            terminal_snapshot=terminal_snapshot,
+            queue_fingerprint=str(terminal_snapshot.get("queue_fingerprint")),
+            selected_feature=selected_feature,
+            selected_feature_branch=selected_branch,
+            dependency_statuses={
+                dependency: (queue.feature(dependency) or {}).get("status")
+                for dependency in (
+                    selected_feature.get("dependencies", [])
+                    if selected_feature is not None
+                    else []
+                )
+            },
+            checkpoint="milestone_integration_terminal",
+            updated_at=str(terminal.get("timestamp")),
+        )
+        canonical = build_canonical_cycle_cache(
+            state,
+            cycle_schema=self.cycle_store.schema,
+            updates=updates,
+            projection=terminal_projection,
+        )
+        if inspector.git(
+            ["ls-files", "--error-unmatch", ".factory/conveyor-state.json"],
+            check=False,
+        ).returncode == 0:
+            raise RecoveryError(
+                "integration cache finalization target is Git-tracked"
+            )
+        if inspector.git(
+            ["check-ignore", "-q", ".factory/conveyor-state.json"],
+            check=False,
+        ).returncode != 0:
+            raise RecoveryError(
+                "integration cache finalization target is not runtime-ignored"
+            )
+        try:
+            finalized = write_terminal_cycle_cache(
+                cycle_path,
+                canonical,
+                ledger=ledger,
+                projection_engine=ProjectionEngine(
+                    ledger, ledger.path.parent / "projection-cache.json"
+                ),
+                transaction_id=transaction_id,
+                expected_feature=selected_id,
+                cycle_schema=self.cycle_store.schema,
+                mode=mode,
+            )
+        except Exception:
+            if original_cache is None:
+                if cycle_path.exists():
+                    cycle_path.unlink()
+            elif (
+                not cycle_path.exists()
+                or cycle_path.read_bytes() != original_cache
+            ):
+                atomic_write_bytes(cycle_path, original_cache, mode=mode)
+            raise
+        if stat.S_IMODE(cycle_path.stat().st_mode) != mode:
+            raise RecoveryError(
+                "integration cache finalization changed cache permissions"
+            )
+        return finalized
 
     def _write_cycle_cache(
         self,
@@ -5500,6 +5645,42 @@ class CycleEngine:
                     "model_session_launched": False,
                 },
             )
+            try:
+                finalized_cache = self._finalize_completed_integration_cycle_cache(
+                    project=project,
+                    inspector=inspector,
+                    ledger=ledger,
+                    transaction_id=transaction.transaction_id,
+                    run_id=run_id,
+                    completion=completion,
+                )
+            except Exception as exc:
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "derived_cache_finalization_failed",
+                    "classification": (
+                        "RECOVERABLE_DERIVED_CACHE_FINALIZATION_FAILURE"
+                    ),
+                    "feature": plan["feature_id"],
+                    "accepted_commit": plan["accepted_commit"],
+                    "integrated_commit": integrated,
+                    "recovered_transaction_id": plan["transaction_id"],
+                    "integration_transaction": transaction.transaction_id,
+                    "kernel_projection": completion["projection"],
+                    "integration_preserved": True,
+                    "integration_will_not_repeat": True,
+                    "repair_command": (
+                        "scripts/conveyor repair-cycle-cache "
+                        f"--project {project.project_id} --apply"
+                    ),
+                    "cache_finalization_error": (
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    "writer_lease_released": lease.read() is None,
+                    "human_gate": None,
+                    "model_session_launched": False,
+                    "child_sessions_launched": 0,
+                }
             return {
                 "project_id": project.project_id,
                 "outcome": "feature_integrated",
@@ -5508,10 +5689,10 @@ class CycleEngine:
                 "integrated_commit": integrated,
                 "recovered_transaction_id": plan["transaction_id"],
                 "kernel_projection": completion["projection"],
+                "application_cycle_cache": finalized_cache,
+                "cycle_cache_finalized": True,
                 "next_action": (
-                    "milestone_gate"
-                    if result.get("milestone_complete") is True
-                    else "feature_ready"
+                    completion["projection"].get("allowed_next_action")
                 ),
                 "model_session_launched": False,
             }
@@ -5842,6 +6023,41 @@ class CycleEngine:
                 "integration_runtime": result["runtime"],
                 "model_session_launched": False,
             })
+            try:
+                finalized_cache = self._finalize_completed_integration_cycle_cache(
+                    project=project,
+                    inspector=inspector,
+                    ledger=ledger,
+                    transaction_id=transaction.transaction_id,
+                    run_id=run_id,
+                    completion=completion,
+                )
+            except Exception as exc:
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "derived_cache_finalization_failed",
+                    "classification": (
+                        "RECOVERABLE_DERIVED_CACHE_FINALIZATION_FAILURE"
+                    ),
+                    "feature": feature_id,
+                    "accepted_commit": accepted,
+                    "integrated_commit": integrated,
+                    "integration_transaction": transaction.transaction_id,
+                    "kernel_projection": completion["projection"],
+                    "integration_preserved": True,
+                    "integration_will_not_repeat": True,
+                    "repair_command": (
+                        "scripts/conveyor repair-cycle-cache "
+                        f"--project {project.project_id} --apply"
+                    ),
+                    "cache_finalization_error": (
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    "writer_lease_released": lease.read() is None,
+                    "human_gate": None,
+                    "model_session_launched": False,
+                    "child_sessions_launched": 0,
+                }
             return {
                 "project_id": project.project_id,
                 "outcome": "feature_integrated",
@@ -5849,10 +6065,10 @@ class CycleEngine:
                 "accepted_commit": accepted,
                 "integrated_commit": integrated,
                 "kernel_projection": completion["projection"],
+                "application_cycle_cache": finalized_cache,
+                "cycle_cache_finalized": True,
                 "next_action": (
-                    "milestone_gate"
-                    if result.get("milestone_complete") is True
-                    else "feature_ready"
+                    completion["projection"].get("allowed_next_action")
                 ),
                 "integration_plan": str(plan_path),
                 "model_session_launched": False,

@@ -934,3 +934,23 @@ This log records model configuration and deterministic deployment evidence. It n
 - Exact live dry-run: authoritative state remained `integration_pending` for F097, accepted commit `560214ec`, ledger sequence 497/fingerprint `0a9638c7`, projection fingerprint `922f90cf`, no active transaction or human gate, and session resume ineligible. The replacement selects fresh deterministic milestone integration as the next safe action but launches nothing and changes no ledger, projection, application cache, application Git path, or ref.
 - Focused validation: 49/49 feature-result/F003/F097, cache-binding, projection-authority, status, and consistency tests passed in `146.980s`. `compileall`, configuration validation, command help, both invalid-mode checks, the exact live repair dry-run, and `git diff --check` passed. The complete controller suite and application tests were intentionally not run.
 - Isolation: neither registered application repository was modified. No live repair apply, ordinary Conveyor resume, F097 integration, merge, push, tag, publication, deployment, or release ran.
+
+### Model execution — 2026-07-24T23:43:23+00:00
+
+- Agent role: `controller-repair-writer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `post_transition_cycle_cache_finalization`
+- Safety and autonomy contracts unchanged: `true`
+
+### Post-transition application cycle-cache finalization — 2026-07-24
+
+- Scope: controller-only implementation on `codex/m1-8-post-transition-cycle-cache-finalization` from direct parent `470f0c3c7cd0894fc37009f053e916a704dd3926`; one parent session, zero child sessions, and no named agents.
+- Repair: `repair-cycle-cache` retains the exact M1-7 malformed controller compatibility-cache path and adds a schema-valid application-cache path that authenticates the immediately preceding accepted-feature state, ledger hash chain, completed integration plan and transaction, clean feature-to-milestone branch transition, terminal milestone HEAD, current projection, cache signature, and cache SHA-256.
+- Apply safety: the application route acquires a runtime-cache repair reservation, revalidates all evidence, preserves the cache mode and runtime-ignore boundary, atomically serializes only `.factory/conveyor-state.json`, compares ledger/projection/controller-cache/Git state before and after, releases the reservation, and is idempotent after success.
+- Integration finalization: fresh and recovered deterministic milestone integration now materialize the canonical application cache only after `TransactionCompleted`, `LeaseReleased`, `ProjectionUpdated`, and the final projection are durable. A simulated cache-write failure preserved the successful integration transaction, released the writer lease, created no human gate, and exposed `repair-cycle-cache --apply` without repeating integration.
+- Focused validation: 109 tests passed across post-transition repair, M1-6/M1-7 feature-result recovery, cache binding, deterministic integration handoff, two-ref recovery, projection/status/consistency, and post-integration finalization. The complete controller suite and all application tests were intentionally excluded.
+- Mechanical validation: `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, repair command help, required-mode rejection, and `git diff --check` passed.
+- Live dry-run: stale schema-valid application cache SHA-256 `9312a681abccea7a7b5e6bebfa93a46abda1dd279a1df5a0f89817aa96ed901c` was recognized at sequence 497; transaction `22d297a3-628a-4cc8-af18-bd9022929621` and terminal HEAD `4eb4d69b5918644c6291cc466cac0678c1e9715a` produced a schema-valid canonical replacement at sequence 508. The plan listed only `.factory/conveyor-state.json`, no ledger/projection or Git-tracked changes, no queue reconciliation, and zero model or child launches. Live apply was not run.

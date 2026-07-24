@@ -94,6 +94,69 @@ class DeterministicIntegrationHandoffTests(unittest.TestCase):
             self.assertEqual(set(LEASE_IDENTITY_FIELDS), set(plan["lease_identity"]))
             self.assertEqual(milestone_start, plan["pre_integration_head"])
             self.assertFalse(Path(captured["path"]).is_relative_to(repository))
+            cache = json.loads(
+                RepositoryInspector(repository).cycle_state_path().read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(result["kernel_projection"]["ledger_sequence"], cache["kernel_ledger_sequence"])
+            self.assertEqual(
+                result["kernel_projection"]["projection_fingerprint"],
+                cache["kernel_projection_fingerprint"],
+            )
+            self.assertTrue(result["cycle_cache_finalized"])
+            self.assertEqual([], launcher.requests)
+
+    def test_cache_finalization_failure_preserves_integration_and_repairs_deterministically(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                repository,
+                project,
+                _,
+                engine,
+                launcher,
+                ledger,
+                _,
+                _,
+                accepted,
+                _,
+            ) = self._fixture(Path(temporary))
+            with mock.patch.object(
+                engine,
+                "_finalize_completed_integration_cycle_cache",
+                side_effect=OSError("simulated cache finalization failure"),
+            ):
+                result = engine.run_project(project, "milestone")
+
+            self.assertEqual(
+                "RECOVERABLE_DERIVED_CACHE_FINALIZATION_FAILURE",
+                result["classification"],
+            )
+            self.assertTrue(result["integration_preserved"])
+            self.assertTrue(result["integration_will_not_repeat"])
+            self.assertTrue(result["writer_lease_released"])
+            self.assertIsNone(result["human_gate"])
+            self.assertEqual(
+                (
+                    "scripts/conveyor repair-cycle-cache "
+                    f"--project {project.project_id} --apply"
+                ),
+                result["repair_command"],
+            )
+            terminal_head = git(repository, "rev-parse", "HEAD")
+            terminal_branch = git(repository, "branch", "--show-current")
+            self.assertEqual(project.milestone_branch, terminal_branch)
+            self.assertEqual(
+                terminal_head,
+                result["kernel_projection"]["historical_integration_outcomes"][
+                    -1
+                ]["terminal_head"],
+            )
+            terminal = ledger.terminal_event(result["integration_transaction"])
+            self.assertEqual("TransactionCompleted", terminal["event_type"])
+            self.assertEqual("INTEGRATED", terminal["payload"]["classification"])
+            self.assertEqual(accepted, terminal["payload"]["accepted_feature_commit"])
+            self.assertEqual([], launcher.requests)
 
     def test_distinct_controller_and_adapter_ids_are_serialized_and_lease_bound(self):
         with tempfile.TemporaryDirectory() as temporary:

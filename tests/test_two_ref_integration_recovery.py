@@ -389,8 +389,16 @@ class TwoRefIntegrationRecoveryTests(unittest.TestCase):
                 project=project,
                 planner_observer=lambda: engine.project_plan(project),
             ).check()
-            self.assertEqual("CONSISTENT", consistency["classification"])
-            self.assertEqual([], consistency["failed_invariants"])
+            self.assertEqual(
+                "RECOVERABLE_INCONSISTENCY", consistency["classification"]
+            )
+            self.assertEqual(
+                ["cycle_cache_binding"],
+                [
+                    item["invariant"]
+                    for item in consistency["failed_invariants"]
+                ],
+            )
 
     def test_feature_and_milestone_ref_drift_fail_before_new_ledger_events(self):
         for drift in ("feature", "milestone"):

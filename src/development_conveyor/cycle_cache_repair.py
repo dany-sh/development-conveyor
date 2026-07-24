@@ -19,9 +19,18 @@ from .compatibility_cache import (
 )
 from .config import Configuration, load_json
 from .contracts import fingerprint
-from .cycle_cache import validated_canonical_projection_binding
+from .cycle_cache import (
+    _bind_terminal_cycle_cache,
+    build_canonical_cycle_cache,
+    completed_transition_cycle_updates,
+    cycle_cache_semantic_mismatches,
+    validated_canonical_projection_binding,
+    write_terminal_cycle_cache,
+)
 from .errors import RecoveryError, SchemaValidationError
 from .execution_plan import ExecutionPlan
+from .feature_branches import canonical_feature_branch
+from .integration_executor import load_integration_plan
 from .ledger import EvidenceLedger
 from .locks import DurableLock, make_lock_record
 from .logging import atomic_write_bytes
@@ -102,8 +111,10 @@ def _sha256(path: Path) -> str:
 
 @contextmanager
 def _prove_unreserved(path: Path) -> Iterator[None]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    if not path.exists():
+        yield
+        return
+    descriptor = os.open(path, os.O_RDWR)
     try:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -149,14 +160,20 @@ class CycleCacheRepair:
             self.controller_root / "schemas/cycle-state.schema.json"
         )
 
-    def _launch_reservation(self) -> DurableLock:
+    def _launch_reservation(
+        self, repository_path_fingerprint: str | None = None
+    ) -> DurableLock:
         directory = self.configuration.owned_path(
             self.configuration.conveyor["lock_policy"][
                 "controller_launch_lock_directory"
             ]
         )
         return DurableLock(
-            directory / f"{self.expectation.repository_path_fingerprint}.json"
+            directory
+            / (
+                f"{repository_path_fingerprint or self.expectation.repository_path_fingerprint}"
+                ".json"
+            )
         )
 
     def _load_raw_cache(self, path: Path, label: str) -> dict[str, Any]:
@@ -297,7 +314,7 @@ class CycleCacheRepair:
         if reservation.exists and not reservation.owned_by_run:
             raise RecoveryError("controller launch reservation is present")
 
-    def inspect(
+    def _inspect_controller_compatibility_cache(
         self, *, allowed_reservation_run_id: str | None = None
     ) -> dict[str, Any]:
         expected = self.expectation
@@ -426,6 +443,8 @@ class CycleCacheRepair:
             plan = {
                 "schema_version": 1,
                 "project_id": expected.project_id,
+                "cache_kind": "controller_compatibility_cache",
+                "mutation_target": "controller_compatibility_cache",
                 "outcome": (
                     "already_canonical" if already_canonical else "repair_ready"
                 ),
@@ -474,12 +493,367 @@ class CycleCacheRepair:
             plan["plan_fingerprint"] = fingerprint(plan)
             return plan
 
+    def _common_repository_checks(
+        self,
+        *,
+        identity: dict[str, Any],
+        allowed_reservation_run_id: str | None,
+    ) -> None:
+        if not self.inspector.is_clean:
+            raise RecoveryError("application worktree is dirty")
+        if any(self.inspector.git_operation_state().values()):
+            raise RecoveryError("application repository has an unfinished Git operation")
+        writer = self.inspector.writer_lock_path(
+            self.configuration.conveyor["lock_policy"][
+                "writer_lock_relative_path"
+            ]
+        )
+        if writer.exists() or writer.is_symlink():
+            raise RecoveryError("application writer lease is present")
+        reservation = self._launch_reservation(
+            identity["path_fingerprint"]
+        ).status(allowed_reservation_run_id)
+        if reservation.exists and not reservation.owned_by_run:
+            raise RecoveryError("controller launch reservation is present")
+
+    def _inspect_application_transition(
+        self, *, allowed_reservation_run_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Recognize a schema-valid cache immediately preceding integration."""
+
+        identity = self.inspector.identity()
+        self._common_repository_checks(
+            identity=identity,
+            allowed_reservation_run_id=allowed_reservation_run_id,
+        )
+        application = self._load_raw_cache(
+            self.application_cache_path, "application cycle cache"
+        )
+        validate_schema(application, self.cycle_schema)
+        unsigned = dict(application)
+        claimed_signature = unsigned.pop("kernel_cache_fingerprint", None)
+        if claimed_signature != fingerprint(unsigned):
+            raise RecoveryError("application cycle-cache signature is invalid")
+        app_tracked = self.inspector.git(
+            ["ls-files", "--error-unmatch", ".factory/conveyor-state.json"],
+            check=False,
+        ).returncode == 0
+        if app_tracked:
+            raise RecoveryError("application cycle cache unexpectedly became Git-tracked")
+        app_ignored = self.inspector.git(
+            ["check-ignore", "-q", ".factory/conveyor-state.json"],
+            check=False,
+        ).returncode == 0
+        if not app_ignored:
+            raise RecoveryError("application cycle cache is not runtime-ignored")
+
+        ledger = EvidenceLedger(
+            self.state_root / "evidence-ledger.jsonl",
+            project_id=self.project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        events = ledger.read()
+        projection_engine = ProjectionEngine(
+            ledger, self.state_root / "projection-cache.json"
+        )
+        projection = projection_engine.rebuild(persist_cache=False)
+        transactions = [
+            item
+            for item in projection.get("transactions", [])
+            if isinstance(item, dict)
+            and isinstance(item.get("transaction_id"), str)
+            and isinstance(item.get("last_sequence"), int)
+        ]
+        if not transactions:
+            return None
+        latest = max(transactions, key=lambda item: item["last_sequence"])
+        latest_transaction = str(latest["transaction_id"])
+        terminal = ledger.terminal_event(latest_transaction)
+        stale_sequence = application.get("kernel_ledger_sequence")
+        latest_is_completed_integration = bool(
+            latest.get("workflow_type") == "milestone_integration"
+            and latest.get("state") == "completed"
+            and latest.get("terminal_classification") == "INTEGRATED"
+            and isinstance(terminal, dict)
+            and terminal.get("event_type") == "TransactionCompleted"
+        )
+        if stale_sequence == projection.get("ledger_sequence"):
+            if not latest_is_completed_integration:
+                return None
+            binding = validated_canonical_projection_binding(
+                ledger=ledger,
+                projection_engine=projection_engine,
+                transaction_id=latest_transaction,
+            )
+            if (
+                application.get("kernel_transaction_id") != latest_transaction
+                or application.get("kernel_ledger_fingerprint")
+                != binding.ledger_fingerprint
+                or application.get("kernel_projection_fingerprint")
+                != binding.projection_fingerprint
+                or cycle_cache_semantic_mismatches(application, projection)
+            ):
+                raise RecoveryError(
+                    "schema-valid application cache differs from canonical projection"
+                )
+            plan = {
+                "schema_version": 1,
+                "project_id": self.project.project_id,
+                "cache_kind": "application_cycle_cache",
+                "mutation_target": "application_cycle_cache",
+                "outcome": "already_canonical",
+                "dry_run": True,
+                "stale_cache_path": str(self.application_cache_path),
+                "stale_cache_sha256": _sha256(self.application_cache_path),
+                "old_ledger_sequence": stale_sequence,
+                "new_ledger_sequence": binding.ledger_sequence,
+                "completed_integration_transaction": latest_transaction,
+                "terminal_milestone_head": self.inspector.head,
+                "canonical_replacement": application,
+                "replacement_schema_valid": True,
+                "future_mutations": [],
+                "application_git_tracked_paths_will_change": [],
+                "ledger_will_change": False,
+                "projection_will_change": False,
+                "model_sessions_that_would_launch": 0,
+                "child_sessions_that_would_launch": 0,
+                "queue_reconciliation_would_begin": False,
+            }
+            plan["plan_fingerprint"] = fingerprint(plan)
+            return plan
+        if not isinstance(stale_sequence, int) or stale_sequence >= int(
+            projection.get("ledger_sequence", -1)
+        ):
+            return None
+        if (
+            not latest_is_completed_integration
+        ):
+            raise RecoveryError(
+                "stale application cache is not followed by a completed integration"
+            )
+        terminal_payload = terminal.get("payload") or {}
+        terminal_snapshot = terminal_payload.get("terminal_snapshot") or {}
+        if (
+            projection.get("active_transaction") is not None
+            or projection.get("required_lease") is not None
+            or projection.get("human_gate") is not None
+            or terminal_snapshot.get("clean") is not True
+            or terminal_snapshot.get("branch") != self.project.milestone_branch
+            or terminal_snapshot.get("head") != self.inspector.head
+            or self.inspector.current_branch != self.project.milestone_branch
+        ):
+            raise RecoveryError(
+                "completed integration terminal repository state is not canonical"
+            )
+
+        integration_events = [
+            event
+            for event in events
+            if event.get("transaction_id") == latest_transaction
+        ]
+        started = next(
+            (
+                event
+                for event in integration_events
+                if event.get("event_type") == "TransactionStarted"
+            ),
+            None,
+        )
+        if not isinstance(started, dict):
+            raise RecoveryError("completed integration has no starting evidence")
+        start_payload = started.get("payload") or {}
+        preceding = [
+            item
+            for item in transactions
+            if item["transaction_id"] != latest_transaction
+            and item["last_sequence"] < started["sequence"]
+        ]
+        if not preceding:
+            raise RecoveryError("completed integration has no immediately preceding state")
+        previous = max(preceding, key=lambda item: item["last_sequence"])
+        previous_terminal = ledger.terminal_event(str(previous["transaction_id"]))
+        previous_payload = (previous_terminal or {}).get("payload") or {}
+        previous_snapshot = previous_payload.get("terminal_snapshot") or {}
+        accepted_commit = terminal_payload.get("accepted_feature_commit")
+        feature_id = terminal_payload.get("feature_id")
+        if (
+            application.get("kernel_transaction_id")
+            != previous.get("transaction_id")
+            or stale_sequence != previous.get("last_sequence")
+            or previous.get("state") != "completed"
+            or previous.get("terminal_classification") != "FEATURE_ACCEPTED"
+            or previous_payload.get("feature_id") != feature_id
+            or previous_payload.get("accepted_feature_commit") != accepted_commit
+            or previous_snapshot.get("branch") != application.get("feature_branch")
+            or previous_snapshot.get("head") != accepted_commit
+            or application.get("accepted_feature_commit") != accepted_commit
+            or application.get("current_feature") != feature_id
+            or application.get("current_phase") != "integration_pending"
+        ):
+            raise RecoveryError(
+                "stale application cache does not match the immediately preceding state"
+            )
+        prior_event = next(
+            (event for event in events if event.get("sequence") == stale_sequence),
+            None,
+        )
+        if (
+            not isinstance(prior_event, dict)
+            or prior_event.get("fingerprint")
+            != application.get("kernel_ledger_fingerprint")
+        ):
+            raise RecoveryError("stale cache ledger binding is not in the evidence chain")
+
+        plan_path = self.state_root / "integration-plans" / f"{latest_transaction}.json"
+        integration_plan = load_integration_plan(plan_path)
+        if (
+            integration_plan.get("transaction_id") != latest_transaction
+            or integration_plan.get("feature_id") != feature_id
+            or integration_plan.get("feature_branch")
+            != application.get("feature_branch")
+            or integration_plan.get("accepted_commit") != accepted_commit
+            or integration_plan.get("milestone_branch")
+            != self.project.milestone_branch
+            or integration_plan.get("pre_integration_head")
+            != start_payload.get("starting_head")
+            or terminal_payload.get("integrated_commit")
+            != (
+                next(
+                    (
+                        event.get("payload", {}).get("resulting_feature_commit")
+                        for event in integration_events
+                        if event.get("event_type") == "CommitFinalized"
+                    ),
+                    None,
+                )
+            )
+        ):
+            raise RecoveryError("completed integration transaction is contradictory")
+        binding = validated_canonical_projection_binding(
+            ledger=ledger,
+            projection_engine=projection_engine,
+            transaction_id=latest_transaction,
+        )
+        selected_id = projection.get("selected_next_feature")
+        queue = FeatureQueue.from_location(
+            self.project.repository, self.project.queue_location
+        )
+        selected_feature = queue.feature(selected_id) if selected_id else None
+        selected_branch = (
+            canonical_feature_branch(self.project, selected_feature)
+            if selected_feature is not None
+            else None
+        )
+        updates = completed_transition_cycle_updates(
+            projection=projection,
+            run_id=str(latest.get("run_id")),
+            milestone_branch=str(self.project.milestone_branch),
+            pre_transition_head=str(start_payload.get("starting_head")),
+            terminal_snapshot=terminal_snapshot,
+            queue_fingerprint=str(terminal_snapshot.get("queue_fingerprint")),
+            selected_feature=selected_feature,
+            selected_feature_branch=selected_branch,
+            dependency_statuses={
+                dependency: (queue.feature(dependency) or {}).get("status")
+                for dependency in (
+                    selected_feature.get("dependencies", [])
+                    if selected_feature is not None
+                    else []
+                )
+            },
+            checkpoint="milestone_integration_terminal",
+            updated_at=str(terminal.get("timestamp")),
+        )
+        canonical = build_canonical_cycle_cache(
+            application,
+            cycle_schema=self.cycle_schema,
+            updates=updates,
+            projection=projection,
+        )
+        replacement = _bind_terminal_cycle_cache(
+            canonical,
+            ledger=ledger,
+            binding=binding,
+            transaction_id=latest_transaction,
+            expected_feature=selected_id,
+        )
+        validate_schema(replacement, self.cycle_schema)
+        stale_sha = _sha256(self.application_cache_path)
+        plan = {
+            "schema_version": 1,
+            "project_id": self.project.project_id,
+            "cache_kind": "application_cycle_cache",
+            "mutation_target": "application_cycle_cache",
+            "outcome": "repair_ready",
+            "dry_run": True,
+            "stale_cache_path": str(self.application_cache_path),
+            "stale_cache_sha256": stale_sha,
+            "old_ledger_sequence": stale_sequence,
+            "new_ledger_sequence": binding.ledger_sequence,
+            "completed_integration_transaction": latest_transaction,
+            "completed_feature": feature_id,
+            "accepted_feature_commit": accepted_commit,
+            "integrated_implementation_commit": terminal_payload.get(
+                "integrated_commit"
+            ),
+            "terminal_milestone_head": terminal_snapshot.get("head"),
+            "authoritative_projection": {
+                key: projection.get(key)
+                for key in (
+                    "current_state",
+                    "current_feature",
+                    "accepted_feature_commit",
+                    "integration_status",
+                    "active_transaction",
+                    "human_gate",
+                    "selected_next_feature",
+                    "ledger_sequence",
+                    "allowed_next_action",
+                )
+            },
+            "canonical_replacement": replacement,
+            "replacement_schema_valid": True,
+            "future_mutations": [".factory/conveyor-state.json"],
+            "application_git_tracked_paths_will_change": [],
+            "controller_paths_that_would_change": [],
+            "ledger_will_change": False,
+            "projection_will_change": False,
+            "model_sessions_that_would_launch": 0,
+            "child_sessions_that_would_launch": 0,
+            "queue_reconciliation_would_begin": False,
+        }
+        plan["plan_fingerprint"] = fingerprint(plan)
+        return plan
+
+    def inspect(
+        self, *, allowed_reservation_run_id: str | None = None
+    ) -> dict[str, Any]:
+        if (
+            self.inspector.current_branch == self.expectation.branch
+            and self.inspector.head == self.expectation.head
+        ):
+            return self._inspect_controller_compatibility_cache(
+                allowed_reservation_run_id=allowed_reservation_run_id
+            )
+        with _prove_unreserved(self.state_root / ".recovery-takeover.lock"):
+            application_plan = self._inspect_application_transition(
+                allowed_reservation_run_id=allowed_reservation_run_id
+            )
+        if application_plan is not None:
+            return application_plan
+        raise RecoveryError(
+            "no recognized canonical cycle-cache repair topology exists"
+        )
+
     def apply(self, plan: dict[str, Any]) -> dict[str, Any]:
         claimed = plan.get("plan_fingerprint")
         if claimed != fingerprint(
             {key: value for key, value in plan.items() if key != "plan_fingerprint"}
         ):
             raise RecoveryError("cycle-cache repair plan fingerprint is invalid")
+        if plan.get("mutation_target") == "application_cycle_cache":
+            return self._apply_application_transition(plan)
         if plan.get("outcome") == "already_canonical":
             return {
                 **plan,
@@ -559,6 +933,121 @@ class CycleCacheRepair:
             if written and self.controller_cache_path.read_bytes() != original:
                 atomic_write_bytes(
                     self.controller_cache_path, original, mode=original_mode
+                )
+            raise
+        finally:
+            reservation.release(run_id)
+
+    def _apply_application_transition(
+        self, plan: dict[str, Any]
+    ) -> dict[str, Any]:
+        if plan.get("outcome") == "already_canonical":
+            return {
+                **plan,
+                "dry_run": False,
+                "outcome": "already_canonical",
+                "application_cache_written": False,
+                "model_sessions_launched": 0,
+                "child_sessions_launched": 0,
+            }
+        identity = self.inspector.identity()
+        run_id = f"runtime-cache-repair-{uuid.uuid4()}"
+        reservation = self._launch_reservation(identity["path_fingerprint"])
+        reservation.acquire(
+            make_lock_record(
+                project_id=self.project.project_id,
+                repository_identity=identity["repository_id"],
+                run_id=run_id,
+                current_feature=plan.get("completed_feature"),
+                current_phase="runtime_cache_repair",
+            )
+        )
+        original = self.application_cache_path.read_bytes()
+        original_mode = stat.S_IMODE(self.application_cache_path.stat().st_mode)
+        ledger_path = self.state_root / "evidence-ledger.jsonl"
+        projection_path = self.state_root / "projection-cache.json"
+        ledger_before = ledger_path.read_bytes()
+        projection_before = projection_path.read_bytes()
+        controller_before = self.controller_cache_path.read_bytes()
+        git_before = self.inspector.git(
+            ["status", "--porcelain=v1", "--branch"]
+        ).stdout
+        try:
+            revalidated = self.inspect(allowed_reservation_run_id=run_id)
+            if revalidated["plan_fingerprint"] != plan["plan_fingerprint"]:
+                raise RecoveryError(
+                    "cycle-cache repair evidence changed under reservation"
+                )
+            if _sha256(self.application_cache_path) != plan.get(
+                "stale_cache_sha256"
+            ):
+                raise RecoveryError("application cycle-cache SHA-256 changed")
+            ledger = EvidenceLedger(
+                ledger_path,
+                project_id=self.project.project_id,
+                repository_identity=identity["repository_id"],
+                repository_path_fingerprint=identity["path_fingerprint"],
+            )
+            replacement = revalidated["canonical_replacement"]
+            persisted = write_terminal_cycle_cache(
+                self.application_cache_path,
+                replacement,
+                ledger=ledger,
+                projection_engine=ProjectionEngine(ledger, projection_path),
+                transaction_id=str(
+                    revalidated["completed_integration_transaction"]
+                ),
+                expected_feature=(
+                    revalidated["authoritative_projection"].get(
+                        "selected_next_feature"
+                    )
+                ),
+                cycle_schema=self.cycle_schema,
+                mode=original_mode,
+            )
+            if persisted != replacement:
+                raise RecoveryError(
+                    "written application cache differs from canonical replacement"
+                )
+            if (
+                ledger_path.read_bytes() != ledger_before
+                or projection_path.read_bytes() != projection_before
+            ):
+                raise RecoveryError("ledger or projection changed during cache repair")
+            if self.controller_cache_path.read_bytes() != controller_before:
+                raise RecoveryError(
+                    "controller compatibility cache changed during application cache repair"
+                )
+            if (
+                self.inspector.git(["status", "--porcelain=v1", "--branch"]).stdout
+                != git_before
+            ):
+                raise RecoveryError(
+                    "application Git state changed during cache repair"
+                )
+            if stat.S_IMODE(self.application_cache_path.stat().st_mode) != original_mode:
+                raise RecoveryError(
+                    "application cycle-cache permissions changed during repair"
+                )
+            final = self.inspect(allowed_reservation_run_id=run_id)
+            if final.get("outcome") != "already_canonical":
+                raise RecoveryError("application cycle cache is not canonical after repair")
+            return {
+                **final,
+                "dry_run": False,
+                "outcome": "repaired",
+                "application_cache_written": True,
+                "preserved_mode": oct(original_mode),
+                "runtime_cache_repair_reservation": run_id,
+                "model_sessions_launched": 0,
+                "child_sessions_launched": 0,
+                "queue_reconciliation_started": False,
+                "application_commits_created": 0,
+            }
+        except Exception:
+            if self.application_cache_path.read_bytes() != original:
+                atomic_write_bytes(
+                    self.application_cache_path, original, mode=original_mode
                 )
             raise
         finally:
