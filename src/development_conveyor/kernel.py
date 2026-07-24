@@ -921,6 +921,102 @@ class WorkflowKernel:
         transaction.next_project_state = next_state
         return commit
 
+    def finalize_deterministic_planning(
+        self,
+        *,
+        changed_paths: tuple[str, ...],
+        plan_fingerprint: str,
+        validation_evidence: dict[str, Any],
+        selected_feature: str,
+        next_state: str = "feature_ready",
+        execution_mode: str = "deterministic_planning",
+    ) -> None:
+        """Validate one clean-start planning diff without a model session."""
+
+        transaction = self._require()
+        if transaction.workflow_type != WorkflowType.QUEUE_RECONCILIATION:
+            raise TransactionError(
+                "deterministic planning requires queue_reconciliation"
+            )
+        if transaction.current_state != TransactionState.ACTIVE:
+            raise TransactionError(
+                "deterministic planning must finalize from an active transaction"
+            )
+        if transaction.session_ids:
+            raise TransactionError(
+                "deterministic planning cannot own a model session"
+            )
+        self._revalidate_lease()
+        observed_paths = self._changed_paths()
+        if observed_paths != tuple(sorted(changed_paths)):
+            raise TransactionError(
+                "deterministic planning changed paths differ from the reserved plan"
+            )
+        transaction.allowed_mutation_policy.validate(observed_paths)
+        diff_fingerprint = self._diff_fingerprint()
+
+        transaction.transition(TransactionState.RESULT_PENDING)
+        self.ledger.append(
+            event_type="DeterministicExecutionStarted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "execution_mode": execution_mode,
+                "plan_fingerprint": plan_fingerprint,
+                "model_session_launched": False,
+                "child_sessions_launched": 0,
+            },
+        )
+        transaction.transition(TransactionState.VALIDATING)
+        self.ledger.append(
+            event_type="DeterministicResultAccepted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "classification": "RECONCILED_READY_WORK",
+                "plan_fingerprint": plan_fingerprint,
+                "current_commit": transaction.starting_head,
+                "changed_paths": list(observed_paths),
+                "selected_feature": selected_feature,
+                "model_session_launched": False,
+                "child_sessions_launched": 0,
+            },
+        )
+        self.ledger.append(
+            event_type="ChangesDetected",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "changed_paths": list(observed_paths),
+                "diff_fingerprint": diff_fingerprint,
+                "deterministic_planning": True,
+            },
+        )
+        self.ledger.append(
+            event_type="ValidationStarted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "changed_paths": list(observed_paths),
+                "executor": execution_mode,
+            },
+        )
+        self.ledger.append(
+            event_type="ValidationPassed",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "commands": validation_evidence.get("commands", []),
+                "warnings": validation_evidence.get("warnings", []),
+                "checks": validation_evidence.get("checks", {}),
+                "diff_fingerprint": diff_fingerprint,
+                "executor": execution_mode,
+            },
+        )
+        self.validated_diff_fingerprint = diff_fingerprint
+        transaction.next_project_state = next_state
+        transaction.transition(TransactionState.FINALIZING)
+
     def adopt_committed_planning_recovery(
         self, *, original_transaction_id: str, commit: str, expected_parent: str,
         expected_paths: tuple[str, ...], expected_subject: str, plan_fingerprint: str,

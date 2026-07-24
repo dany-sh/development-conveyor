@@ -25,6 +25,7 @@ from .feature_result_recovery import FeatureResultRecovery
 from .accepted_commit_recovery import AcceptedCommitRecovery
 from .execution_profiles import PROFILE_NAMES
 from .feature_scoping import FeatureScoper
+from .feature_decisions import FeatureDecisionResolver
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
 
@@ -193,6 +194,16 @@ def _parser() -> argparse.ArgumentParser:
     mode = recover_scope.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
+    resolve_features = subparsers.add_parser(
+        "resolve-feature-decisions",
+        help="resolve exact queue-feature decisions and select one ready feature without launching a model",
+    )
+    resolve_features.add_argument("--project", required=True)
+    resolve_features.add_argument("--decision-file", required=True)
+    resolve_features.add_argument("--select-feature", required=True)
+    mode = resolve_features.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
     return parser
 
 
@@ -226,6 +237,15 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
     controller_root = discover_root(root)
     configuration = load_configuration(controller_root)
     registry = ProjectRegistry(configuration)
+    if args.command == "resolve-feature-decisions":
+        resolver = FeatureDecisionResolver(configuration)
+        request = resolver.inspect(
+            project=registry.get(args.project),
+            decision_path=Path(args.decision_file),
+            selected_feature=args.select_feature,
+        )
+        return resolver.apply(request) if args.apply else request.public_plan(dry_run=True)
+
     launcher = SessionLauncher(controller_root, configuration.conveyor)
     engine = CycleEngine(
         configuration,

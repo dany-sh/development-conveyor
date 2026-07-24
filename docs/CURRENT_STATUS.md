@@ -4,6 +4,22 @@ Last updated: 2026-07-23
 
 ## Summary
 
+The deterministic queue-feature decision route is implemented on
+`codex/m1-5-queue-feature-decision-resolution` from required starting commit
+`1aec952ee358fbb642cb5100d919e2f2a44d8bf2`. The dedicated
+`resolve-feature-decisions` command accepts strict JSON, requires exactly one
+mode, authenticates the application adapter and repository plus branch, HEAD,
+projection, queue questions, dependency, lease, reservation, and unstarted
+feature evidence, and never invokes the pinned project-level gate resolver.
+
+The exact Interview Companion dry-run passed at branch `codex/m0-foundation`,
+HEAD `49ad74f12a1fd57e1b2fbe3dfe31d173c643b497`, and ledger sequence 445. It
+preserved the historical F002 project-gate record, matched the F006, F011, and
+F097 questions, validated F097's integrated F005/F008/F009 dependencies, and
+planned F010 back to proposed with F097 as the sole ready feature. It wrote
+nothing and planned zero model or child sessions. Apply remains intentionally
+unexecuted.
+
 The queue-result recovery and zero-child enforcement repair is prepared on
 `codex/m1-4-queue-result-recovery-child-budget` from required starting commit
 `d8db9a47a4f1428b83364b3dc3c09a0f16352382`. Compatible legacy queue terminal
@@ -94,22 +110,21 @@ M1 — Transactional workflow kernel
 
 ## Active feature
 
-M1-003 — Bounded feature scoping command (`queue-result recovery and child-budget repair prepared`)
+M1-005 — Deterministic queue-feature decision resolution (`implementation prepared`)
 
 ## Next boundary
 
-Commit the queue-result recovery and zero-child enforcement repair. Do not
-apply the retained Interview Companion planning recovery, prepare or implement
-F010, rerun queue reconciliation, begin milestone integration, merge a default
-branch, push, tag, publish,
-deploy, release, or run an ordinary Conveyor resume.
+Commit the deterministic queue-feature decision resolver. Do not run its
+Interview Companion apply command, prepare or implement F010 or F097, run an
+application Conveyor resume, begin milestone integration, merge a default
+branch, push, tag, publish, deploy, or release.
 
 ## Validation scope
 
-Validation is limited to terminal normalization, queue-reconciliation,
-child-budget, planning-finalization, recovery, and transactional-kernel focused
-tests; the exact retained planning recovery dry run; `compileall`;
-configuration validation; command help; and `git diff --check`. Application
-tests, the complete controller suite, live recovery apply, ordinary resume,
-queue reconciliation rerun, F010 preparation or implementation,
-and milestone integration are intentionally excluded.
+Validation is limited to the new decision-resolution tests, pinned
+project-gate regression tests, transactional-kernel focused tests, the exact
+Interview Companion decision dry-run, `compileall`, configuration validation,
+command help/mode checks, and `git diff --check`. Application tests, the
+complete controller suite, live decision apply, ordinary resume, F010/F097
+preparation or implementation, and milestone integration are intentionally
+excluded.

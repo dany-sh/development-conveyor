@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "project_id": "interview-companion",
+  "repository": {
+    "path": "/Users/dany/Developer/Live_Interview_Companion",
+    "repository_id": "9022b4a8018866b7a9c0862efb2b8664b7e0288afd5e3fbd22b107fa640ab299",
+    "path_fingerprint": "dd395b40fd8c69fffcde93bf15963740d4f914c01bffc69cd8d47a46c8d908e2",
+    "adapter_project_id": "live-interview-companion"
+  },
+  "expected": {
+    "branch": "codex/m0-foundation",
+    "head": "49ad74f12a1fd57e1b2fbe3dfe31d173c643b497",
+    "projection_state": "feature_ready",
+    "selected_feature": "F010"
+  },
+  "desired": {
+    "selected_feature": "F097",
+    "sole_ready_feature": "F097"
+  },
+  "features": [
+    {
+      "feature_id": "F006",
+      "recorded_question": "Should F006 include recording consent, data retention, and session-data deletion, or remain limited to centralized permission and privacy visibility while F052 and F086 own those workflows?",
+      "approved_resolution": "Keep F006 limited to centralized permission state and privacy visibility. F052 owns recording consent. F086 owns data retention and deletion.",
+      "target_status": "proposed"
+    },
+    {
+      "feature_id": "F011",
+      "recorded_question": "Should F011 formally depend on F006 and F007 and run after them, or may test-owned contract fakes satisfy the F006 and F007 harness requirements before those production contracts are implemented?",
+      "approved_resolution": "Add F006 and F007 as formal dependencies. Run F011 only after F006 and F007 are integrated.",
+      "target_status": "proposed",
+      "dependency_change": {
+        "expected": [
+          "F001",
+          "F002"
+        ],
+        "approved": [
+          "F001",
+          "F002",
+          "F006",
+          "F007"
+        ]
+      }
+    },
+    {
+      "feature_id": "F097",
+      "recorded_question": "What canonical schema and identity contract will durably store the imported-audio fingerprint, managed-copy provenance, and imported-audio artifact identity?",
+      "approved_resolution": "Approve an additive canonical imported-audio schema and identity contract.\n\nA completed imported-audio workflow is represented as an existing canonical interview session with an importedAudio origin.\n\nProvider-neutral provenance must include:\n- content fingerprint;\n- managed relative file path;\n- original filename;\n- media type;\n- byte size;\n- duration;\n- import timestamp.\n\nIn-progress jobs and copied files remain outside the completed canonical graph.\n\nPublish the managed copy, canonical session, transcript, and recording metadata only after successful transcription.\n\nDuplicate completed imports are matched by content fingerprint and open the existing completed artifact.\n\nCancellation and failure remove only task-owned staging data.\n\nInterrupted staging is deterministically cleaned or offered for retry.\n\nPreserve existing legacy archive formats.",
+      "target_status": "ready",
+      "required_integrated_dependencies": [
+        "F005",
+        "F008",
+        "F009"
+      ]
+    }
+  ],
+  "commit_subject": "factory: resolve M0 decisions and ready F097"
+}

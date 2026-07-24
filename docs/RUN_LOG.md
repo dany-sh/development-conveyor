@@ -872,3 +872,23 @@ This log records model configuration and deterministic deployment evidence. It n
 - Exact recovery: the live dry-run authenticated run `f5a92b3b-8aa8-4a62-9d05-fc5754351435`, session `019f9056-3267-7181-acf9-5596767837c5`, transaction `3250bdab-b2bb-4e46-9710-139f67509aa9`, branch `codex/m0-foundation`, starting HEAD `9a32da31f9c387ea2085f27399eaf028d4170d6e`, ten retained planning paths, and binary diff `9997ec3dad03145a0265c52bc1ad321d930c80f79b6792a6cebd9de68814d861`. It selected F010, preserved F009 integrated and F006/F011/F097 human-decision state, planned zero models/children, and stopped before feature preparation.
 - Focused validation: 91/91 terminal-contract, queue-reconciliation, cost-policy, zero-child, exact-recovery, rollback, and planning-finalization tests passed. `compileall`, configuration validation, `recover-planning --help`, zero-child capability validation, and `git diff --check` passed. The complete controller suite was intentionally not run.
 - Isolation: before/after SHA-256 inventories proved every controller runtime file byte-identical across the live dry-run. Interview Companion retained the exact ten-file dirty diff on `codex/m0-foundation` at `9a32da31`; Case Manager remained clean on `codex/p0-foundation` at `f85f7dad`. Neither application repository, writer lease, Git operation, ledger, projection cache, compatibility cache, human gate, or runtime record was modified.
+
+### Model execution — 2026-07-24T21:25:30+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `queue_feature_decision_resolution`
+- Safety and autonomy contracts unchanged: `true`
+
+### Deterministic queue-feature decision resolution — 2026-07-24
+
+- Scope and execution: controller-only implementation on `codex/m1-5-queue-feature-decision-resolution` from exact starting commit `1aec952ee358fbb642cb5100d919e2f2a44d8bf2`; one direct parent `gpt-5.6-sol`/`medium` session and zero child, named-agent, Feature Factory, or Milestone Integrator sessions.
+- Dedicated route: `resolve-feature-decisions` requires a registered controller project, strict JSON decision file, selected feature, and exactly one of `--dry-run` or `--apply`. The earlier `reconcile --resolve-human-decision` interface and pinned project-gate implementation remain separate and unchanged.
+- Deterministic authority: the decision file binds the application adapter, repository and path identities, exact branch and HEAD, current projection state and selection, exact recorded feature questions, approved resolutions, dependency changes, selected-feature integrated dependencies, desired sole ready feature, and commit subject. Dry-run refuses a stale ledger head instead of healing it.
+- Apply boundary: one planning writer lease and controller reservation protect the normal workflow kernel transaction. Only the nine enumerated planning/documentation paths may change; all are rendered before validation, pre-commit partial failure restores their original bytes and prior selection, one direct-child planning commit is created, and ledger, projection, compatibility cycle cache, durable state, and report preserve the old and new selections plus the historical project-gate fingerprint.
+- Exact Interview Companion dry-run: branch `codex/m0-foundation`, HEAD `49ad74f12a1fd57e1b2fbe3dfe31d173c643b497`, ledger sequence 445, ledger fingerprint `d351c5be`, projection `feature_ready`, previous selection F010, selected/sole ready F097, decision file SHA-256 `0fc318ffc4a0b5194ab9dd345537172f6215da0ae7b047c5a697015f2170209a`, and decision fingerprint `226119c9565cf2c202e55d2f45eeefd81608209e6af2ba5c188e726c3c4a309d`. It reported no writes, zero model/child sessions, no feature preparation, and no execution launch.
+- Focused validation: 12/12 new decision-resolution tests and 23/23 unchanged pinned project-gate regression tests passed. Python compile validation, controller configuration validation, command help, both invalid-mode checks, the exact live dry-run, profile-aware path-only secret scan, and `git diff --check` passed. No application test or complete controller suite ran.
+- Isolation: Interview Companion remained clean on `codex/m0-foundation` at `49ad74f12a1fd57e1b2fbe3dfe31d173c643b497`; Case Manager remained clean on `codex/p0-foundation` at `f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0`. No application apply, ordinary Conveyor resume, F010/F097 preparation or implementation, merge, push, tag, publication, deployment, or release ran.

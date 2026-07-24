@@ -78,6 +78,28 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-005",
+      "title": "Deterministic queue-feature decision resolution",
+      "status": "integration_pending",
+      "priority": 5,
+      "milestone": "M1",
+      "dependencies": ["M1-001"],
+      "spec": "docs/features/M1-005-queue-feature-decision-resolution.md",
+      "acceptance_criteria": [
+        "A dedicated strict-JSON route resolves exact feature-level decisions without changing the pinned project-gate resolver",
+        "Dry-run is non-mutating and apply creates one planning-only commit with transactional ledger, projection, and compatibility-state evidence",
+        "Exact questions, branch, HEAD, repository, projection, dependency, sole-ready, unstarted-feature, lease, reservation, and path invariants fail closed",
+        "The route launches zero model and zero child sessions and stops at feature_ready"
+      ],
+      "requires_human_decision": false,
+      "branch": "codex/m1-5-queue-feature-decision-resolution",
+      "integration_base_commit": "1aec952ee358fbb642cb5100d919e2f2a44d8bf2",
+      "accepted_commit": "SELF",
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }
