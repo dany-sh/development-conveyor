@@ -1,8 +1,26 @@
 # Current Status
 
-Last updated: 2026-07-23
+Last updated: 2026-07-24
 
 ## Summary
+
+The retained feature-result recovery route is generalized on
+`codex/m1-6-general-retained-feature-result-recovery` from starting commit
+`a7f6fc7560edda5d823c9aee454330293556066b`. The protected F003 behavior and
+regressions remain unchanged. Later recoveries authenticate the exact original
+execution, terminal marker, gate, projection, queue decision contract, branch,
+HEAD, tracked/untracked fingerprints, exact path set, and untracked file hashes
+before offering a zero-model dry-run or apply.
+
+The exact F097 dry-run accepts only the narrow `feature_cycle` to
+`feature_execution` alias after every surrounding feature identity matches. It
+binds the retained nine tracked and two untracked paths, tracked fingerprint
+`2e9c0edd`, untracked fingerprint `84ce3c83`, and the two recorded untracked
+SHA-256 values. Future apply will run the two focused Swift test filters,
+`swift build`, and `git diff --check` on the controller host before creating
+one candidate/accepted feature commit. Apply remains intentionally unexecuted;
+no application repository, model session, child session, integration, or queue
+reconciliation was started during this controller repair.
 
 The deterministic queue-feature decision route is implemented on
 `codex/m1-5-queue-feature-decision-resolution` from required starting commit

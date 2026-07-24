@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from .accepted_commit import acceptance_metadata_paths
 from .contracts import TransactionState, WorkflowType, fingerprint
 from .cycle_cache import (
     cycle_cache_semantics_from_projection,
@@ -25,6 +27,7 @@ from .queue import FeatureQueue
 from .redaction import redact_text
 from .registry import Project
 from .repository import RepositoryInspector
+from .snapshots import capture_repository_snapshot
 from .workflow_lease import WorkflowWriterLease
 
 
@@ -107,7 +110,7 @@ def _default_runner(argv: list[str], cwd: Path) -> dict[str, Any]:
 
 
 class FeatureResultRecovery:
-    """Inspect and apply one exact preserved F003 implementation recovery."""
+    """Inspect and apply one exact retained terminal feature implementation."""
 
     def __init__(
         self,
@@ -154,8 +157,34 @@ class FeatureResultRecovery:
         expected_branch: str,
         expected_head: str,
     ) -> dict[str, Any]:
-        if feature_id != "F003":
-            raise RecoveryError("this recovery contract is limited to the protected F003 topology")
+        if feature_id == "F003":
+            return self._inspect_f003(
+                feature_id=feature_id,
+                original_transaction_id=original_transaction_id,
+                original_run_id=original_run_id,
+                original_session_id=original_session_id,
+                expected_branch=expected_branch,
+                expected_head=expected_head,
+            )
+        return self._inspect_general(
+            feature_id=feature_id,
+            original_transaction_id=original_transaction_id,
+            original_run_id=original_run_id,
+            original_session_id=original_session_id,
+            expected_branch=expected_branch,
+            expected_head=expected_head,
+        )
+
+    def _inspect_f003(
+        self,
+        *,
+        feature_id: str,
+        original_transaction_id: str,
+        original_run_id: str,
+        original_session_id: str,
+        expected_branch: str,
+        expected_head: str,
+    ) -> dict[str, Any]:
         integrity = self.ledger.verify()
         events = self.ledger.read()
         transaction_events = [
@@ -281,6 +310,499 @@ class FeatureResultRecovery:
             "model_session_launched": False,
             "lease_type": "feature_writer",
             "next_state_on_success": "integration_pending",
+        }
+        plan["preserved_implementation_fingerprint"] = (
+            self.inspector.content_diff_fingerprint(
+                tuple(plan["preserved_implementation_paths"])
+            )
+        )
+        plan["plan_fingerprint"] = fingerprint(plan)
+        return plan
+
+    @staticmethod
+    def _terminal_value(payload: dict[str, Any], *names: str) -> Any:
+        for name in names:
+            value = payload.get(name)
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _normalized_workflow_alias(
+        *, invoked: Any, envelope: Any, exact_identity: bool
+    ) -> dict[str, Any]:
+        if invoked == envelope == WorkflowType.FEATURE_EXECUTION.value:
+            return {
+                "invoked": invoked,
+                "envelope": envelope,
+                "normalized": WorkflowType.FEATURE_EXECUTION.value,
+                "alias_applied": False,
+            }
+        if (
+            invoked == "feature_cycle"
+            and envelope == WorkflowType.FEATURE_EXECUTION.value
+            and exact_identity
+        ):
+            return {
+                "invoked": invoked,
+                "envelope": envelope,
+                "normalized": WorkflowType.FEATURE_EXECUTION.value,
+                "alias_applied": True,
+                "policy": "feature_cycle -> feature_execution",
+            }
+        raise RecoveryError(
+            "terminal session-result envelope workflow_type conflicts with invoked workflow"
+        )
+
+    def _validation_commands(
+        self, *, tracked_paths: tuple[str, ...], untracked_paths: tuple[str, ...]
+    ) -> list[list[str]]:
+        changed = tuple(sorted({*tracked_paths, *untracked_paths}))
+        changed_tests = [
+            Path(path).stem
+            for path in changed
+            if path.startswith("Tests/") and path.endswith("Tests.swift")
+        ]
+        matching_tests: list[str] = []
+        tests_root = self.project.repository / "Tests"
+        for path in tracked_paths:
+            if not path.startswith("Sources/") or not path.endswith(".swift"):
+                continue
+            expected = f"{Path(path).stem}Tests.swift"
+            if any(candidate.is_file() for candidate in tests_root.rglob(expected)):
+                matching_tests.append(Path(expected).stem)
+        filters = list(dict.fromkeys([*changed_tests, *sorted(matching_tests)]))
+        if not filters:
+            raise RecoveryError(
+                "retained feature result has no evidence-derived focused host test"
+            )
+        return [
+            *[["swift", "test", "--filter", name] for name in filters],
+            ["swift", "build"],
+            ["git", "diff", "--check"],
+        ]
+
+    def _inspect_general(
+        self,
+        *,
+        feature_id: str,
+        original_transaction_id: str,
+        original_run_id: str,
+        original_session_id: str,
+        expected_branch: str,
+        expected_head: str,
+        allowed_reservation_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        integrity = self.ledger.verify()
+        events = self.ledger.read()
+        transaction_events = [
+            event
+            for event in events
+            if event["transaction_id"] == original_transaction_id
+        ]
+        event_types = [event["event_type"] for event in transaction_events]
+        expected_event_types = [
+            "TransactionStarted",
+            "LeaseAcquired",
+            "SnapshotCaptured",
+            "SessionLaunched",
+            "HumanGateRaised",
+            "LeaseReleased",
+            "ProjectionUpdated",
+        ]
+        start = next(
+            (
+                event
+                for event in transaction_events
+                if event["event_type"] == "TransactionStarted"
+            ),
+            None,
+        )
+        launch = next(
+            (
+                event
+                for event in transaction_events
+                if event["event_type"] == "SessionLaunched"
+            ),
+            None,
+        )
+        captured = next(
+            (
+                event
+                for event in transaction_events
+                if event["event_type"] == "SnapshotCaptured"
+            ),
+            None,
+        )
+        terminal = next(
+            (
+                event
+                for event in transaction_events
+                if event["event_type"] == "HumanGateRaised"
+            ),
+            None,
+        )
+        report_path, report, terminal_payload = self._report(original_run_id)
+        identity = self.inspector.identity()
+        writer = inspect_repository_writer_lock(
+            self.inspector.writer_lock_path(
+                self.configuration["lock_policy"]["writer_lock_relative_path"]
+            ),
+            self.project.repository,
+        )
+        reservation_path = (
+            self.controller_root
+            / self.configuration["lock_policy"][
+                "controller_launch_lock_directory"
+            ]
+            / f"{identity['path_fingerprint']}.json"
+        )
+        reservation = DurableLock(reservation_path).status(
+            run_id=allowed_reservation_run_id
+        )
+        queue = FeatureQueue.from_location(
+            self.project.repository, self.project.queue_location
+        )
+        feature = queue.feature(feature_id)
+        milestone = (
+            queue.milestone(str(feature.get("milestone")))
+            if isinstance(feature, dict)
+            else None
+        )
+        current_snapshot = capture_repository_snapshot(self.project)
+        tracked_paths = tuple(self.inspector.tracked_changed_paths())
+        untracked_hashes = self.inspector.untracked_file_hashes()
+        untracked_paths = tuple(untracked_hashes)
+        changed_paths = tuple(sorted({*tracked_paths, *untracked_paths}))
+        terminal_snapshot = (terminal or {}).get("payload", {}).get(
+            "terminal_snapshot"
+        )
+        terminal_snapshot = (
+            terminal_snapshot if isinstance(terminal_snapshot, dict) else {}
+        )
+        start_payload = (start or {}).get("payload", {})
+        starting_snapshot = (captured or {}).get("payload", {}).get("snapshot")
+        starting_snapshot = (
+            starting_snapshot if isinstance(starting_snapshot, dict) else {}
+        )
+        start_policy = start_payload.get("allowed_mutation_policy")
+        start_policy = start_policy if isinstance(start_policy, dict) else {}
+        allowed_paths = set(start_policy.get("allowed_paths") or ())
+        allowed_prefixes = tuple(start_policy.get("allowed_prefixes") or ())
+        unauthorized = [
+            path
+            for path in changed_paths
+            if path not in allowed_paths
+            and not any(
+                path == prefix or path.startswith(prefix + "/")
+                for prefix in allowed_prefixes
+            )
+        ]
+        report_paths = tuple(
+            sorted(self._terminal_value(terminal_payload, "changed_paths") or ())
+        )
+        report_repository = self._terminal_value(
+            terminal_payload, "repository_identity", "repository_id"
+        )
+        report_run = self._terminal_value(
+            terminal_payload, "run_id", "agent_run_id"
+        )
+        report_feature = self._terminal_value(
+            terminal_payload, "feature_id", "selected_feature"
+        )
+        report_session = self._terminal_value(terminal_payload, "session_id")
+        report_transaction = self._terminal_value(
+            terminal_payload, "transaction_id"
+        )
+        report_starting_branch = self._terminal_value(
+            terminal_payload, "starting_branch"
+        )
+        report_starting_head = self._terminal_value(
+            terminal_payload, "starting_commit"
+        )
+        report_current_head = self._terminal_value(
+            terminal_payload, "current_commit"
+        )
+        exact_terminal_identity = all(
+            (
+                report_repository == identity["repository_id"],
+                report_run == original_run_id,
+                report_feature == feature_id,
+                report_session == original_session_id,
+                report_transaction == original_transaction_id,
+                report_starting_branch == expected_branch,
+                report_starting_head == expected_head,
+                report_current_head == expected_head,
+                report_paths == changed_paths,
+            )
+        )
+        workflow_alias = self._normalized_workflow_alias(
+            invoked=report.get("action"),
+            envelope=terminal_payload.get("workflow_type"),
+            exact_identity=exact_terminal_identity,
+        )
+        projection = self.projection.current()
+        gate = projection.get("human_gate")
+        gate = gate if isinstance(gate, dict) else {}
+        terminal_gate = (terminal or {}).get("payload", {}).get("gate")
+        terminal_gate = terminal_gate if isinstance(terminal_gate, dict) else {}
+        decision = feature.get("decision_resolution") if isinstance(feature, dict) else None
+        decision_contract = (
+            isinstance(decision, dict)
+            and isinstance(decision.get("recorded_question"), str)
+            and bool(decision["recorded_question"].strip())
+            and isinstance(decision.get("approved_resolution"), str)
+            and bool(decision["approved_resolution"].strip())
+            and decision.get("selected_feature") is True
+            and isinstance(decision.get("decision_file_sha256"), str)
+            and bool(re.fullmatch(r"[0-9a-f]{64}", decision["decision_file_sha256"]))
+        )
+        accepted_events = [
+            event
+            for event in events
+            if event["event_type"] in {"RecoveryApplied", "TransactionSuperseded"}
+            and (
+                event["payload"].get("recovered_transaction_id")
+                == original_transaction_id
+                or (
+                    event["event_type"] == "TransactionSuperseded"
+                    and event["transaction_id"] == original_transaction_id
+                    and bool(event["payload"].get("superseded_by"))
+                )
+            )
+        ]
+        subject = start_policy.get("commit_subject")
+        subject_commits = (
+            self.inspector.git(
+                [
+                    "log",
+                    "--all",
+                    "--format=%H",
+                    "--fixed-strings",
+                    "--grep",
+                    str(subject),
+                ],
+                check=False,
+            ).stdout.splitlines()
+            if isinstance(subject, str) and subject
+            else []
+        )
+        structured_errors = report.get("structured_output_errors")
+        expected_alias_error = (
+            "terminal session-result envelope workflow_type conflicts with invoked workflow"
+        )
+        checks = {
+            "ledger_integrity": integrity.valid,
+            "original_transaction_exact_event_topology": event_types
+            == expected_event_types,
+            "original_transaction_terminal": terminal is not None,
+            "original_transaction_workflow": all(
+                event.get("workflow_type")
+                == WorkflowType.FEATURE_EXECUTION.value
+                for event in transaction_events
+            ),
+            "original_transaction_feature": start_payload.get("feature_id")
+            == feature_id,
+            "original_transaction_run": start_payload.get("run_id")
+            == original_run_id,
+            "original_session": (launch or {}).get("payload", {}).get(
+                "session_id"
+            )
+            == original_session_id,
+            "report_file_identity": report_path
+            == self.controller_root
+            / "reports"
+            / original_run_id
+            / "feature_cycle.json",
+            "report_project": report.get("project_id") == self.project.project_id,
+            "report_run": report.get("run_id") == original_run_id,
+            "report_session": report.get("session_id") == original_session_id,
+            "terminal_marker_present": report.get("terminal_marker_found") is True,
+            "report_structured_failure": report.get("result_classification")
+            == "structured_output_invalid"
+            and isinstance(structured_errors, list)
+            and structured_errors == [expected_alias_error],
+            "terminal_identity_exact": exact_terminal_identity,
+            "terminal_classification_claimed": terminal_payload.get(
+                "classification"
+            )
+            == "FEATURE_ACCEPTED",
+            "terminal_next_state_claimed": terminal_payload.get("next_state")
+            == "feature_accepted",
+            "workflow_alias_normalized": workflow_alias["normalized"]
+            == WorkflowType.FEATURE_EXECUTION.value,
+            "repository_identity": (start or {}).get("repository_identity")
+            == identity["repository_id"],
+            "repository_path_identity": (start or {}).get(
+                "repository_path_fingerprint"
+            )
+            == identity["path_fingerprint"],
+            "branch": self.inspector.current_branch == expected_branch,
+            "head": self.inspector.head == expected_head,
+            "branch_ref_head": self.inspector.rev_parse(
+                expected_branch, check=False
+            )
+            == expected_head,
+            "starting_snapshot_clean": start_payload.get(
+                "starting_tracked_diff_fingerprint"
+            )
+            == hashlib.sha256(b"").hexdigest()
+            and start_payload.get("starting_untracked_fingerprint")
+            == fingerprint({})
+            and starting_snapshot.get("branch") == expected_branch
+            and starting_snapshot.get("head") == expected_head
+            and starting_snapshot.get("tracked_changed_paths") == []
+            and starting_snapshot.get("untracked_paths") == []
+            and starting_snapshot.get("tracked_diff_fingerprint")
+            == hashlib.sha256(b"").hexdigest()
+            and starting_snapshot.get("untracked_fingerprint")
+            == fingerprint({}),
+            "terminal_branch": terminal_snapshot.get("branch")
+            == expected_branch,
+            "terminal_head": terminal_snapshot.get("head") == expected_head,
+            "tracked_paths_exact": tuple(
+                terminal_snapshot.get("tracked_changed_paths") or ()
+            )
+            == tracked_paths,
+            "untracked_paths_exact": tuple(
+                terminal_snapshot.get("untracked_paths") or ()
+            )
+            == untracked_paths,
+            "tracked_fingerprint_exact": terminal_snapshot.get(
+                "tracked_diff_fingerprint"
+            )
+            == current_snapshot.tracked_diff_fingerprint,
+            "untracked_fingerprint_exact": terminal_snapshot.get(
+                "untracked_fingerprint"
+            )
+            == current_snapshot.untracked_fingerprint,
+            "queue_fingerprint_exact": terminal_snapshot.get(
+                "queue_fingerprint"
+            )
+            == current_snapshot.queue_fingerprint
+            == start_payload.get("starting_queue_fingerprint"),
+            "no_unauthorized_paths": not unauthorized,
+            "index_unstaged": not self.inspector.staged_changed_paths(),
+            "no_git_operation": not any(
+                self.inspector.git_operation_state().values()
+            ),
+            "writer_lease_absent": not writer.exists,
+            "controller_reservation_absent": not reservation.exists
+            or (
+                allowed_reservation_run_id is not None
+                and reservation.owned_by_run
+            ),
+            "projection_ledger_bound": projection.get("ledger_sequence")
+            == integrity.sequence
+            and projection.get("ledger_fingerprint")
+            == integrity.fingerprint,
+            "projection_state": projection.get("current_state")
+            == "human_decision_required",
+            "projection_feature": projection.get("current_feature")
+            == feature_id
+            and projection.get("selected_next_feature") is None,
+            "projection_transaction_inactive": projection.get(
+                "active_transaction"
+            )
+            is None,
+            "gate_identity": gate.get("gate_id")
+            == terminal_gate.get("gate_id")
+            and gate.get("transaction_id") == original_transaction_id
+            and gate.get("run_id") == original_run_id
+            and gate.get("feature") == feature_id
+            and gate.get("classification") == "structured_output_invalid"
+            and gate.get("workflow_type")
+            == WorkflowType.FEATURE_EXECUTION.value
+            and gate.get("resolved") in {None, False},
+            "gate_contract_exact": gate == terminal_gate
+            and (terminal or {}).get("payload", {}).get("gate_fingerprint")
+            == fingerprint(terminal_gate),
+            "queue_feature_ready": isinstance(feature, dict)
+            and feature.get("status") == "ready",
+            "queue_decision_approved": isinstance(feature, dict)
+            and feature.get("requires_human_decision") is False
+            and (decision is None or decision_contract),
+            "queue_branch_unclaimed": isinstance(feature, dict)
+            and feature.get("branch") in {None, expected_branch},
+            "queue_has_no_accepted_commit": isinstance(feature, dict)
+            and not feature.get("accepted_commit"),
+            "milestone_identity": isinstance(milestone, dict)
+            and isinstance(milestone.get("integration_branch"), str)
+            and self.inspector.rev_parse(
+                str(milestone["integration_branch"]), check=False
+            )
+            == expected_head,
+            "original_transaction_not_recovered": not accepted_events,
+            "application_commit_absent": not subject_commits,
+            "commit_subject_exact": isinstance(subject, str) and bool(subject),
+        }
+        if not all(checks.values()):
+            failed = ", ".join(
+                key for key, passed in checks.items() if not passed
+            )
+            raise RecoveryError(
+                f"{feature_id} recovery preflight failed: {failed}"
+            )
+        metadata_paths = acceptance_metadata_paths(self.project, feature)
+        final_paths = tuple(sorted({*changed_paths, *metadata_paths}))
+        validation_commands = self._validation_commands(
+            tracked_paths=tracked_paths, untracked_paths=untracked_paths
+        )
+        plan = {
+            "schema_version": 2,
+            "recovery_contract": "general_retained_feature_result",
+            "project_id": self.project.project_id,
+            "repository_identity": identity["repository_id"],
+            "repository_path_fingerprint": identity["path_fingerprint"],
+            "feature_id": feature_id,
+            "feature_title": feature.get("title"),
+            "milestone_id": feature.get("milestone"),
+            "milestone_branch": milestone.get("integration_branch"),
+            "branch": expected_branch,
+            "head": expected_head,
+            "original_transaction_id": original_transaction_id,
+            "original_run_id": original_run_id,
+            "original_session_id": original_session_id,
+            "original_event_fingerprints": [
+                event["fingerprint"] for event in transaction_events
+            ],
+            "original_gate_id": gate["gate_id"],
+            "original_gate_fingerprint": fingerprint(gate),
+            "report_path": str(report_path),
+            "report_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
+            "report_error": expected_alias_error,
+            "terminal_marker_present": True,
+            "terminal_classification_claimed": terminal_payload[
+                "classification"
+            ],
+            "terminal_next_state_claimed": terminal_payload["next_state"],
+            "tracked_paths": list(tracked_paths),
+            "untracked_paths": list(untracked_paths),
+            "changed_paths": list(changed_paths),
+            "final_changed_paths": list(final_paths),
+            "tracked_diff_fingerprint": current_snapshot.tracked_diff_fingerprint,
+            "untracked_fingerprint": current_snapshot.untracked_fingerprint,
+            "untracked_file_hashes": untracked_hashes,
+            "retained_content_fingerprint": self.inspector.content_diff_fingerprint(
+                changed_paths
+            ),
+            "preserved_implementation_paths": [
+                path for path in changed_paths if path not in metadata_paths
+            ],
+            "acceptance_metadata_paths": list(metadata_paths),
+            "commit_subject": subject,
+            "workflow_alias": workflow_alias,
+            "host_validation_commands": validation_commands,
+            "candidate_commits_that_would_be_created": 1,
+            "candidate_commit_created_only_after_all_validations": True,
+            "checks": checks,
+            "model_sessions_that_would_launch": 0,
+            "child_sessions_that_would_launch": 0,
+            "application_repository_written": False,
+            "lease_type": "feature_writer",
+            "next_state_on_success": "integration_pending",
+            "milestone_integration_performed": False,
+            "queue_reconciliation_performed": False,
         }
         plan["preserved_implementation_fingerprint"] = (
             self.inspector.content_diff_fingerprint(
@@ -478,9 +1000,290 @@ class FeatureResultRecovery:
         for relative, payload in originals.items():
             atomic_write_bytes(self.project.repository / relative, payload)
 
+    @staticmethod
+    def _replace_catalog_feature_status(
+        text: str, *, feature_id: str
+    ) -> str:
+        lines = text.splitlines()
+        matches = [
+            index
+            for index, line in enumerate(lines)
+            if line.lstrip().startswith(f"| {feature_id} |")
+        ]
+        if len(matches) != 1:
+            raise RecoveryError(
+                f"feature catalog must contain exactly one {feature_id} row"
+            )
+        fields = [
+            field.strip()
+            for field in lines[matches[0]].strip().strip("|").split("|")
+        ]
+        if len(fields) < 3 or fields[0] != feature_id:
+            raise RecoveryError(
+                f"feature catalog row for {feature_id} is malformed"
+            )
+        fields[2] = "Accepted"
+        lines[matches[0]] = "| " + " | ".join(fields) + " |"
+        return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+    @staticmethod
+    def _replace_factory_position(
+        text: str, *, feature_id: str, title: str
+    ) -> str:
+        lines = text.splitlines(keepends=True)
+        headings = [
+            index
+            for index, line in enumerate(lines)
+            if line.rstrip("\r\n") == "## Factory position"
+        ]
+        if len(headings) != 1:
+            raise RecoveryError(
+                "docs/CURRENT_STATUS.md must contain one Factory position section"
+            )
+        start = headings[0] + 1
+        end = next(
+            (
+                index
+                for index in range(start, len(lines))
+                if re.match(r"^##(?:\s|$)", lines[index].rstrip("\r\n"))
+            ),
+            len(lines),
+        )
+        pattern = re.compile(
+            r"^- (?:Selected next feature|Selected feature|Active feature): "
+            r"[A-Za-z0-9][A-Za-z0-9.-]*(?:\s+—\s+.+)?$"
+        )
+        matches = [
+            index
+            for index in range(start, end)
+            if pattern.fullmatch(lines[index].rstrip("\r\n"))
+        ]
+        if len(matches) != 1:
+            raise RecoveryError(
+                "docs/CURRENT_STATUS.md Factory position must contain one feature-state line"
+            )
+        index = matches[0]
+        newline = (
+            "\r\n"
+            if lines[index].endswith("\r\n")
+            else ("\n" if lines[index].endswith("\n") else "")
+        )
+        lines[index] = (
+            f"- Active feature: {feature_id} — {title} "
+            "(accepted; milestone integration pending)"
+            + newline
+        )
+        return "".join(lines)
+
+    def _apply_general_acceptance_metadata(
+        self,
+        *,
+        plan: dict[str, Any],
+        run_id: str,
+        commands: list[dict[str, Any]],
+    ) -> dict[str, bytes]:
+        metadata_paths = tuple(plan["acceptance_metadata_paths"])
+        originals = {
+            relative: (self.project.repository / relative).read_bytes()
+            for relative in metadata_paths
+        }
+        queue_path = self.project.repository / self.project.queue_location
+        queue_document = json.loads(queue_path.read_text(encoding="utf-8"))
+        matches = [
+            item
+            for item in queue_document.get("features", [])
+            if isinstance(item, dict)
+            and item.get("id") == plan["feature_id"]
+        ]
+        if len(matches) != 1:
+            raise RecoveryError("recovery acceptance queue feature is not unique")
+        feature = matches[0]
+        if feature.get("status") != "ready" or feature.get("accepted_commit"):
+            raise RecoveryError(
+                "recovery acceptance queue changed before finalization"
+            )
+        feature.update(
+            {
+                "implementation_status": "Completed",
+                "status": "integration_pending",
+                "integration_status": "pending",
+                "branch": plan["branch"],
+                "integration_base_commit": plan["head"],
+                "accepted_commit": "SELF",
+                "acceptance": {
+                    "tests_passed": True,
+                    "review_passed": True,
+                    "documentation_current": True,
+                },
+            }
+        )
+        rendered: dict[str, bytes] = {
+            self.project.queue_location: (
+                json.dumps(queue_document, indent=2, sort_keys=True) + "\n"
+            ).encode("utf-8")
+        }
+        specification = next(
+            path
+            for path in metadata_paths
+            if path.startswith("docs/features/")
+        )
+        spec_text = (
+            self.project.repository / specification
+        ).read_text(encoding="utf-8")
+        spec_text, count = re.subn(
+            r"(?m)^- Factory status:.*$",
+            "- Factory status: Integration pending — controller-host validation "
+            "passed and the accepted commit awaits milestone integration",
+            spec_text,
+            count=1,
+        )
+        if count != 1:
+            raise RecoveryError(
+                f"{plan['feature_id']} specification lacks one Factory status line"
+            )
+        rendered[specification] = spec_text.replace(
+            "- [ ] ", "- [x] "
+        ).encode("utf-8")
+        rendered["docs/FEATURE_CATALOG.md"] = (
+            self._replace_catalog_feature_status(
+                (
+                    self.project.repository / "docs/FEATURE_CATALOG.md"
+                ).read_text(encoding="utf-8"),
+                feature_id=str(plan["feature_id"]),
+            ).encode("utf-8")
+        )
+        rendered["docs/CURRENT_STATUS.md"] = self._replace_factory_position(
+            (
+                self.project.repository / "docs/CURRENT_STATUS.md"
+            ).read_text(encoding="utf-8"),
+            feature_id=str(plan["feature_id"]),
+            title=str(plan["feature_title"]),
+        ).encode("utf-8")
+        run_log = (
+            self.project.repository / "docs/RUN_LOG.md"
+        ).read_text(encoding="utf-8").rstrip()
+        entry = [
+            "",
+            f"## {plan['feature_id']} deterministic retained-result recovery",
+            "",
+            f"- Recovery run: `{run_id}`.",
+            f"- Original failed transaction: `{plan['original_transaction_id']}`.",
+            "- Execution: controller-host deterministic recovery; zero model and child sessions.",
+            "- Host validation passed before the candidate/accepted feature commit.",
+            "- Milestone integration and queue reconciliation were not performed.",
+            "",
+            "### Host validation evidence",
+            "",
+            *[
+                f"- `{' '.join(item.get('argv') or [])}`: exit {item.get('exit_code')}"
+                for item in commands
+            ],
+            "",
+        ]
+        rendered["docs/RUN_LOG.md"] = (
+            run_log + "\n" + "\n".join(entry)
+        ).encode("utf-8")
+        if tuple(sorted(rendered)) != metadata_paths:
+            raise RecoveryError(
+                "recovery acceptance metadata differs from the authorized set"
+            )
+        try:
+            for relative in metadata_paths:
+                atomic_write_bytes(
+                    self.project.repository / relative, rendered[relative]
+                )
+        except Exception:
+            self._restore_metadata(originals)
+            raise
+        return originals
+
+    def _materialize_controller_compatibility_cache(
+        self,
+        *,
+        feature_id: str,
+        run_id: str,
+        transaction_id: str,
+        accepted_commit: str,
+        projection: dict[str, Any],
+    ) -> None:
+        path = (
+            self.controller_root
+            / "state"
+            / "projects"
+            / f"{self.project.project_id}.json"
+        )
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RecoveryError(
+                "controller compatibility cache is unavailable or invalid"
+            ) from exc
+        if not isinstance(value, dict):
+            raise RecoveryError("controller compatibility cache is not an object")
+        value.update(
+            {
+                "current_state": "integration_pending",
+                "current_feature": feature_id,
+                "selected_feature": None,
+                "active_transaction": None,
+                "accepted_feature_commit": accepted_commit,
+                "integration_status": "pending",
+                "current_run_id": run_id,
+                "kernel_transaction_id": transaction_id,
+                "kernel_ledger_sequence": projection["ledger_sequence"],
+                "kernel_ledger_fingerprint": projection["ledger_fingerprint"],
+                "kernel_projection_fingerprint": projection[
+                    "projection_fingerprint"
+                ],
+                "updated_at": utc_now(),
+            }
+        )
+        atomic_write_json(path, value)
+
+    def _materialize_general_compatibility_caches(
+        self,
+        *,
+        feature_id: str,
+        run_id: str,
+        transaction_id: str,
+        accepted_commit: str,
+        projection: dict[str, Any],
+    ) -> None:
+        cycle_path = self.inspector.cycle_state_path()
+        controller_path = (
+            self.controller_root
+            / "state"
+            / "projects"
+            / f"{self.project.project_id}.json"
+        )
+        originals = {
+            cycle_path: cycle_path.read_bytes(),
+            controller_path: controller_path.read_bytes(),
+        }
+        try:
+            self._materialize_terminal_cycle_cache(
+                feature_id=feature_id,
+                run_id=run_id,
+                transaction_id=transaction_id,
+                accepted_commit=accepted_commit,
+                projection=projection,
+            )
+            self._materialize_controller_compatibility_cache(
+                feature_id=feature_id,
+                run_id=run_id,
+                transaction_id=transaction_id,
+                accepted_commit=accepted_commit,
+                projection=projection,
+            )
+        except Exception:
+            for path, content in originals.items():
+                atomic_write_bytes(path, content)
+            raise
+
     def _materialize_terminal_cycle_cache(
         self,
         *,
+        feature_id: str,
         run_id: str,
         transaction_id: str,
         accepted_commit: str,
@@ -497,8 +1300,8 @@ class FeatureResultRecovery:
             "schema_version": 1,
             "project_id": self.project.project_id,
             "active_milestone": self.project.active_milestone,
-            "current_feature": "F003",
-            "selected_feature": "F003",
+            "current_feature": feature_id,
+            "selected_feature": feature_id,
             "current_phase": "integration_pending",
             "accepted_feature_commit": accepted_commit,
             "integration_status": "pending",
@@ -540,10 +1343,15 @@ class FeatureResultRecovery:
         state.update(cycle_cache_semantics_from_projection(projection))
         write_terminal_cycle_cache(
             path, state, ledger=self.ledger, projection_engine=self.projection,
-            transaction_id=transaction_id, expected_feature="F003",
+            transaction_id=transaction_id, expected_feature=feature_id,
         )
 
     def apply(self, plan: dict[str, Any]) -> dict[str, Any]:
+        if plan.get("feature_id") == "F003":
+            return self._apply_f003(plan)
+        return self._apply_general(plan)
+
+    def _apply_f003(self, plan: dict[str, Any]) -> dict[str, Any]:
         if plan.get("plan_fingerprint") != fingerprint({
             key: value for key, value in plan.items() if key != "plan_fingerprint"
         }):
@@ -742,6 +1550,7 @@ class FeatureResultRecovery:
                 },
             )
             self._materialize_terminal_cycle_cache(
+                feature_id="F003",
                 run_id=run_id,
                 transaction_id=transaction.transaction_id,
                 accepted_commit=accepted_commit,
@@ -811,6 +1620,388 @@ class FeatureResultRecovery:
                             state=TransactionState.TERMINAL_FAILURE,
                             classification="FEATURE_VALIDATION_FAILED",
                             next_state="review",
+                        )
+                    except Exception:
+                        pass
+            raise
+        finally:
+            reservation.release(run_id)
+
+    def _apply_general(self, plan: dict[str, Any]) -> dict[str, Any]:
+        expected_fingerprint = fingerprint(
+            {
+                key: value
+                for key, value in plan.items()
+                if key != "plan_fingerprint"
+            }
+        )
+        if plan.get("plan_fingerprint") != expected_fingerprint:
+            raise RecoveryError("feature-result recovery plan fingerprint is invalid")
+        feature_id = str(plan["feature_id"])
+        run_id = f"feature-recovery-{uuid.uuid4()}"
+        lock_directory = (
+            self.controller_root
+            / self.configuration["lock_policy"][
+                "controller_launch_lock_directory"
+            ]
+        )
+        reservation = DurableLock(
+            lock_directory / f"{plan['repository_path_fingerprint']}.json"
+        )
+        reservation.acquire(
+            make_lock_record(
+                project_id=self.project.project_id,
+                repository_identity=plan["repository_identity"],
+                run_id=run_id,
+                current_feature=feature_id,
+                current_phase="feature_result_recovery",
+            )
+        )
+        kernel: WorkflowKernel | None = None
+        metadata_originals: dict[str, bytes] | None = None
+        commands: list[dict[str, Any]] = []
+        try:
+            self.inspector.ensure_runtime_ignored()
+            revalidated = self._inspect_general(
+                feature_id=feature_id,
+                original_transaction_id=str(plan["original_transaction_id"]),
+                original_run_id=str(plan["original_run_id"]),
+                original_session_id=str(plan["original_session_id"]),
+                expected_branch=str(plan["branch"]),
+                expected_head=str(plan["head"]),
+                allowed_reservation_run_id=run_id,
+            )
+            if revalidated["plan_fingerprint"] != plan["plan_fingerprint"]:
+                raise RecoveryError(
+                    "feature-result recovery evidence changed under reservation"
+                )
+            adapter = FeatureExecutionAdapter(
+                allowed_paths=tuple(plan["final_changed_paths"]),
+                commit_subject=str(plan["commit_subject"]),
+                next_state="integration_pending",
+                allow_untracked=True,
+                require_clean_start=False,
+                denied_paths=(
+                    ".factory/approved-content.yaml",
+                    ".factory/conveyor-state.json",
+                    ".factory/locks/writer.json",
+                    ".factory/project.yaml",
+                    "docs/AUTONOMY_CONTRACT.md",
+                ),
+                denied_prefixes=(".factory", "factory-integration"),
+            )
+            kernel = WorkflowKernel(
+                project=self.project,
+                ledger=self.ledger,
+                projection=self.projection,
+                lease=WorkflowWriterLease(
+                    self.inspector.writer_lock_path(
+                        self.configuration["lock_policy"][
+                            "writer_lock_relative_path"
+                        ]
+                    )
+                ),
+            )
+            transaction = kernel.begin(
+                workflow_type=WorkflowType.FEATURE_EXECUTION,
+                milestone=str(plan["milestone_id"]),
+                feature_id=feature_id,
+                run_id=run_id,
+                policy=adapter.policy,
+                start_evidence={
+                    "recovery_mode": "general_retained_feature_result",
+                    "recovered_transaction_id": plan[
+                        "original_transaction_id"
+                    ],
+                    "original_session_id": plan["original_session_id"],
+                    "original_gate_id": plan["original_gate_id"],
+                    "workflow_alias": plan["workflow_alias"],
+                    "model_sessions_launched": 0,
+                    "child_sessions_launched": 0,
+                    "plan_fingerprint": plan["plan_fingerprint"],
+                },
+                expected_starting_branch=str(plan["branch"]),
+                expected_starting_head=str(plan["head"]),
+            )
+            kernel.acquire_lease()
+            kernel.capture_snapshot()
+            if transaction.feature_id != feature_id:
+                raise TransactionError(
+                    "recovery kernel lost the retained feature identity"
+                )
+            for argv in plan["host_validation_commands"]:
+                record = self._run(list(argv), commands)
+                if record["exit_code"] != 0:
+                    self.ledger.append(
+                        event_type="ValidationFailed",
+                        transaction_id=transaction.transaction_id,
+                        workflow_type=transaction.workflow_type,
+                        payload={
+                            "classification": "host_validation_failed",
+                            "failed_command": argv,
+                            "commands": commands,
+                            "retained_diff_preserved": True,
+                            "model_sessions_launched": 0,
+                            "child_sessions_launched": 0,
+                        },
+                    )
+                    projection = kernel.block(
+                        state=TransactionState.TERMINAL_FAILURE,
+                        classification="FEATURE_VALIDATION_FAILED",
+                        next_state="human_decision_required",
+                    )
+                    projected_gate = projection.get("human_gate")
+                    projected_gate = (
+                        projected_gate
+                        if isinstance(projected_gate, dict)
+                        else {}
+                    )
+                    return {
+                        "schema_version": 2,
+                        "project_id": self.project.project_id,
+                        "feature_id": feature_id,
+                        "outcome": "validation_failed",
+                        "run_id": run_id,
+                        "recovery_transaction_id": transaction.transaction_id,
+                        "failed_command": argv,
+                        "commands": commands,
+                        "application_commit_created": False,
+                        "implementation_preserved": True,
+                        "original_gate_preserved": (
+                            projected_gate.get("gate_id")
+                            == plan["original_gate_id"]
+                        ),
+                        "model_sessions_launched": 0,
+                        "child_sessions_launched": 0,
+                        "projection": projection,
+                    }
+            if (
+                self.inspector.content_diff_fingerprint(
+                    tuple(plan["preserved_implementation_paths"])
+                )
+                != plan["preserved_implementation_fingerprint"]
+            ):
+                raise RecoveryError(
+                    "retained implementation changed during host validation"
+                )
+            metadata_originals = self._apply_general_acceptance_metadata(
+                plan=plan, run_id=run_id, commands=commands
+            )
+            if (
+                self.inspector.content_diff_fingerprint(
+                    tuple(plan["preserved_implementation_paths"])
+                )
+                != plan["preserved_implementation_fingerprint"]
+            ):
+                self._restore_metadata(metadata_originals)
+                metadata_originals = None
+                raise RecoveryError(
+                    "retained implementation changed during acceptance metadata"
+                )
+            if _changed_paths(self.inspector) != tuple(
+                plan["final_changed_paths"]
+            ):
+                self._restore_metadata(metadata_originals)
+                metadata_originals = None
+                raise RecoveryError(
+                    "acceptance metadata changed the authorized path set"
+                )
+            accepted_commit = kernel.finalize_deterministic_feature_recovery(
+                original_transaction_id=str(plan["original_transaction_id"]),
+                changed_paths=tuple(plan["final_changed_paths"]),
+                original_content_fingerprint=str(
+                    plan["retained_content_fingerprint"]
+                ),
+                plan_fingerprint=str(plan["plan_fingerprint"]),
+                validation_evidence={
+                    "all_required_passed": True,
+                    "commands": [
+                        {
+                            key: item.get(key)
+                            for key in (
+                                "argv",
+                                "exit_code",
+                                "duration_seconds",
+                                "output_sha256",
+                            )
+                        }
+                        for item in commands
+                    ],
+                    "checks": [
+                        {
+                            "name": "workflow_alias_policy",
+                            "passed": True,
+                            "evidence": plan["workflow_alias"],
+                        },
+                        {
+                            "name": "retained_fingerprints",
+                            "passed": True,
+                            "tracked": plan["tracked_diff_fingerprint"],
+                            "untracked": plan["untracked_fingerprint"],
+                        },
+                    ],
+                    "warnings": [],
+                },
+            )
+            metadata_originals = None
+            self.ledger.append(
+                event_type="CheckpointRecorded",
+                transaction_id=transaction.transaction_id,
+                workflow_type=transaction.workflow_type,
+                payload={
+                    "checkpoint": "structured_output_invalid_transaction_superseded",
+                    "superseded_transaction_id": plan[
+                        "original_transaction_id"
+                    ],
+                    "superseding_transaction_id": transaction.transaction_id,
+                    "superseded_gate_id": plan["original_gate_id"],
+                },
+            )
+            self.ledger.append(
+                event_type="HumanGateResolved",
+                transaction_id=transaction.transaction_id,
+                workflow_type=transaction.workflow_type,
+                payload={
+                    "gate_id": plan["original_gate_id"],
+                    "gate_fingerprint": plan["original_gate_fingerprint"],
+                    "raised_transaction_id": plan[
+                        "original_transaction_id"
+                    ],
+                    "resolution": "retained_feature_result_validated_and_accepted",
+                },
+            )
+            completion = kernel.complete(
+                classification="FEATURE_ACCEPTED",
+                evidence={
+                    "accepted_feature_commit": accepted_commit,
+                    "candidate_implementation_commit": accepted_commit,
+                    "integration_status": "pending",
+                    "recovered_transaction_id": plan[
+                        "original_transaction_id"
+                    ],
+                    "resolved_gate_id": plan["original_gate_id"],
+                    "host_validation_passed": True,
+                    "model_sessions_launched": 0,
+                    "child_sessions_launched": 0,
+                },
+            )
+            projection = completion["projection"]
+            self._materialize_general_compatibility_caches(
+                feature_id=feature_id,
+                run_id=run_id,
+                transaction_id=transaction.transaction_id,
+                accepted_commit=accepted_commit,
+                projection=projection,
+            )
+            supersession_events = [
+                event
+                for event in self.ledger.read()
+                if event["transaction_id"] == transaction.transaction_id
+                and event["event_type"] == "CheckpointRecorded"
+                and event["payload"].get("checkpoint")
+                == "structured_output_invalid_transaction_superseded"
+            ]
+            final_checks = {
+                "accepted_commit_direct_child": self.inspector.rev_parse(
+                    f"{accepted_commit}^", check=False
+                )
+                == plan["head"],
+                "repository_clean": self.inspector.is_clean,
+                "branch_unchanged": self.inspector.current_branch
+                == plan["branch"],
+                "writer_lease_absent": not self.inspector.writer_lock_path(
+                    self.configuration["lock_policy"][
+                        "writer_lock_relative_path"
+                    ]
+                ).exists(),
+                "original_transaction_superseded": len(supersession_events) == 1
+                and supersession_events[0]["payload"].get(
+                    "superseded_transaction_id"
+                )
+                == plan["original_transaction_id"],
+                "original_gate_resolved": projection.get("human_gate") is None,
+                "projection_integration_pending": projection.get(
+                    "current_state"
+                )
+                == "integration_pending",
+                "accepted_commit_projected": projection.get(
+                    "accepted_feature_commit"
+                )
+                == accepted_commit,
+                "cycle_cache_bound": json.loads(
+                    self.inspector.cycle_state_path().read_text(
+                        encoding="utf-8"
+                    )
+                ).get("kernel_ledger_sequence")
+                == projection["ledger_sequence"],
+                "no_integration_performed": not any(
+                    event["transaction_id"] == transaction.transaction_id
+                    and event["workflow_type"]
+                    == WorkflowType.MILESTONE_INTEGRATION.value
+                    for event in self.ledger.read()
+                ),
+                "no_queue_reconciliation": not any(
+                    event["transaction_id"] == transaction.transaction_id
+                    and event["workflow_type"]
+                    == WorkflowType.QUEUE_RECONCILIATION.value
+                    for event in self.ledger.read()
+                ),
+            }
+            if not all(final_checks.values()):
+                failed = ", ".join(
+                    key for key, passed in final_checks.items() if not passed
+                )
+                raise RecoveryError(
+                    f"{feature_id} recovery postcondition failed: {failed}"
+                )
+            report = {
+                "schema_version": 2,
+                "project_id": self.project.project_id,
+                "feature_id": feature_id,
+                "outcome": "integration_pending",
+                "run_id": run_id,
+                "recovery_transaction_id": transaction.transaction_id,
+                "recovered_transaction_id": plan["original_transaction_id"],
+                "resolved_gate_id": plan["original_gate_id"],
+                "candidate_implementation_commit": accepted_commit,
+                "accepted_feature_commit": accepted_commit,
+                "retained_changed_paths": plan["changed_paths"],
+                "committed_changed_paths": plan["final_changed_paths"],
+                "tracked_diff_fingerprint": plan[
+                    "tracked_diff_fingerprint"
+                ],
+                "untracked_fingerprint": plan["untracked_fingerprint"],
+                "untracked_file_hashes": plan["untracked_file_hashes"],
+                "workflow_alias": plan["workflow_alias"],
+                "commands": commands,
+                "final_checks": final_checks,
+                "model_sessions_launched": 0,
+                "child_sessions_launched": 0,
+                "milestone_integration_performed": False,
+                "queue_reconciliation_performed": False,
+                "projection": projection,
+                "created_at": utc_now(),
+            }
+            report_path = (
+                self.controller_root
+                / "reports"
+                / run_id
+                / "feature-result-recovery.json"
+            )
+            atomic_write_json(report_path, report)
+            report["report_path"] = str(report_path)
+            return report
+        except Exception:
+            if metadata_originals is not None and self.inspector.head == plan["head"]:
+                self._restore_metadata(metadata_originals)
+            if kernel is not None and kernel.transaction is not None:
+                lease = kernel.lease.read()
+                if lease is not None:
+                    try:
+                        kernel.block(
+                            state=TransactionState.TERMINAL_FAILURE,
+                            classification="FEATURE_VALIDATION_FAILED",
+                            next_state="human_decision_required",
                         )
                     except Exception:
                         pass

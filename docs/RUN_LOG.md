@@ -892,3 +892,25 @@ This log records model configuration and deterministic deployment evidence. It n
 - Exact Interview Companion dry-run: branch `codex/m0-foundation`, HEAD `49ad74f12a1fd57e1b2fbe3dfe31d173c643b497`, ledger sequence 445, ledger fingerprint `d351c5be`, projection `feature_ready`, previous selection F010, selected/sole ready F097, decision file SHA-256 `0fc318ffc4a0b5194ab9dd345537172f6215da0ae7b047c5a697015f2170209a`, and decision fingerprint `226119c9565cf2c202e55d2f45eeefd81608209e6af2ba5c188e726c3c4a309d`. It reported no writes, zero model/child sessions, no feature preparation, and no execution launch.
 - Focused validation: 12/12 new decision-resolution tests and 23/23 unchanged pinned project-gate regression tests passed. Python compile validation, controller configuration validation, command help, both invalid-mode checks, the exact live dry-run, profile-aware path-only secret scan, and `git diff --check` passed. No application test or complete controller suite ran.
 - Isolation: Interview Companion remained clean on `codex/m0-foundation` at `49ad74f12a1fd57e1b2fbe3dfe31d173c643b497`; Case Manager remained clean on `codex/p0-foundation` at `f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0`. No application apply, ordinary Conveyor resume, F010/F097 preparation or implementation, merge, push, tag, publication, deployment, or release ran.
+
+### General retained feature-result recovery — 2026-07-24
+
+- Scope and execution: controller-only implementation on `codex/m1-6-general-retained-feature-result-recovery` from exact starting commit `a7f6fc7560edda5d823c9aee454330293556066b`; one direct parent `gpt-5.6-sol`/`medium` session and zero child or named-agent sessions.
+- Compatibility: the protected F003 inspection, host-validation, metadata, commit, projection, and cycle-cache path remains unchanged and retains its focused regression coverage.
+- General contract: later retained results authenticate the exact ledger topology, report file and terminal marker, project/repository/run/transaction/session identity, branch and HEAD, clean start, terminal tracked/untracked fingerprints and exact paths, live untracked hashes, gate and projection binding, queue decision contract, subject, and absence of leases, reservations, active transactions, prior recovery, or a manual feature commit.
+- Workflow policy: `feature_cycle` may normalize to `feature_execution` only after every surrounding feature-execution identity matches. No other workflow mismatch is accepted.
+- Host validation: focused Swift filters derive from retained changed test files and matching changed-source test files, then `swift build` and `git diff --check` run through the controller host runner before any commit. A failed command records validation failure, preserves the retained diff and original gate, creates no commit, and releases the feature-writer lease.
+- Successful apply contract: transition only the bound acceptance metadata, create one direct-child candidate/accepted commit, record structured-output-invalid supersession evidence, resolve only the exact original gate, refresh projection and both compatibility caches, and stop at `integration_pending` without milestone integration or queue reconciliation.
+- Live F097 dry-run: exact branch `codex/F097-imported-audio-transcription-workflow`, HEAD `65c32f8f10d6569dafbcdee9a0fe0a230e0ecfba`, ledger sequence 482, gate `gate-a1e8c2319bc520ae654d883567185402`, nine tracked and two untracked paths, tracked fingerprint `2e9c0edd26654643958d6e3a1362e33f930399359502eef87d59c44edb4ee526`, and untracked fingerprint `84ce3c8394b8e70172f752b09efbb39ea8c5463387d0c075a8c2faac0c007445` all matched. It selected `ImportedAudioTranscriptionServiceTests`, `PersistentDomainStoreTests`, `swift build`, and `git diff --check`, wrote nothing, and planned zero model/child sessions.
+- Validation limit: only the focused feature-result/F003 tests, affected Python compile checks, configuration validation, command help/mode checks, the exact F097 dry-run, and `git diff --check` were authorized. The complete controller suite and application tests were intentionally not run.
+- Isolation: neither registered application repository was modified; no F097 apply, ordinary Conveyor resume, generic human-gate resolution, integration, queue reconciliation, merge, push, tag, publication, deployment, or release ran.
+
+### Model execution — 2026-07-24T22:37:48+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `general_retained_feature_result_recovery`
+- Safety and autonomy contracts unchanged: `true`
