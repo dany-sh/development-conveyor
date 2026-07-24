@@ -12,12 +12,18 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .accepted_commit import acceptance_metadata_paths
+from .compatibility_cache import (
+    build_controller_compatibility_cache,
+    write_controller_compatibility_cache,
+)
+from .config import load_json
 from .contracts import TransactionState, WorkflowType, fingerprint
 from .cycle_cache import (
-    cycle_cache_semantics_from_projection,
+    build_canonical_cycle_cache,
     write_terminal_cycle_cache,
 )
 from .errors import RecoveryError, TransactionError
+from .execution_plan import ExecutionPlan
 from .kernel import FeatureExecutionAdapter, WorkflowKernel
 from .ledger import EvidenceLedger
 from .locks import DurableLock, inspect_repository_writer_lock, make_lock_record
@@ -135,6 +141,12 @@ class FeatureResultRecovery:
         )
         self.projection = ProjectionEngine(
             self.ledger, self.state_root / "projection-cache.json"
+        )
+        self.cycle_schema = load_json(
+            self.controller_root / "schemas/cycle-state.schema.json"
+        )
+        self.project_schema = load_json(
+            self.controller_root / "schemas/project-state.schema.json"
         )
 
     def _report(self, run_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
@@ -1220,25 +1232,26 @@ class FeatureResultRecovery:
             ) from exc
         if not isinstance(value, dict):
             raise RecoveryError("controller compatibility cache is not an object")
-        value.update(
-            {
-                "current_state": "integration_pending",
-                "current_feature": feature_id,
-                "selected_feature": None,
-                "active_transaction": None,
-                "accepted_feature_commit": accepted_commit,
-                "integration_status": "pending",
-                "current_run_id": run_id,
-                "kernel_transaction_id": transaction_id,
-                "kernel_ledger_sequence": projection["ledger_sequence"],
-                "kernel_ledger_fingerprint": projection["ledger_fingerprint"],
-                "kernel_projection_fingerprint": projection[
-                    "projection_fingerprint"
-                ],
-                "updated_at": utc_now(),
-            }
+        execution_plan = ExecutionPlan.from_projection(
+            projection,
+            starting_commit=self.inspector.rev_parse(f"{accepted_commit}^"),
+            feature_branch=self.inspector.current_branch,
+            milestone_branch=self.project.milestone_branch,
         )
-        atomic_write_json(path, value)
+        document = build_controller_compatibility_cache(
+            value,
+            project_schema=self.project_schema,
+            project_id=self.project.project_id,
+            repository_fingerprint=self.inspector.identity()["path_fingerprint"],
+            active_milestone=self.project.active_milestone,
+            run_id=run_id,
+            projection=projection,
+            execution_plan=execution_plan.to_dict(),
+            updated_at=utc_now(),
+        )
+        write_controller_compatibility_cache(
+            path, document, project_schema=self.project_schema
+        )
 
     def _materialize_general_compatibility_caches(
         self,
@@ -1296,54 +1309,84 @@ class FeatureResultRecovery:
             raise RecoveryError("F003 recovery cycle cache is unavailable or invalid") from exc
         if not isinstance(state, dict):
             raise RecoveryError("F003 recovery cycle cache is not an object")
-        state.update({
-            "schema_version": 1,
-            "project_id": self.project.project_id,
-            "active_milestone": self.project.active_milestone,
-            "current_feature": feature_id,
-            "selected_feature": feature_id,
-            "current_phase": "integration_pending",
-            "accepted_feature_commit": accepted_commit,
-            "integration_status": "pending",
-            "conveyor_run_id": run_id,
-            "session_id": None,
-            "feature_session_id": None,
-            "session_completion_classification": "FEATURE_ACCEPTED",
-            "session_completion_flags": [],
-            "session_completion_evidence": {
-                "recovery_transaction_id": transaction_id,
+        stamp = utc_now()
+        repository_identity = self.inspector.identity()
+        feature = FeatureQueue.from_location(
+            self.project.repository, self.project.queue_location
+        ).feature(feature_id) or {}
+        feature_starting_commit = self.inspector.rev_parse(f"{accepted_commit}^")
+        state = build_canonical_cycle_cache(
+            state,
+            cycle_schema=self.cycle_schema,
+            projection=projection,
+            updates={
+                "schema_version": 1,
+                "project_id": self.project.project_id,
+                "repository_identity": repository_identity,
+                "repository_path_fingerprint": repository_identity[
+                    "path_fingerprint"
+                ],
+                "active_milestone": self.project.active_milestone,
+                "current_feature": feature_id,
+                "feature_dependencies": list(feature.get("dependencies") or []),
+                "feature_branch": self.inspector.current_branch,
+                "feature_worktree": state.get("feature_worktree"),
+                "feature_starting_commit": feature_starting_commit,
                 "accepted_feature_commit": accepted_commit,
-                "model_session_launched": False,
+                "milestone_branch": self.project.milestone_branch,
+                "milestone_pre_integration_commit": feature_starting_commit,
+                "milestone_post_integration_commit": None,
+                "conveyor_run_id": run_id,
+                "writer_lock_identity": None,
+                "validation_attempts": list(
+                    state.get("validation_attempts") or []
+                ),
+                "review_attempts": list(state.get("review_attempts") or []),
+                "integration_attempts": list(
+                    state.get("integration_attempts") or []
+                ),
+                "session_id": None,
+                "feature_session_id": None,
+                "session_completion_classification": "FEATURE_ACCEPTED",
+                "session_completion_flags": [],
+                "session_completion_evidence": {
+                    "recovery_transaction_id": transaction_id,
+                    "accepted_feature_commit": accepted_commit,
+                    "model_session_launched": False,
+                },
+                "human_decision_required": None,
+                "failure_classification": None,
+                "retry_exhausted": False,
+                "stop_reason": None,
+                "next_safe_action": (
+                    f"scripts/conveyor run --project {self.project.project_id} "
+                    f"--mode {self.project.automation_mode}"
+                ),
+                "resume_instructions": (
+                    f"scripts/conveyor run --project {self.project.project_id} "
+                    f"--mode {self.project.automation_mode}"
+                ),
+                "last_successful_checkpoint": "feature_result_recovery_terminal",
+                "last_verified_git_state": {
+                    "branch": self.inspector.current_branch,
+                    "head": accepted_commit,
+                    "clean": self.inspector.is_clean,
+                    "git_operations": self.inspector.git_operation_state(),
+                },
+                "kernel_transaction_id": transaction_id,
+                "kernel_ledger_sequence": projection["ledger_sequence"],
+                "kernel_ledger_fingerprint": projection["ledger_fingerprint"],
+                "kernel_projection_fingerprint": projection[
+                    "projection_fingerprint"
+                ],
+                "created_at": state.get("created_at") or stamp,
+                "updated_at": stamp,
             },
-            "human_decision_required": None,
-            "failure_classification": None,
-            "retry_exhausted": False,
-            "stop_reason": None,
-            "next_safe_action": (
-                f"scripts/conveyor run --project {self.project.project_id} "
-                f"--mode {self.project.automation_mode}"
-            ),
-            "resume_instructions": (
-                f"scripts/conveyor run --project {self.project.project_id} "
-                f"--mode {self.project.automation_mode}"
-            ),
-            "last_successful_checkpoint": "feature_result_recovery_terminal",
-            "last_verified_git_state": {
-                "branch": self.inspector.current_branch,
-                "head": accepted_commit,
-                "clean": self.inspector.is_clean,
-                "git_operations": self.inspector.git_operation_state(),
-            },
-            "kernel_transaction_id": transaction_id,
-            "kernel_ledger_sequence": projection["ledger_sequence"],
-            "kernel_ledger_fingerprint": projection["ledger_fingerprint"],
-            "kernel_projection_fingerprint": projection["projection_fingerprint"],
-            "updated_at": utc_now(),
-        })
-        state.update(cycle_cache_semantics_from_projection(projection))
+        )
         write_terminal_cycle_cache(
             path, state, ledger=self.ledger, projection_engine=self.projection,
             transaction_id=transaction_id, expected_feature=feature_id,
+            cycle_schema=self.cycle_schema,
         )
 
     def apply(self, plan: dict[str, Any]) -> dict[str, Any]:

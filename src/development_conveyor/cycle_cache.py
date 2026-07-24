@@ -78,6 +78,37 @@ def cycle_cache_semantic_mismatches(
     )
 
 
+def build_canonical_cycle_cache(
+    state: dict[str, Any],
+    *,
+    cycle_schema: dict[str, Any],
+    updates: dict[str, Any],
+    projection: dict[str, Any],
+) -> dict[str, Any]:
+    """Build one cycle cache through the registered schema boundary.
+
+    Recovery callers may retain supported cycle fields and may update only
+    fields registered by the cycle-state schema. The final complete document,
+    rather than an arbitrary legacy input, is schema validated. Projection
+    semantics are translated through the explicit compatibility mapping above;
+    projection dictionaries are never merged into cycle state.
+    """
+
+    supported = set((cycle_schema.get("properties") or {}).keys())
+    unsupported_updates = sorted(set(updates) - supported)
+    if unsupported_updates:
+        raise RecoveryError(
+            "canonical cycle-cache update contains unsupported fields: "
+            + ", ".join(unsupported_updates)
+        )
+    canonical = {key: value for key, value in state.items() if key in supported}
+    canonical.update(updates)
+    canonical.update(cycle_cache_semantics_from_projection(projection))
+    canonical.pop("kernel_cache_fingerprint", None)
+    validate_schema(canonical, cycle_schema)
+    return canonical
+
+
 def normalize_cycle_cache_for_rebinding(
     state: dict[str, Any],
     *,
@@ -259,6 +290,7 @@ def write_terminal_cycle_cache(
     projection_engine: ProjectionEngine,
     transaction_id: str,
     expected_feature: str | None = None,
+    cycle_schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Atomically write and read back one canonical terminal cache binding."""
 
@@ -274,6 +306,8 @@ def write_terminal_cycle_cache(
         transaction_id=transaction_id,
         expected_feature=expected_feature,
     )
+    if cycle_schema is not None:
+        validate_schema(finalized, cycle_schema)
     atomic_write_json(path, finalized)
 
     try:
@@ -282,6 +316,8 @@ def write_terminal_cycle_cache(
         raise RecoveryError("written cycle cache cannot be read back") from exc
     if not isinstance(persisted, dict) or persisted != finalized:
         raise RecoveryError("written cycle cache differs from the finalized cache")
+    if cycle_schema is not None:
+        validate_schema(persisted, cycle_schema)
     unsigned = dict(persisted)
     claimed_signature = unsigned.pop("kernel_cache_fingerprint", None)
     if claimed_signature != fingerprint(unsigned):

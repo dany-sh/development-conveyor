@@ -1,17 +1,32 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from development_conveyor.consistency import ConsistencyChecker
 from development_conveyor.contracts import WorkflowType, bind_human_gate, fingerprint
+from development_conveyor.cycle_cache_repair import (
+    CacheRepairExpectation,
+    CycleCacheRepair,
+)
+from development_conveyor.cycle_engine import CycleEngine
 from development_conveyor.feature_result_recovery import FeatureResultRecovery
 from development_conveyor.ledger import EvidenceLedger
 from development_conveyor.projection import ProjectionEngine, projection_fingerprint
 from development_conveyor.repository import RepositoryInspector
 from development_conveyor.snapshots import capture_repository_snapshot
-from tests.helpers import controller_configuration, git, synthetic_repository, write_json
+from development_conveyor.validation import validate_schema
+from tests.helpers import (
+    SyntheticLauncher,
+    controller_configuration,
+    git,
+    synthetic_repository,
+    write_json,
+)
 
 
 class FeatureResultRecoveryTests(unittest.TestCase):
@@ -594,6 +609,75 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
             expected_head=head,
         )
 
+    def _repair_fixture(self, root: Path):
+        configuration, project, head, _, _ = self._fixture(root)
+        recovery = self._recovery(configuration, project)
+        result = recovery.apply(self._inspect(recovery, head))
+        inspector = RepositoryInspector(project.repository)
+        controller_cache = (
+            configuration.root / "state/projects" / f"{project.project_id}.json"
+        )
+        value = json.loads(controller_cache.read_text(encoding="utf-8"))
+        projection = result["projection"]
+        unsupported = (
+            "accepted_feature_commit",
+            "active_transaction",
+            "current_run_id",
+            "integration_status",
+            "kernel_ledger_fingerprint",
+            "kernel_ledger_sequence",
+            "kernel_projection_fingerprint",
+            "kernel_transaction_id",
+            "selected_feature",
+        )
+        value.update(
+            {
+                "accepted_feature_commit": result["accepted_feature_commit"],
+                "active_transaction": None,
+                "current_run_id": result["run_id"],
+                "integration_status": "pending",
+                "kernel_ledger_fingerprint": projection["ledger_fingerprint"],
+                "kernel_ledger_sequence": projection["ledger_sequence"],
+                "kernel_projection_fingerprint": projection[
+                    "projection_fingerprint"
+                ],
+                "kernel_transaction_id": result["recovery_transaction_id"],
+                "selected_feature": None,
+            }
+        )
+        write_json(controller_cache, value)
+        identity = inspector.identity()
+        expectation = CacheRepairExpectation(
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+            branch=inspector.current_branch,
+            head=inspector.head,
+            parent=head,
+            feature_id=self.FEATURE,
+            milestone_branch=str(project.milestone_branch),
+            recovery_transaction_id=result["recovery_transaction_id"],
+            original_transaction_id=self.ORIGINAL_TRANSACTION,
+            recovery_run_id=result["run_id"],
+            ledger_sequence=projection["ledger_sequence"],
+            ledger_fingerprint=projection["ledger_fingerprint"],
+            projection_fingerprint=projection["projection_fingerprint"],
+            malformed_cache_sha256=hashlib.sha256(
+                controller_cache.read_bytes()
+            ).hexdigest(),
+            application_cache_sha256=hashlib.sha256(
+                inspector.cycle_state_path().read_bytes()
+            ).hexdigest(),
+            unsupported_keys=unsupported,
+        )
+        repair = CycleCacheRepair(
+            controller_root=configuration.root,
+            configuration=configuration,
+            project=project,
+            expectation=expectation,
+        )
+        return configuration, project, repair, controller_cache
+
     def test_general_dry_run_binds_exact_retained_state_and_alias(self):
         with tempfile.TemporaryDirectory() as temporary:
             configuration, project, head, changed, _ = self._fixture(
@@ -807,8 +891,189 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
             self.assertFalse(result["queue_reconciliation_performed"])
             self.assertEqual(result["model_sessions_launched"], 0)
             self.assertEqual(result["child_sessions_launched"], 0)
+            cycle = json.loads(inspector.cycle_state_path().read_text())
+            validate_schema(cycle, recovery.cycle_schema)
+            self.assertNotIn("current_state", cycle)
+            self.assertNotIn("active_transaction", cycle)
+            controller_cache = json.loads(
+                (
+                    configuration.root
+                    / "state/projects"
+                    / f"{project.project_id}.json"
+                ).read_text()
+            )
+            validate_schema(controller_cache, recovery.project_schema)
+            self.assertFalse(
+                {
+                    "accepted_feature_commit",
+                    "active_transaction",
+                    "current_run_id",
+                    "integration_status",
+                    "kernel_ledger_fingerprint",
+                    "kernel_ledger_sequence",
+                    "kernel_projection_fingerprint",
+                    "kernel_transaction_id",
+                    "selected_feature",
+                }
+                & set(controller_cache)
+            )
             with self.assertRaises(Exception):
                 self._inspect(recovery, head)
+
+    def test_cycle_cache_repair_is_dry_run_atomic_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            configuration, project, repair, controller_cache = (
+                self._repair_fixture(Path(temporary))
+            )
+            inspector = RepositoryInspector(project.repository)
+            cache_before = controller_cache.read_bytes()
+            application_before = inspector.cycle_state_path().read_bytes()
+            ledger_path = (
+                configuration.root
+                / "state/projects"
+                / project.project_id
+                / "evidence-ledger.jsonl"
+            )
+            projection_path = ledger_path.with_name("projection-cache.json")
+            ledger_before = ledger_path.read_bytes()
+            projection_before = projection_path.read_bytes()
+            git_before = git(project.repository, "status", "--porcelain=v1", "--branch")
+
+            plan = repair.inspect()
+            self.assertEqual("repair_ready", plan["outcome"])
+            self.assertEqual(list(repair.expectation.unsupported_keys), plan["unsupported_keys"])
+            self.assertEqual(cache_before, controller_cache.read_bytes())
+            self.assertEqual(0, plan["model_sessions_that_would_launch"])
+            self.assertEqual(0, plan["child_sessions_that_would_launch"])
+
+            result = repair.apply(plan)
+            self.assertEqual("repaired", result["outcome"])
+            self.assertNotEqual(cache_before, controller_cache.read_bytes())
+            self.assertEqual(application_before, inspector.cycle_state_path().read_bytes())
+            self.assertEqual(ledger_before, ledger_path.read_bytes())
+            self.assertEqual(projection_before, projection_path.read_bytes())
+            self.assertEqual(
+                git_before,
+                git(project.repository, "status", "--porcelain=v1", "--branch"),
+            )
+            CycleEngine(configuration, SyntheticLauncher()).project_plan(project)
+            ConsistencyChecker(
+                controller_root=configuration.root,
+                project=project,
+                planner_observer=lambda: CycleEngine(
+                    configuration, SyntheticLauncher()
+                ).project_plan(project),
+            ).check()
+            second = repair.inspect()
+            self.assertEqual("already_canonical", second["outcome"])
+            second_apply = repair.apply(second)
+            self.assertFalse(second_apply["controller_cache_written"])
+
+    def test_cycle_cache_repair_refuses_stale_dirty_and_owned_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, project, repair, controller_cache = self._repair_fixture(
+                Path(temporary)
+            )
+            stale = json.loads(controller_cache.read_text())
+            stale["last_checkpoint"] = "changed"
+            write_json(controller_cache, stale)
+            with self.assertRaisesRegex(Exception, "SHA-256 changed"):
+                repair.inspect()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            _, project, repair, _ = self._repair_fixture(Path(temporary))
+            (project.repository / "app.txt").write_text(
+                "dirty\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(Exception, "worktree is dirty"):
+                repair.inspect()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            configuration, project, repair, _ = self._repair_fixture(
+                Path(temporary)
+            )
+            projection_path = (
+                configuration.root
+                / "state/projects"
+                / project.project_id
+                / "projection-cache.json"
+            )
+            stale_projection = json.loads(projection_path.read_text())
+            stale_projection["projection_fingerprint"] = "f" * 64
+            write_json(projection_path, stale_projection)
+            with self.assertRaisesRegex(
+                Exception, "canonical persisted projection evidence is invalid"
+            ):
+                repair.inspect()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            _, project, repair, _ = self._repair_fixture(Path(temporary))
+            writer = project.repository / ".factory/locks/writer.json"
+            write_json(writer, {"owner": "other"})
+            with self.assertRaisesRegex(Exception, "writer lease"):
+                repair.inspect()
+            writer.unlink()
+            write_json(repair._launch_reservation().path, {"run_id": "other"})
+            with self.assertRaisesRegex(Exception, "launch reservation"):
+                repair.inspect()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            configuration, project, repair, _ = self._repair_fixture(
+                Path(temporary)
+            )
+            identity = RepositoryInspector(project.repository).identity()
+            ledger = EvidenceLedger(
+                configuration.root
+                / "state/projects"
+                / project.project_id
+                / "evidence-ledger.jsonl",
+                project_id=project.project_id,
+                repository_identity=identity["repository_id"],
+                repository_path_fingerprint=identity["path_fingerprint"],
+            )
+            ledger.append(
+                event_type="TransactionStarted",
+                transaction_id="unexpected-active-transaction",
+                workflow_type=WorkflowType.MILESTONE_INTEGRATION,
+                payload={
+                    "run_id": "unexpected-active-run",
+                    "feature_id": self.FEATURE,
+                    "milestone": "M0",
+                    "starting_branch": repair.expectation.branch,
+                    "starting_head": repair.expectation.head,
+                    "allowed_mutation_policy": {},
+                },
+            )
+            ProjectionEngine(
+                ledger,
+                ledger.path.with_name("projection-cache.json"),
+            ).rebuild(persist_cache=True)
+            with self.assertRaisesRegex(
+                Exception, "authoritative projection identity changed"
+            ):
+                repair.inspect()
+
+    def test_cycle_cache_repair_write_failure_restores_original(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, repair, controller_cache = self._repair_fixture(
+                Path(temporary)
+            )
+            plan = repair.inspect()
+            original = controller_cache.read_bytes()
+
+            def failing_write(path, document, *, project_schema):
+                path.write_text("{}\n", encoding="utf-8")
+                raise RuntimeError("injected schema write failure")
+
+            with mock.patch(
+                "development_conveyor.cycle_cache_repair."
+                "write_controller_compatibility_cache",
+                side_effect=failing_write,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "injected"):
+                    repair.apply(plan)
+            self.assertEqual(original, controller_cache.read_bytes())
+            self.assertFalse(repair._launch_reservation().path.exists())
 
 
 if __name__ == "__main__":

@@ -914,3 +914,23 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `general_retained_feature_result_recovery`
 - Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-24T23:10:02+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `canonical_cycle_cache_repair`
+- Safety and autonomy contracts unchanged: `true`
+
+### Canonical retained-result cache serialization and deterministic repair — 2026-07-24
+
+- Scope and execution: controller-only repair on `codex/m1-7-canonical-cycle-cache-repair` from exact starting commit `2182d51bb765c345631255fbb32a2ac84f020aec`; one direct parent `gpt-5.6-sol`/`medium` session and zero child, named-agent, Feature Factory, or Milestone Integrator sessions.
+- Root cause and target correction: the application `.factory/conveyor-state.json` parses through the cycle-state schema and remains bound to F097 at SHA-256 `9312a681`. The exact nine-key schema failure comes from controller compatibility state `state/projects/interview-companion.json` at SHA-256 `cb627600`; retained-result recovery had merged projection-only keys into the project-state dictionary.
+- Canonical serialization: generalized recovery now builds application cycle state through the registered cycle schema and explicit projection-to-cycle semantic mapping, then validates again before and after atomic persistence. Controller compatibility state is freshly constructed through the project-state schema and canonical `ExecutionPlan`; neither previous cache nor projection dictionaries are merged.
+- Repair route: `repair-cycle-cache` pins the exact repository/path identity, branch, accepted commit and direct parent, clean worktree and Git-operation state, lease and reservation absence, recovery/original transaction lineage, recovery run, malformed/controller and valid/application cache hashes, unsupported-key set, ledger sequence/fingerprint, and projection fingerprint. Dry-run is read-only; apply would reserve, revalidate, preserve mode, atomically replace only controller compatibility state, and stop before integration.
+- Exact live dry-run: authoritative state remained `integration_pending` for F097, accepted commit `560214ec`, ledger sequence 497/fingerprint `0a9638c7`, projection fingerprint `922f90cf`, no active transaction or human gate, and session resume ineligible. The replacement selects fresh deterministic milestone integration as the next safe action but launches nothing and changes no ledger, projection, application cache, application Git path, or ref.
+- Focused validation: 49/49 feature-result/F003/F097, cache-binding, projection-authority, status, and consistency tests passed in `146.980s`. `compileall`, configuration validation, command help, both invalid-mode checks, the exact live repair dry-run, and `git diff --check` passed. The complete controller suite and application tests were intentionally not run.
+- Isolation: neither registered application repository was modified. No live repair apply, ordinary Conveyor resume, F097 integration, merge, push, tag, publication, deployment, or release ran.

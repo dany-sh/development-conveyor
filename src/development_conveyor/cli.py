@@ -26,6 +26,7 @@ from .accepted_commit_recovery import AcceptedCommitRecovery
 from .execution_profiles import PROFILE_NAMES
 from .feature_scoping import FeatureScoper
 from .feature_decisions import FeatureDecisionResolver
+from .cycle_cache_repair import CycleCacheRepair
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
 
@@ -204,6 +205,17 @@ def _parser() -> argparse.ArgumentParser:
     mode = resolve_features.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
+    repair_cycle_cache = subparsers.add_parser(
+        "repair-cycle-cache",
+        help=(
+            "authenticate and deterministically rebuild one malformed "
+            "projection-derived compatibility cache"
+        ),
+    )
+    repair_cycle_cache.add_argument("--project", required=True)
+    mode = repair_cycle_cache.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
     return parser
 
 
@@ -237,6 +249,14 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
     controller_root = discover_root(root)
     configuration = load_configuration(controller_root)
     registry = ProjectRegistry(configuration)
+    if args.command == "repair-cycle-cache":
+        repair = CycleCacheRepair(
+            controller_root=controller_root,
+            configuration=configuration,
+            project=registry.get(args.project),
+        )
+        plan = repair.inspect()
+        return repair.apply(plan) if args.apply else plan
     if args.command == "resolve-feature-decisions":
         resolver = FeatureDecisionResolver(configuration)
         request = resolver.inspect(

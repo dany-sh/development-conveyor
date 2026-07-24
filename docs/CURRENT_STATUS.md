@@ -4,6 +4,25 @@ Last updated: 2026-07-24
 
 ## Summary
 
+The retained-result cache serialization repair is prepared on
+`codex/m1-7-canonical-cycle-cache-repair` from required starting commit
+`2182d51bb765c345631255fbb32a2ac84f020aec`. General feature-result recovery
+now constructs both compatibility documents through canonical schema-validated
+builders. Projection semantics cross into application cycle state only through
+the explicit field mapping, and the controller compatibility cache is rebuilt
+as a fresh project-state document instead of receiving projection keys.
+
+Read-only preflight proved the reported nine-key schema failure belongs to the
+controller compatibility cache at `state/projects/interview-companion.json`;
+the application cache at `.factory/conveyor-state.json` is already schema-valid
+and bound to F097, ledger sequence 497, and projection fingerprint `922f90cf`.
+The dedicated `repair-cycle-cache` route authenticates both hashes, the exact
+repository/ref/transaction lineage, ledger and projection, clean Git and lock
+state, and the application cache binding. Dry-run writes nothing; apply would
+reserve, revalidate, and atomically replace only the controller compatibility
+cache while preserving its mode. The required live dry-run remains the only
+authorized live repair command; apply and F097 integration remain unexecuted.
+
 The retained feature-result recovery route is generalized on
 `codex/m1-6-general-retained-feature-result-recovery` from starting commit
 `a7f6fc7560edda5d823c9aee454330293556066b`. The protected F003 behavior and
@@ -126,23 +145,23 @@ Host acceptance passed the three focused routing/lifecycle suites, debug build, 
 
 M1 — Transactional workflow kernel
 
-## Active feature
+## Active controller repair
 
-M1-005 — Deterministic queue-feature decision resolution (`implementation prepared`)
+Canonical retained-result cache repair (`implementation prepared`)
 
 ## Next boundary
 
-Commit the deterministic queue-feature decision resolver. Do not run its
-Interview Companion apply command, prepare or implement F010 or F097, run an
-application Conveyor resume, begin milestone integration, merge a default
+Commit the canonical cache repair. Do not run
+`repair-cycle-cache --apply`, prepare or implement another feature, run an
+application Conveyor resume, begin F097 milestone integration, merge a default
 branch, push, tag, publish, deploy, or release.
 
 ## Validation scope
 
-Validation is limited to the new decision-resolution tests, pinned
-project-gate regression tests, transactional-kernel focused tests, the exact
-Interview Companion decision dry-run, `compileall`, configuration validation,
-command help/mode checks, and `git diff --check`. Application tests, the
-complete controller suite, live decision apply, ordinary resume, F010/F097
-preparation or implementation, and milestone integration are intentionally
-excluded.
+Validation is limited to feature-result/F003/F097 regressions, canonical
+cycle-cache and compatibility-cache tests, focused projection/status/
+consistency regressions, the exact Interview Companion repair dry-run,
+`compileall`, configuration validation, command help/mode checks, and
+`git diff --check`. Application tests, the complete controller suite, live
+repair apply, ordinary resume, new feature work, and milestone integration are
+intentionally excluded.
