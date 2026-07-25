@@ -4,6 +4,31 @@ Last updated: 2026-07-24
 
 ## Summary
 
+Controller-managed retained-feature validation repair is implemented on
+`codex/m1-12-retained-feature-validation-repair` from required starting commit
+`14c944a4d6d052983f979e6111a2214a9e09b19f`. The new
+`repair-feature-result` route is explicitly model-backed: it authenticates the
+original execution and failed deterministic recovery, retained branch/HEAD,
+paths and fingerprints, repository identity, Git-operation and ownership
+absence, and exact failed validation evidence before exposing a write-free
+plan.
+
+Apply uses the authoritative F068 `gpt-5.6-terra`/high profile with zero
+children and at most two fresh focused parents. Each attempt starts from the
+retained diff, receives the exact failed diagnostic, may change only
+authenticated F068 paths, and is rejected on unexpected paths before trusted
+host validation. One direct-child feature commit is possible only after all
+required validation passes. Success supersedes the original technical gate and
+failed recovery without deleting history, refreshes projection and
+compatibility caches, and stops at `integration_pending`; exhaustion preserves
+the diff and creates neither a commit nor a new product gate.
+
+Autopilot now recognizes authenticated failed retained-result validation before
+generic human-gate stopping, emits `RECOVERY_STARTED`,
+`FEATURE_REPAIR_STARTED`, `FEATURE_REPAIR_VALIDATION_STARTED`, and on success
+`RECOVERY_APPLIED` plus `FEATURE_ACCEPTED`, then reloads projection and can
+continue through ordinary `FEATURE_INTEGRATED`.
+
 Phase-aware retained feature-result recovery is implemented on
 `codex/m1-11-autopilot-retained-feature-recovery` from required starting
 commit `4b5cd4b9df2da1860047c520e7430a4a8047c74b`. Feature preparation,
@@ -240,19 +265,19 @@ M1 — Transactional workflow kernel
 
 ## Active controller repair
 
-Phase-aware retained feature-result recovery (`implementation prepared`)
+Retained feature validation repair (`implementation prepared`)
 
 ## Next boundary
 
 Commit the controller repair. Run only the live F068
-`recover-feature-result --dry-run`; do not run recovery apply, restart
+`repair-feature-result --dry-run`; do not run repair apply, restart
 Autopilot, run ordinary Conveyor resume, resolve the technical gate through
 the generic human-decision route, integrate F068, reconcile its queue, merge,
 push, tag, publish, deploy, or release.
 
 ## Validation scope
 
-Validation is limited to focused feature-result recovery, Autopilot,
+Validation is limited to focused retained-feature repair, feature-result recovery, Autopilot,
 cycle-cache, projection, status, and consistency regressions, Python
 compilation, configuration validation, command help/mode checks, the exact
 Interview Companion F068 recovery dry-run, and `git diff --check`.

@@ -175,6 +175,33 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-012",
+      "title": "Retained feature validation repair",
+      "status": "implementation prepared",
+      "priority": 12,
+      "milestone": "M1",
+      "dependencies": ["M1-001", "M1-010", "M1-011"],
+      "spec": "docs/features/M1-012-retained-feature-validation-repair.md",
+      "acceptance_criteria": [
+        "Exact failed retained-result validation evidence and the retained application diff are authenticated before any model launch",
+        "Dry-run is zero-write and zero-model while apply uses bounded Terra/high repair parents with zero children",
+        "Only passing trusted-host validation can create one direct-child feature commit and project integration_pending",
+        "Autopilot invokes available retained-feature repair automatically and continues without creating a new product gate"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-12-retained-feature-validation-repair",
+      "integration_base_commit": "14c944a4d6d052983f979e6111a2214a9e09b19f",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

@@ -330,6 +330,60 @@ class AutopilotTests(unittest.TestCase):
         self.assertIn("FEATURE_INTEGRATED", events)
         self.assertNotIn("FEATURE_BLOCKED", events)
 
+    def test_failed_retained_validation_auto_repairs_and_continues(self):
+        technical = plan(
+            "retained_feature_repair",
+            state="technical_repair_required",
+        )
+        technical["recognized_technical_repair"] = True
+        technical["retained_feature_repair"] = {
+            "feature_id": "F001",
+            "original_transaction_id": "execution-transaction",
+            "failed_recovery_transaction_id": "failed-recovery-transaction",
+            "expected_branch": "codex/F001",
+            "expected_head": "a" * 40,
+        }
+        engine = FakeEngine(
+            [
+                technical,
+                plan("milestone_integration", state="integration_pending"),
+                plan("paused", feature=None, state="paused"),
+            ],
+            [{"outcome": "feature_integrated"}],
+        )
+
+        def apply_repair(_plan):
+            engine.index = 1
+            return {
+                "outcome": "integration_pending",
+                "accepted_feature_commit": "b" * 40,
+                "model_sessions_launched": 1,
+                "child_sessions_launched": 0,
+            }
+
+        with mock.patch(
+            "development_conveyor.autopilot.RetainedFeatureValidationRepair"
+        ) as repair_type:
+            repair_type.return_value.inspect.return_value = {
+                "plan_fingerprint": "repair-plan"
+            }
+            repair_type.return_value.apply.side_effect = apply_repair
+            result = self.make(engine).apply()
+
+        events = [item["event"] for item in result["events"]]
+        expected = [
+            "RECOVERY_STARTED",
+            "FEATURE_REPAIR_STARTED",
+            "FEATURE_REPAIR_VALIDATION_STARTED",
+            "RECOVERY_APPLIED",
+            "FEATURE_ACCEPTED",
+            "FEATURE_INTEGRATED",
+        ]
+        positions = [events.index(name) for name in expected]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(engine.calls, [("milestone", False)])
+        self.assertNotIn("FEATURE_BLOCKED", events)
+
     def test_identical_technical_recovery_failure_is_bounded_without_gate(self):
         technical = plan(
             "feature_result_recovery",

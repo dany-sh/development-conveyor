@@ -1586,6 +1586,108 @@ class CycleEngine:
             "inspected_plan_fingerprint": inspected["plan_fingerprint"],
         }
 
+    def _retained_feature_repair_plan(
+        self, project: Project, projection: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Recognize a failed deterministic retained-result validation."""
+
+        transactions = projection.get("transactions")
+        latest = max(
+            (item for item in transactions or () if isinstance(item, dict)),
+            key=lambda item: int(item.get("last_sequence") or 0),
+            default={},
+        )
+        if (
+            latest.get("workflow_type") != WorkflowType.FEATURE_EXECUTION.value
+            or latest.get("state") != "terminal_failure"
+            or latest.get("terminal_classification")
+            != "FEATURE_VALIDATION_FAILED"
+        ):
+            return None
+        failed_transaction_id = latest.get("transaction_id")
+        feature_id = latest.get("feature_id")
+        snapshot = latest.get("starting_snapshot")
+        if not all(
+            (
+                isinstance(failed_transaction_id, str)
+                and failed_transaction_id,
+                isinstance(feature_id, str) and feature_id,
+                isinstance(snapshot, dict),
+                isinstance(snapshot.get("branch"), str)
+                and snapshot.get("branch"),
+                isinstance(snapshot.get("head"), str) and snapshot.get("head"),
+                projection.get("current_feature") == feature_id,
+                projection.get("active_transaction") is None,
+            )
+        ):
+            return None
+        ledger = EvidenceLedger(
+            self.configuration.owned_path(
+                f"state/projects/{project.project_id}/evidence-ledger.jsonl"
+            ),
+            project_id=project.project_id,
+            repository_identity=RepositoryInspector(project.repository).identity()[
+                "repository_id"
+            ],
+            repository_path_fingerprint=RepositoryInspector(
+                project.repository
+            ).identity()["path_fingerprint"],
+        )
+        failed_start = next(
+            (
+                event
+                for event in ledger.read()
+                if event.get("transaction_id") == failed_transaction_id
+                and event.get("event_type") == "TransactionStarted"
+            ),
+            None,
+        )
+        original_transaction_id = (
+            (failed_start or {}).get("payload") or {}
+        ).get("recovered_transaction_id")
+        if not isinstance(original_transaction_id, str) or not original_transaction_id:
+            return None
+        arguments = {
+            "feature_id": feature_id,
+            "original_transaction_id": original_transaction_id,
+            "failed_recovery_transaction_id": failed_transaction_id,
+            "expected_branch": snapshot["branch"],
+            "expected_head": snapshot["head"],
+        }
+        from .retained_feature_repair import RetainedFeatureValidationRepair
+
+        try:
+            inspected = RetainedFeatureValidationRepair(
+                controller_root=self.root,
+                configuration=self.configuration.conveyor,
+                project=project,
+            ).inspect(**arguments)
+        except RecoveryError as exc:
+            return {
+                **arguments,
+                "evidence_authenticated": False,
+                "preflight_error": redact_text(str(exc)),
+                "model_sessions_that_would_launch": 0,
+                "child_sessions_that_would_launch": 0,
+            }
+        return {
+            **arguments,
+            "evidence_authenticated": True,
+            "failed_validation_evidence": inspected[
+                "failed_validation_evidence"
+            ],
+            "repair_profile": inspected["repair_profile"],
+            "allowed_paths": inspected["allowed_paths"],
+            "host_validation_plan": inspected["host_validation_plan"],
+            "maximum_repair_attempts": inspected[
+                "maximum_repair_attempts"
+            ],
+            "expected_terminal_state": inspected[
+                "expected_terminal_state"
+            ],
+            "inspected_plan_fingerprint": inspected["plan_fingerprint"],
+        }
+
     def _project_plan(
         self, project: Project, *, allow_cache_binding_recovery: bool
     ) -> dict[str, Any]:
@@ -1643,6 +1745,55 @@ class CycleEngine:
                     ),
                 },
             })
+            retained_feature_repair = self._retained_feature_repair_plan(
+                effective, authoritative
+            )
+            if retained_feature_repair is not None:
+                plan.update({
+                    "current_state": "technical_repair_required",
+                    "workflow_type": "retained_feature_repair",
+                    "transaction_mode": "repair",
+                    "proposed_next_action": "retained_feature_repair",
+                    "next_action": "retained_feature_repair",
+                    "selected_feature": retained_feature_repair["feature_id"],
+                    "human_gate": None,
+                    "human_decision_required": None,
+                    "technical_gate_to_supersede": authoritative.get(
+                        "human_gate"
+                    ),
+                    "recognized_technical_repair": True,
+                    "retained_feature_repair": retained_feature_repair,
+                    "model_sessions_that_would_launch": (
+                        [retained_feature_repair["repair_profile"]]
+                        if retained_feature_repair.get("evidence_authenticated")
+                        else []
+                    ),
+                    "child_sessions_that_would_launch": [],
+                    "sessions_that_would_launch": (
+                        [retained_feature_repair["repair_profile"]]
+                        if retained_feature_repair.get("evidence_authenticated")
+                        else []
+                    ),
+                    "execution": {
+                        "models_planned": (
+                            1
+                            if retained_feature_repair.get(
+                                "evidence_authenticated"
+                            )
+                            else 0
+                        )
+                    },
+                    "deterministic_only": False,
+                    "application_mutation_expected": True,
+                    "feature_factory_would_launch": False,
+                    "milestone_integrator_would_launch": False,
+                    "expected_stop_condition": (
+                        "Repair only the authenticated retained validation "
+                        "failure, validate, and stop at integration_pending."
+                    ),
+                    "compatibility_preflight": None,
+                })
+                return plan
             feature_result_recovery = self._feature_result_recovery_plan(
                 effective, authoritative
             )

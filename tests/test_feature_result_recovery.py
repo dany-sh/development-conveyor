@@ -14,11 +14,19 @@ from development_conveyor.cycle_cache_repair import (
     CycleCacheRepair,
 )
 from development_conveyor.cycle_engine import CycleEngine
-from development_conveyor.feature_result_recovery import FeatureResultRecovery
+from development_conveyor.errors import RecoveryError
+from development_conveyor.feature_result_recovery import (
+    FeatureResultRecovery,
+    _changed_paths,
+)
+from development_conveyor.retained_feature_repair import (
+    RetainedFeatureValidationRepair,
+)
 from development_conveyor.ledger import EvidenceLedger
 from development_conveyor.projection import ProjectionEngine, projection_fingerprint
 from development_conveyor.repository import RepositoryInspector
 from development_conveyor.snapshots import capture_repository_snapshot
+from development_conveyor.sessions import SessionPlan, SessionResult
 from development_conveyor.validation import validate_schema
 from tests.helpers import (
     SyntheticLauncher,
@@ -310,6 +318,7 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
         *,
         prepared: bool = False,
         preparation_projection_feature: str | None = None,
+        malformed_factory_position: bool = False,
     ):
         repository, project = synthetic_repository(root)
         queue_path = repository / project.queue_location
@@ -387,6 +396,14 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
             + "\nF097 implementation awaits controller acceptance.\n",
             encoding="utf-8",
         )
+        if malformed_factory_position:
+            current.write_text(
+                current.read_text(encoding="utf-8").replace(
+                    "- Selected feature: F010 — Prior selection (`ready`)",
+                    "- Current feature: F097 — malformed retained evidence",
+                ),
+                encoding="utf-8",
+            )
         imported = source_root / "ImportedAudioTranscriptionService.swift"
         imported.write_text(
             "struct ImportedAudioTranscriptionService {}\n", encoding="utf-8"
@@ -725,6 +742,411 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
             expected_branch=self.BRANCH,
             expected_head=head,
         )
+
+    def _failed_recovery_fixture(self, root: Path):
+        configuration, project, head, changed, gate = self._fixture(
+            root, prepared=True, malformed_factory_position=True
+        )
+        deterministic = self._recovery(configuration, project)
+        original_plan = self._inspect(deterministic, head)
+        failed_transaction = "33fbe92b-adab-4422-bcbc-23fcc7031e79"
+        failed_run = "feature-recovery-failed"
+        snapshot = capture_repository_snapshot(project).to_dict()
+        for event_type, payload in (
+            (
+                "TransactionStarted",
+                {
+                    "run_id": failed_run,
+                    "milestone": "M0",
+                    "feature_id": self.FEATURE,
+                    "starting_branch": self.BRANCH,
+                    "starting_head": head,
+                    "starting_queue_fingerprint": snapshot["queue_fingerprint"],
+                    "starting_tracked_diff_fingerprint": snapshot[
+                        "tracked_diff_fingerprint"
+                    ],
+                    "starting_untracked_fingerprint": snapshot[
+                        "untracked_fingerprint"
+                    ],
+                    "allowed_mutation_policy": {
+                        "allowed_paths": list(changed),
+                        "allowed_prefixes": [],
+                        "denied_paths": [],
+                        "denied_prefixes": [],
+                        "allow_untracked": True,
+                        "require_clean_start": False,
+                        "commit_subject": original_plan["commit_subject"],
+                    },
+                    "recovered_transaction_id": self.ORIGINAL_TRANSACTION,
+                    "original_session_id": self.ORIGINAL_SESSION,
+                    "original_gate_id": gate["gate_id"],
+                    "model_sessions_launched": 0,
+                    "child_sessions_launched": 0,
+                    "plan_fingerprint": original_plan["plan_fingerprint"],
+                },
+            ),
+            (
+                "LeaseAcquired",
+                {"lease_id": "failed-recovery-lease", "lease_type": "feature_writer"},
+            ),
+            ("SnapshotCaptured", {"snapshot": snapshot}),
+            (
+                "TransactionBlocked",
+                {
+                    "classification": "FEATURE_VALIDATION_FAILED",
+                    "terminal_state": "terminal_failure",
+                    "next_state": "human_decision_required",
+                    "gate": None,
+                    "gate_id": None,
+                    "gate_fingerprint": None,
+                    "reference": None,
+                    "terminal_snapshot": snapshot,
+                },
+            ),
+            ("LeaseReleased", {"lease_id": "failed-recovery-lease"}),
+            (
+                "ProjectionUpdated",
+                {
+                    "current_state": "human_decision_required",
+                    "current_feature": self.FEATURE,
+                    "selected_feature": None,
+                },
+            ),
+        ):
+            deterministic.ledger.append(
+                event_type=event_type,
+                transaction_id=failed_transaction,
+                workflow_type=WorkflowType.FEATURE_EXECUTION,
+                payload=payload,
+            )
+        deterministic.projection.rebuild(persist_cache=True)
+        repair = RetainedFeatureValidationRepair(
+            controller_root=configuration.root,
+            configuration=configuration.conveyor,
+            project=project,
+            command_runner=self._passing_runner,
+        )
+        return (
+            configuration,
+            project,
+            head,
+            changed,
+            gate,
+            failed_transaction,
+            repair,
+        )
+
+    def test_retained_repair_dry_run_authenticates_failed_evidence_without_writes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                _,
+                project,
+                head,
+                changed,
+                _,
+                failed_transaction,
+                repair,
+            ) = self._failed_recovery_fixture(Path(temporary))
+            before = (
+                git(project.repository, "status", "--porcelain=v1"),
+                repair.ledger.path.read_bytes(),
+                repair.projection.cache_path.read_bytes(),
+            )
+            plan = repair.inspect(
+                feature_id=self.FEATURE,
+                original_transaction_id=self.ORIGINAL_TRANSACTION,
+                failed_recovery_transaction_id=failed_transaction,
+                expected_branch=self.BRANCH,
+                expected_head=head,
+            )
+            after = (
+                git(project.repository, "status", "--porcelain=v1"),
+                repair.ledger.path.read_bytes(),
+                repair.projection.cache_path.read_bytes(),
+            )
+            self.assertEqual(before, after)
+            self.assertEqual(
+                list(changed), plan["authenticated_retained_paths"]
+            )
+            self.assertTrue(set(changed).issubset(plan["allowed_paths"]))
+            self.assertEqual("gpt-5.6-terra", plan["repair_profile"]["model"])
+            self.assertEqual("high", plan["repair_profile"]["reasoning"])
+            self.assertEqual(0, plan["repair_profile"]["child_sessions"])
+            self.assertEqual(2, plan["maximum_repair_attempts"])
+            self.assertIn(
+                "Factory position must contain one feature-state line",
+                plan["failed_validation_evidence"]["diagnostic"],
+            )
+            self.assertEqual(
+                4,
+                plan["failed_validation_evidence"][
+                    "commands_passed_before_failure"
+                ],
+            )
+            self.assertEqual(0, plan["model_sessions_that_would_launch"])
+
+    def test_retained_repair_rejects_unexpected_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                _,
+                project,
+                head,
+                _,
+                _,
+                failed_transaction,
+                repair,
+            ) = self._failed_recovery_fixture(Path(temporary))
+            (project.repository / "unexpected.txt").write_text(
+                "unexpected\n", encoding="utf-8"
+            )
+            with self.assertRaises(RecoveryError):
+                repair.inspect(
+                    feature_id=self.FEATURE,
+                    original_transaction_id=self.ORIGINAL_TRANSACTION,
+                    failed_recovery_transaction_id=failed_transaction,
+                    expected_branch=self.BRANCH,
+                    expected_head=head,
+                )
+
+    def _repair_launcher_factory(self, project, *, fix: bool, counter: list[object]):
+        class Launcher:
+            def launch(inner_self, request, on_session_started=None):
+                counter.append(request)
+                session_id = f"019f9707-712f-7ae3-824d-{len(counter):012d}"
+                if on_session_started is not None:
+                    on_session_started(session_id)
+                current = project.repository / "docs/CURRENT_STATUS.md"
+                if fix:
+                    current.write_text(
+                        current.read_text(encoding="utf-8").replace(
+                            "- Current feature: F097 — malformed retained evidence",
+                            "- Active feature: F097 — Imported Audio Transcription Workflow",
+                        ),
+                        encoding="utf-8",
+                    )
+                changed_paths = sorted(
+                    {
+                        *RepositoryInspector(
+                            project.repository
+                        ).tracked_changed_paths(),
+                        *RepositoryInspector(
+                            project.repository
+                        ).untracked_file_hashes(),
+                    }
+                )
+                envelope = {
+                    "schema_version": 1,
+                    "workflow_type": "feature_execution",
+                    "classification": "FEATURE_ACCEPTED",
+                    "project_id": project.project_id,
+                    "repository_identity": request.repository_identity,
+                    "transaction_id": request.transaction_id,
+                    "run_id": request.run_id,
+                    "session_id": session_id,
+                    "starting_branch": request.starting_branch,
+                    "starting_commit": request.starting_commit,
+                    "current_commit": request.starting_commit,
+                    "feature_id": request.feature,
+                    "changed_paths": changed_paths,
+                    "evidence": {
+                        "implementation_complete": True,
+                        "focused_validation": [],
+                        "controller_acceptance_pending": True,
+                    },
+                    "next_state": "feature_accepted",
+                }
+                plan = SessionPlan(
+                    argv=("codex",),
+                    cwd=project.repository,
+                    prompt="repair",
+                    prompt_sha256="0" * 64,
+                    sandbox="workspace-write",
+                    effective_model="gpt-5.6-terra",
+                    effective_reasoning="high",
+                    launched_model="gpt-5.6-terra",
+                    launched_reasoning="high",
+                    collaboration_tools_removed=True,
+                )
+                return SessionResult(
+                    action="feature_cycle",
+                    returncode=0,
+                    session_id=session_id,
+                    redacted_output="repair completed",
+                    plan=plan,
+                    redacted_stdout="repair completed",
+                    transaction_envelope=envelope,
+                    parsed_structured_result=envelope,
+                    structured_output_validation="valid",
+                    result_classification="FEATURE_ACCEPTED",
+                )
+
+        return lambda: Launcher()
+
+    def test_successful_retained_repair_validates_then_commits_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                configuration,
+                project,
+                head,
+                _,
+                gate,
+                failed_transaction,
+                _,
+            ) = self._failed_recovery_fixture(Path(temporary))
+            launches: list[object] = []
+            repair = RetainedFeatureValidationRepair(
+                controller_root=configuration.root,
+                configuration=configuration.conveyor,
+                project=project,
+                command_runner=self._passing_runner,
+                launcher_factory=self._repair_launcher_factory(
+                    project, fix=True, counter=launches
+                ),
+            )
+            plan = repair.inspect(
+                feature_id=self.FEATURE,
+                original_transaction_id=self.ORIGINAL_TRANSACTION,
+                failed_recovery_transaction_id=failed_transaction,
+                expected_branch=self.BRANCH,
+                expected_head=head,
+            )
+            result = repair.apply(plan)
+            inspector = RepositoryInspector(project.repository)
+            self.assertEqual("integration_pending", result["outcome"])
+            self.assertEqual(1, len(launches))
+            request = launches[0]
+            self.assertEqual("gpt-5.6-terra", request.planned_model)
+            self.assertEqual("high", request.planned_reasoning)
+            self.assertEqual(0, request.child_session_budget)
+            self.assertIn(
+                "Factory position must contain one feature-state line",
+                request.embedded_context,
+            )
+            self.assertEqual(1, result["model_sessions_launched"])
+            self.assertEqual(0, result["child_sessions_launched"])
+            self.assertEqual(head, inspector.rev_parse(f"{inspector.head}^"))
+            self.assertTrue(inspector.is_clean)
+            self.assertEqual(
+                result["accepted_feature_commit"], inspector.head
+            )
+            self.assertIsNone(result["projection"]["human_gate"])
+            self.assertEqual(
+                "integration_pending", result["projection"]["current_state"]
+            )
+            self.assertFalse(result["milestone_integration_performed"])
+            self.assertFalse(result["queue_reconciliation_performed"])
+            resolved = [
+                event
+                for event in repair.ledger.read()
+                if event["event_type"] == "HumanGateResolved"
+            ]
+            self.assertEqual(gate["gate_id"], resolved[-1]["payload"]["gate_id"])
+
+    def test_retained_repair_is_bounded_at_two_identical_failures(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                configuration,
+                project,
+                head,
+                _,
+                _,
+                failed_transaction,
+                _,
+            ) = self._failed_recovery_fixture(Path(temporary))
+            launches: list[object] = []
+            repair = RetainedFeatureValidationRepair(
+                controller_root=configuration.root,
+                configuration=configuration.conveyor,
+                project=project,
+                command_runner=self._passing_runner,
+                launcher_factory=self._repair_launcher_factory(
+                    project, fix=False, counter=launches
+                ),
+            )
+            before = RepositoryInspector(
+                project.repository
+            ).content_diff_fingerprint(
+                tuple(_changed_paths(RepositoryInspector(project.repository)))
+            )
+            human_gates_before = len(
+                [
+                    event
+                    for event in repair.ledger.read()
+                    if event["event_type"] == "HumanGateRaised"
+                ]
+            )
+            result = repair.apply(
+                repair.inspect(
+                    feature_id=self.FEATURE,
+                    original_transaction_id=self.ORIGINAL_TRANSACTION,
+                    failed_recovery_transaction_id=failed_transaction,
+                    expected_branch=self.BRANCH,
+                    expected_head=head,
+                )
+            )
+            self.assertEqual("repair_exhausted", result["outcome"])
+            self.assertEqual(2, len(launches))
+            self.assertTrue(result["attempts"][-1]["identical_to_previous"])
+            self.assertFalse(result["application_commit_created"])
+            self.assertEqual(head, RepositoryInspector(project.repository).head)
+            self.assertEqual(
+                before,
+                RepositoryInspector(
+                    project.repository
+                ).content_diff_fingerprint(
+                    tuple(_changed_paths(RepositoryInspector(project.repository)))
+                ),
+            )
+            self.assertTrue(result["recoverable_technical_failure"])
+            self.assertFalse(result["human_gate_created"])
+            self.assertEqual("review", result["projection"]["current_state"])
+            self.assertEqual(
+                human_gates_before,
+                len(
+                    [
+                        event
+                        for event in repair.ledger.read()
+                        if event["event_type"] == "HumanGateRaised"
+                    ]
+                ),
+            )
+
+    def test_cycle_engine_routes_failed_recovery_to_model_backed_repair(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                configuration,
+                project,
+                head,
+                _,
+                _,
+                failed_transaction,
+                _,
+            ) = self._failed_recovery_fixture(Path(temporary))
+            controller_cache = (
+                configuration.root
+                / "state/projects"
+                / f"{project.project_id}.json"
+            )
+            if controller_cache.exists():
+                controller_cache.unlink()
+            routed = CycleEngine(
+                configuration, SyntheticLauncher()
+            ).project_plan(project)
+            self.assertEqual(
+                "retained_feature_repair", routed["proposed_next_action"]
+            )
+            self.assertTrue(routed["recognized_technical_repair"])
+            evidence = routed["retained_feature_repair"]
+            self.assertTrue(evidence["evidence_authenticated"])
+            self.assertEqual(failed_transaction, evidence[
+                "failed_recovery_transaction_id"
+            ])
+            self.assertEqual(head, evidence["expected_head"])
+            self.assertEqual(
+                "gpt-5.6-terra", evidence["repair_profile"]["model"]
+            )
+            self.assertEqual("high", evidence["repair_profile"]["reasoning"])
+            self.assertEqual(0, evidence["repair_profile"]["child_sessions"])
 
     def _repair_fixture(self, root: Path):
         configuration, project, head, _, _ = self._fixture(root)

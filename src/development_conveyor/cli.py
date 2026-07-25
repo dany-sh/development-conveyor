@@ -22,6 +22,7 @@ from .consistency import ConsistencyChecker
 from .migration import LegacyStateMigrator
 from .integration_executor import execute_integration_plan
 from .feature_result_recovery import FeatureResultRecovery
+from .retained_feature_repair import RetainedFeatureValidationRepair
 from .accepted_commit_recovery import AcceptedCommitRecovery
 from .execution_profiles import PROFILE_NAMES
 from .feature_scoping import FeatureScoper
@@ -140,6 +141,24 @@ def _parser() -> argparse.ArgumentParser:
     recover_feature_result.add_argument("--expected-branch", required=True)
     recover_feature_result.add_argument("--expected-head", required=True)
     mode = recover_feature_result.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    repair_feature_result = subparsers.add_parser(
+        "repair-feature-result",
+        help=(
+            "repair and validate one exact retained feature result after a "
+            "failed deterministic recovery"
+        ),
+    )
+    repair_feature_result.add_argument("--project", required=True)
+    repair_feature_result.add_argument("--feature", required=True)
+    repair_feature_result.add_argument("--original-transaction-id", required=True)
+    repair_feature_result.add_argument(
+        "--failed-recovery-transaction-id", required=True
+    )
+    repair_feature_result.add_argument("--expected-branch", required=True)
+    repair_feature_result.add_argument("--expected-head", required=True)
+    mode = repair_feature_result.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
     recover_accepted = subparsers.add_parser(
@@ -517,6 +536,29 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
             **plan,
             "outcome": "recovery_ready",
             "application_repository_written": False,
+        }
+
+    if args.command == "repair-feature-result":
+        repair = RetainedFeatureValidationRepair(
+            controller_root=controller_root,
+            configuration=configuration.conveyor,
+            project=registry.get(args.project),
+        )
+        plan = repair.inspect(
+            feature_id=args.feature,
+            original_transaction_id=args.original_transaction_id,
+            failed_recovery_transaction_id=args.failed_recovery_transaction_id,
+            expected_branch=args.expected_branch,
+            expected_head=args.expected_head,
+        )
+        if args.apply:
+            return repair.apply(plan)
+        return {
+            **{key: value for key, value in plan.items() if key != "_original_plan"},
+            "outcome": "repair_ready",
+            "application_repository_written": False,
+            "model_sessions_that_would_launch": 0,
+            "child_sessions_that_would_launch": 0,
         }
 
     if args.command == "recover-accepted-commit":

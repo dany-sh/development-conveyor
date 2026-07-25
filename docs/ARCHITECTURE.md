@@ -68,6 +68,26 @@ Cache-binding recovery provenance is transient. The recovery result, append-only
 
 Terminal feature-result recovery is a distinct zero-model transaction. The protected F003 contract remains unchanged. Later retained feature results use a general fail-closed contract that proves the exact original event topology, report and terminal-marker identity, repository, run, transaction, session, branch, HEAD, clean starting snapshot, retained tracked/untracked fingerprints and paths, untracked file hashes, current gate and projection, queue and approved-decision state, absent lease/reservation/active transaction, and absence of any prior recovery or manual feature commit. The sole workflow alias is `feature_cycle` to `feature_execution`, and it is accepted only after every surrounding feature-execution identity matches; arbitrary workflow conflicts still fail. Focused host tests are derived from retained changed test paths and matching source-test pairs, followed by the configured build and diff gates. Apply revalidates under the controller reservation and a fresh typed `feature_writer` lease, runs every host validation before committing, preserves implementation content, transitions acceptance metadata, creates exactly one direct-child candidate/accepted feature commit, durably records supersession of the structured-output-invalid transaction, resolves only its bound gate, and refreshes the ledger projection plus controller and repository compatibility caches. Validation failure creates no commit, preserves the retained diff and original gate, records explicit failure evidence, and releases the lease. Recovery never launches a model, performs milestone integration, or begins queue reconciliation.
 
+Retained-feature validation repair is the explicit model-backed successor to
+that deterministic route, not an extension of deterministic validation.
+`repair-feature-result` authenticates both the original feature execution and
+the failed recovery transaction, including exact event topology, branch, HEAD,
+repository identity, retained paths, tracked/untracked fingerprints, absence of
+Git operations and conflicting ownership, and validation evidence tied to the
+failed transaction. A read-only plan exposes the exact diagnostic, allowed
+paths, `gpt-5.6-terra`/high zero-child profile, trusted-host command arrays,
+two-attempt bound, and expected terminal state without acquiring a lease or
+launching a model. Apply revalidates after acquiring the typed feature-writer
+lease, launches one fresh focused parent per attempt, rejects unexpected paths
+before validation, records pre/post fingerprints and redacted session reports,
+and runs host validation. It never resets, stashes, discards, switches branches,
+commits from the model, integrates, or reconciles the queue. A passing attempt
+uses the kernel to create one direct-child feature commit and append
+supersession/gate-resolution evidence before refreshing projection and both
+compatibility caches. Environment failures are separate from implementation
+failures; identical evidence is not repeated; exhaustion preserves the diff,
+creates no product gate or commit, and releases ownership.
+
 Feature identity in preparation, execution, acceptance, and retained-result
 recovery is phase-aware. The exact transaction `feature_id` and projection
 `current_feature` remain authoritative after selection is consumed, followed

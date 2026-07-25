@@ -17,6 +17,7 @@ from .consistency import ConsistencyChecker
 from .cycle_engine import CycleEngine
 from .cycle_cache_repair import CycleCacheRepair
 from .feature_result_recovery import FeatureResultRecovery
+from .retained_feature_repair import RetainedFeatureValidationRepair
 from .accepted_commit_recovery import AcceptedCommitRecovery
 from .errors import (
     AmbiguousLockError,
@@ -42,6 +43,8 @@ AUTOPILOT_EVENTS = frozenset({
     "FEATURE_BLOCKED",
     "RECOVERY_STARTED",
     "RECOVERY_APPLIED",
+    "FEATURE_REPAIR_STARTED",
+    "FEATURE_REPAIR_VALIDATION_STARTED",
     "STOP_REQUESTED",
     "AUTOPILOT_STOPPED",
     "AUTOPILOT_COMPLETED",
@@ -65,6 +68,8 @@ DETERMINISTIC_RECOVERY_ROUTES = (
     "authenticated_writer_lease_recovery",
     "trusted_host_validation",
 )
+
+MODEL_BACKED_REPAIR_ROUTES = ("retained_feature_repair",)
 
 DEFAULT_RETRY_BUDGETS = {
     "implementation_retries_per_feature": 3,
@@ -483,6 +488,7 @@ class Autopilot:
                 ),
             },
             "deterministic_recovery_routes": list(DETERMINISTIC_RECOVERY_ROUTES),
+            "model_backed_repair_routes": list(MODEL_BACKED_REPAIR_ROUTES),
             "first_cycle_estimate": plan.get("cost_aware_run_plan"),
             "dry_run_guarantees": {
                 "writes": 0,
@@ -546,6 +552,36 @@ class Autopilot:
                 )
             })
             return recovery.apply(inspected)
+        if action == "retained_feature_repair":
+            evidence = self._recovery_fields(
+                plan,
+                "retained_feature_repair",
+                (
+                    "feature_id",
+                    "original_transaction_id",
+                    "failed_recovery_transaction_id",
+                    "expected_branch",
+                    "expected_head",
+                ),
+            )
+            repair = RetainedFeatureValidationRepair(
+                controller_root=self.configuration.root,
+                configuration=self.configuration.conveyor,
+                project=self.project,
+            )
+            inspected = repair.inspect(
+                **{
+                    field: evidence[field]
+                    for field in (
+                        "feature_id",
+                        "original_transaction_id",
+                        "failed_recovery_transaction_id",
+                        "expected_branch",
+                        "expected_head",
+                    )
+                }
+            )
+            return repair.apply(inspected)
         if action == "accepted_commit_recovery":
             evidence = self._recovery_fields(
                 plan,
@@ -721,8 +757,14 @@ class Autopilot:
                 classification = consistency.get("classification")
                 action = self._action(plan)
                 recognized_recovery = bool(
-                    action == "feature_result_recovery"
-                    and plan.get("recognized_technical_recovery") is True
+                    (
+                        action == "feature_result_recovery"
+                        and plan.get("recognized_technical_recovery") is True
+                    )
+                    or (
+                        action == "retained_feature_repair"
+                        and plan.get("recognized_technical_repair") is True
+                    )
                 )
                 if (
                     classification
@@ -763,14 +805,34 @@ class Autopilot:
                     "kernel_recovery",
                     "verify_consistency",
                     "feature_result_recovery",
+                    "retained_feature_repair",
                     "accepted_commit_recovery",
                 }
                 if recovery:
                     self._emit(
                         "RECOVERY_STARTED",
                         plan=plan,
-                        diagnostic=f"invoking registered deterministic route {action}",
+                        diagnostic=(
+                            f"invoking registered {'model-backed repair' if action in MODEL_BACKED_REPAIR_ROUTES else 'deterministic recovery'} route {action}"
+                        ),
                     )
+                    if action == "retained_feature_repair":
+                        self._emit(
+                            "FEATURE_REPAIR_STARTED",
+                            plan=plan,
+                            diagnostic=(
+                                "launching bounded Terra/high retained-feature "
+                                "repair with zero children"
+                            ),
+                        )
+                        self._emit(
+                            "FEATURE_REPAIR_VALIDATION_STARTED",
+                            plan=plan,
+                            diagnostic=(
+                                "repair will run the authenticated trusted-host "
+                                "validation plan before any commit"
+                            ),
+                        )
                 elif action == "feature_cycle":
                     self._emit(
                         "FEATURE_SESSION_STARTED",
@@ -808,6 +870,7 @@ class Autopilot:
                     "deterministic_recovery_failed",
                     "validation_failed",
                     "VALIDATION_FAILED",
+                    "repair_exhausted",
                 }
                 if recovery and not recovery_failed:
                     self._emit(
@@ -819,6 +882,15 @@ class Autopilot:
                             or "deterministic recovery route completed"
                         ),
                     )
+                    if (
+                        action == "retained_feature_repair"
+                        and result.get("accepted_feature_commit")
+                    ):
+                        self._emit(
+                            "FEATURE_ACCEPTED",
+                            plan=plan,
+                            diagnostic="retained feature repaired and accepted",
+                        )
                 outcome = str(result.get("outcome") or result.get("classification") or "")
                 if outcome in {
                     "feature_accepted",
@@ -845,9 +917,18 @@ class Autopilot:
                 if result_terminal == "human_gate":
                     next_plan = self.engine.project_plan(self.project)
                     if (
-                        self._action(next_plan) == "feature_result_recovery"
-                        and next_plan.get("recognized_technical_recovery")
-                        is True
+                        (
+                            self._action(next_plan)
+                            == "feature_result_recovery"
+                            and next_plan.get("recognized_technical_recovery")
+                            is True
+                        )
+                        or (
+                            self._action(next_plan)
+                            == "retained_feature_repair"
+                            and next_plan.get("recognized_technical_repair")
+                            is True
+                        )
                     ):
                         continue
                     terminal = "AUTOPILOT_STOPPED"
@@ -867,6 +948,7 @@ class Autopilot:
                     "TERMINAL_PLANNING_FAILURE",
                     "VALIDATION_FAILED",
                     "deterministic_recovery_failed",
+                    "repair_exhausted",
                 }
                 if failed:
                     signature = self._failure_signature(action, plan, result)
@@ -877,6 +959,8 @@ class Autopilot:
                     attempts = self._retry_counts.get(counter_key, 0) + 1
                     self._retry_counts[counter_key] = attempts
                     exhausted = attempts > self.retry_budgets[budget_key]
+                    if result.get("outcome") == "repair_exhausted":
+                        exhausted = True
                     repeated = count > self.max_identical_failures
                     if exhausted or repeated:
                         self._emit(

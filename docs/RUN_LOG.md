@@ -1106,3 +1106,41 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `phase_aware_retained_feature_recovery`
 - Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-25T04:14:59+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `retained_feature_validation_repair`
+- Safety and autonomy contracts unchanged: `true`
+
+### Retained feature validation repair — 2026-07-24
+
+- Scope: controller-only implementation on
+  `codex/m1-12-retained-feature-validation-repair` from exact parent
+  `14c944a4d6d052983f979e6111a2214a9e09b19f`; one direct
+  `gpt-5.6-sol`/`medium` parent and zero child or named-agent sessions.
+- Evidence: failed recovery transaction
+  `33fbe92b-adab-4422-bcbc-23fcc7031e79` has no `ValidationFailed` event or
+  recovery report. Its authenticated control flow proves all four host
+  commands exited zero before controller acceptance-metadata parsing failed
+  with `docs/CURRENT_STATUS.md Factory position must contain one feature-state
+  line`. No per-command stdout or stderr report was persisted.
+- Implementation: `repair-feature-result` separates model-backed repair from
+  deterministic recovery, authenticates the exact retained result and failed
+  transaction, bounds Terra/high zero-child attempts at two, validates on the
+  trusted host before one possible feature commit, and stops at
+  `integration_pending`. Autopilot invokes the repair while budget remains and
+  continues to ordinary integration after acceptance.
+- Focused validation: 90 repair, retained-recovery, Autopilot, cache-binding,
+  projection, execution-plan identity, status, and consistency checks passed.
+  The two F097 transition-cache checks and one simulator consistency check
+  failed identically at the required starting commit and were not changed.
+- Mechanical validation: Python compilation, `validate-config`,
+  `repair-feature-result --help`, required-mode and conflicting-mode
+  rejection, queue JSON validation, profile-aware content audit, and `git diff
+  --check` passed. The complete controller suite and application tests were
+  not run.
