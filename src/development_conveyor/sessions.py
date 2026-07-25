@@ -1574,10 +1574,25 @@ class SessionLauncher:
             "feature_cycle", "milestone_integration", "milestone_gate",
         }:
             try:
+                retained_repair_alias = (
+                    request.action == "feature_cycle"
+                    and request.mode == "retained-feature-validation-repair"
+                    and request.child_session_budget == 0
+                    and bool(request.transaction_id)
+                    and bool(request.feature)
+                    and bool(request.repository_identity)
+                    and bool(request.starting_branch)
+                    and bool(request.starting_commit)
+                    and bool(request.allowed_paths)
+                )
                 corroborated_workflow = (
                     "queue_reconciliation"
                     if request.action in {"scope_features", "reconcile_product_plan"}
-                    else request.action
+                    else (
+                        "feature_execution"
+                        if retained_repair_alias
+                        else request.action
+                    )
                 )
                 envelope = extract_terminal_envelope(
                     result.stdout,
@@ -1608,6 +1623,42 @@ class SessionLauncher:
                         request,
                         observed_session_id=session_id,
                     )
+                    if retained_repair_alias:
+                        inspector = RepositoryInspector(request.project.repository)
+                        observed_paths = tuple(
+                            sorted(
+                                {
+                                    *inspector.tracked_changed_paths(),
+                                    *inspector.untracked_file_hashes(),
+                                }
+                            )
+                        )
+                        repair_checks = {
+                            "retained_repair_exact_route": (
+                                request.mode
+                                == "retained-feature-validation-repair"
+                            ),
+                            "retained_repair_zero_children": (
+                                request.child_session_budget == 0
+                            ),
+                            "retained_repair_authorized_paths": (
+                                set(observed_paths)
+                                <= set(request.allowed_paths)
+                            ),
+                            "retained_repair_no_git_operation": not any(
+                                inspector.git_operation_state().values()
+                            ),
+                        }
+                        failed_semantic_checks = tuple(
+                            [
+                                *failed_semantic_checks,
+                                *(
+                                    name
+                                    for name, passed in repair_checks.items()
+                                    if not passed
+                                ),
+                            ]
+                        )
                 if failed_semantic_checks:
                     validation = "semantic_invalid"
                     classification = "structured_output_invalid"

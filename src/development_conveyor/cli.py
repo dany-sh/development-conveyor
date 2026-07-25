@@ -22,7 +22,10 @@ from .consistency import ConsistencyChecker
 from .migration import LegacyStateMigrator
 from .integration_executor import execute_integration_plan
 from .feature_result_recovery import FeatureResultRecovery
-from .retained_feature_repair import RetainedFeatureValidationRepair
+from .retained_feature_repair import (
+    RetainedFeatureRepairRecovery,
+    RetainedFeatureValidationRepair,
+)
 from .accepted_commit_recovery import AcceptedCommitRecovery
 from .execution_profiles import PROFILE_NAMES
 from .feature_scoping import FeatureScoper
@@ -159,6 +162,21 @@ def _parser() -> argparse.ArgumentParser:
     repair_feature_result.add_argument("--expected-branch", required=True)
     repair_feature_result.add_argument("--expected-head", required=True)
     mode = repair_feature_result.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    recover_feature_repair = subparsers.add_parser(
+        "recover-feature-repair",
+        help=(
+            "deterministically validate and finalize one exact exhausted "
+            "retained-feature repair chain"
+        ),
+    )
+    recover_feature_repair.add_argument("--project", required=True)
+    recover_feature_repair.add_argument("--feature", required=True)
+    recover_feature_repair.add_argument(
+        "--repair-transaction-id", required=True
+    )
+    mode = recover_feature_repair.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
     recover_accepted = subparsers.add_parser(
@@ -557,6 +575,27 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
             **{key: value for key, value in plan.items() if key != "_original_plan"},
             "outcome": "repair_ready",
             "application_repository_written": False,
+            "model_sessions_that_would_launch": 0,
+            "child_sessions_that_would_launch": 0,
+        }
+
+    if args.command == "recover-feature-repair":
+        recovery = RetainedFeatureRepairRecovery(
+            controller_root=controller_root,
+            configuration=configuration.conveyor,
+            project=registry.get(args.project),
+        )
+        plan = recovery.inspect(
+            feature_id=args.feature,
+            repair_transaction_id=args.repair_transaction_id,
+        )
+        if args.apply:
+            return recovery.apply(plan)
+        return {
+            **plan,
+            "outcome": "recovery_ready",
+            "application_repository_written": False,
+            "application_commands_run": 0,
             "model_sessions_that_would_launch": 0,
             "child_sessions_that_would_launch": 0,
         }

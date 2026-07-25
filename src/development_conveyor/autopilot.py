@@ -17,7 +17,10 @@ from .consistency import ConsistencyChecker
 from .cycle_engine import CycleEngine
 from .cycle_cache_repair import CycleCacheRepair
 from .feature_result_recovery import FeatureResultRecovery
-from .retained_feature_repair import RetainedFeatureValidationRepair
+from .retained_feature_repair import (
+    RetainedFeatureRepairRecovery,
+    RetainedFeatureValidationRepair,
+)
 from .accepted_commit_recovery import AcceptedCommitRecovery
 from .errors import (
     AmbiguousLockError,
@@ -62,6 +65,7 @@ DETERMINISTIC_RECOVERY_ROUTES = (
     "cycle_cache_repair",
     "planning_finalization",
     "feature_result_recovery",
+    "retained_feature_repair_recovery",
     "accepted_commit_recovery",
     "integration_finalization_recovery",
     "kernel_recovery",
@@ -582,6 +586,22 @@ class Autopilot:
                 }
             )
             return repair.apply(inspected)
+        if action == "retained_feature_repair_recovery":
+            evidence = self._recovery_fields(
+                plan,
+                "retained_feature_repair_recovery",
+                ("feature_id", "repair_transaction_id"),
+            )
+            recovery = RetainedFeatureRepairRecovery(
+                controller_root=self.configuration.root,
+                configuration=self.configuration.conveyor,
+                project=self.project,
+            )
+            inspected = recovery.inspect(
+                feature_id=evidence["feature_id"],
+                repair_transaction_id=evidence["repair_transaction_id"],
+            )
+            return recovery.apply(inspected)
         if action == "accepted_commit_recovery":
             evidence = self._recovery_fields(
                 plan,
@@ -765,6 +785,10 @@ class Autopilot:
                         action == "retained_feature_repair"
                         and plan.get("recognized_technical_repair") is True
                     )
+                    or (
+                        action == "retained_feature_repair_recovery"
+                        and plan.get("recognized_technical_recovery") is True
+                    )
                 )
                 if (
                     classification
@@ -805,6 +829,7 @@ class Autopilot:
                     "kernel_recovery",
                     "verify_consistency",
                     "feature_result_recovery",
+                    "retained_feature_repair_recovery",
                     "retained_feature_repair",
                     "accepted_commit_recovery",
                 }
@@ -883,7 +908,11 @@ class Autopilot:
                         ),
                     )
                     if (
-                        action == "retained_feature_repair"
+                        action
+                        in {
+                            "retained_feature_repair",
+                            "retained_feature_repair_recovery",
+                        }
                         and result.get("accepted_feature_commit")
                     ):
                         self._emit(
@@ -919,7 +948,10 @@ class Autopilot:
                     if (
                         (
                             self._action(next_plan)
-                            == "feature_result_recovery"
+                            in {
+                                "feature_result_recovery",
+                                "retained_feature_repair_recovery",
+                            }
                             and next_plan.get("recognized_technical_recovery")
                             is True
                         )

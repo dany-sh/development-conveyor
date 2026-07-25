@@ -1246,7 +1246,7 @@ class FeatureResultRecovery:
         )
         return "".join(lines)
 
-    def _apply_general_acceptance_metadata(
+    def _render_general_acceptance_metadata(
         self,
         *,
         plan: dict[str, Any],
@@ -1254,10 +1254,6 @@ class FeatureResultRecovery:
         commands: list[dict[str, Any]],
     ) -> dict[str, bytes]:
         metadata_paths = tuple(plan["acceptance_metadata_paths"])
-        originals = {
-            relative: (self.project.repository / relative).read_bytes()
-            for relative in metadata_paths
-        }
         queue_path = self.project.repository / self.project.queue_location
         queue_document = json.loads(queue_path.read_text(encoding="utf-8"))
         matches = [
@@ -1363,6 +1359,25 @@ class FeatureResultRecovery:
             raise RecoveryError(
                 "recovery acceptance metadata differs from the authorized set"
             )
+        return rendered
+
+    def _apply_general_acceptance_metadata(
+        self,
+        *,
+        plan: dict[str, Any],
+        run_id: str,
+        commands: list[dict[str, Any]],
+    ) -> dict[str, bytes]:
+        metadata_paths = tuple(plan["acceptance_metadata_paths"])
+        originals = {
+            relative: (self.project.repository / relative).read_bytes()
+            for relative in metadata_paths
+        }
+        rendered = self._render_general_acceptance_metadata(
+            plan=plan,
+            run_id=run_id,
+            commands=commands,
+        )
         try:
             for relative in metadata_paths:
                 atomic_write_bytes(

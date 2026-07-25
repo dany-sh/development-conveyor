@@ -202,6 +202,38 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-013",
+      "title": "Exhausted retained-feature repair recovery",
+      "status": "review",
+      "priority": 13,
+      "milestone": "M1",
+      "dependencies": [
+        "M1-001",
+        "M1-010",
+        "M1-011",
+        "M1-012"
+      ],
+      "spec": "docs/features/M1-013-retained-repair-envelope-recovery.md",
+      "acceptance_criteria": [
+        "Retained-feature repair accepts only its exact route-scoped feature_cycle to feature_execution terminal alias",
+        "Exhausted repair recovery authenticates the complete two-session mutation chain and rejects chain or path drift",
+        "Dry-run launches zero models and commands while apply validates then creates one direct-child accepted feature commit",
+        "Original gate and failed transactions are superseded append-only and the recovered feature stops at integration_pending without integration"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-13-retained-repair-envelope-recovery",
+      "integration_base_commit": "36ab4a3ebb4dafce32887ef403923db015f6f467",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

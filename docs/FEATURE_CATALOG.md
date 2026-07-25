@@ -10,3 +10,4 @@
 | M1-010 | Durable continuous feature-delivery Autopilot | integration_pending | M1 | `docs/features/M1-010-continuous-autopilot.md` |
 | M1-011 | Phase-aware retained feature-result recovery | implementation prepared | M1 | `docs/features/M1-011-autopilot-retained-feature-recovery.md` |
 | M1-012 | Retained feature validation repair | implementation prepared | M1 | `docs/features/M1-012-retained-feature-validation-repair.md` |
+| M1-013 | Exhausted retained-feature repair recovery | review | M1 | `docs/features/M1-013-retained-repair-envelope-recovery.md` |

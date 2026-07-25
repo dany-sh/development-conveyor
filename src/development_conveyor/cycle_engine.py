@@ -1688,6 +1688,100 @@ class CycleEngine:
             "inspected_plan_fingerprint": inspected["plan_fingerprint"],
         }
 
+    def _retained_feature_repair_recovery_plan(
+        self, project: Project, projection: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Recognize an exhausted retained-feature repair mutation chain."""
+
+        transactions = projection.get("transactions")
+        latest = max(
+            (item for item in transactions or () if isinstance(item, dict)),
+            key=lambda item: int(item.get("last_sequence") or 0),
+            default={},
+        )
+        if (
+            latest.get("workflow_type") != WorkflowType.FEATURE_EXECUTION.value
+            or latest.get("state") != "terminal_failure"
+            or latest.get("terminal_classification")
+            != "FEATURE_VALIDATION_FAILED"
+        ):
+            return None
+        repair_transaction_id = latest.get("transaction_id")
+        feature_id = latest.get("feature_id")
+        if not (
+            isinstance(repair_transaction_id, str)
+            and repair_transaction_id
+            and isinstance(feature_id, str)
+            and feature_id
+            and projection.get("current_feature") == feature_id
+            and projection.get("active_transaction") is None
+        ):
+            return None
+        inspector = RepositoryInspector(project.repository)
+        ledger = EvidenceLedger(
+            self.configuration.owned_path(
+                f"state/projects/{project.project_id}/evidence-ledger.jsonl"
+            ),
+            project_id=project.project_id,
+            repository_identity=inspector.identity()["repository_id"],
+            repository_path_fingerprint=inspector.identity()[
+                "path_fingerprint"
+            ],
+        )
+        start = next(
+            (
+                event
+                for event in ledger.read()
+                if event.get("transaction_id") == repair_transaction_id
+                and event.get("event_type") == "TransactionStarted"
+            ),
+            None,
+        )
+        if (
+            ((start or {}).get("payload") or {}).get("recovery_mode")
+            != "retained_feature_validation_repair"
+        ):
+            return None
+        from .retained_feature_repair import RetainedFeatureRepairRecovery
+
+        arguments = {
+            "feature_id": feature_id,
+            "repair_transaction_id": repair_transaction_id,
+        }
+        try:
+            inspected = RetainedFeatureRepairRecovery(
+                controller_root=self.root,
+                configuration=self.configuration.conveyor,
+                project=project,
+            ).inspect(**arguments)
+        except RecoveryError as exc:
+            return {
+                **arguments,
+                "evidence_authenticated": False,
+                "preflight_error": redact_text(str(exc)),
+                "model_sessions_that_would_launch": 0,
+                "child_sessions_that_would_launch": 0,
+            }
+        return {
+            **arguments,
+            "evidence_authenticated": True,
+            "attempt_chain": inspected["attempt_chain"],
+            "workflow_normalization": inspected["workflow_normalization"],
+            "current_candidate_fingerprint": inspected[
+                "current_candidate_fingerprint"
+            ],
+            "deterministic_metadata_normalization": inspected[
+                "deterministic_metadata_normalization"
+            ],
+            "host_validation_commands": inspected[
+                "host_validation_commands"
+            ],
+            "expected_terminal_state": inspected["expected_terminal_state"],
+            "inspected_plan_fingerprint": inspected["plan_fingerprint"],
+            "model_sessions_that_would_launch": 0,
+            "child_sessions_that_would_launch": 0,
+        }
+
     def _project_plan(
         self, project: Project, *, allow_cache_binding_recovery: bool
     ) -> dict[str, Any]:
@@ -1745,6 +1839,45 @@ class CycleEngine:
                     ),
                 },
             })
+            retained_feature_repair_recovery = (
+                self._retained_feature_repair_recovery_plan(
+                    effective, authoritative
+                )
+            )
+            if retained_feature_repair_recovery is not None:
+                plan.update({
+                    "current_state": "technical_recovery_required",
+                    "workflow_type": "retained_feature_repair_recovery",
+                    "transaction_mode": "recovery",
+                    "proposed_next_action": "retained_feature_repair_recovery",
+                    "next_action": "retained_feature_repair_recovery",
+                    "selected_feature": retained_feature_repair_recovery[
+                        "feature_id"
+                    ],
+                    "human_gate": None,
+                    "human_decision_required": None,
+                    "technical_gate_to_supersede": authoritative.get(
+                        "human_gate"
+                    ),
+                    "recognized_technical_recovery": True,
+                    "retained_feature_repair_recovery": (
+                        retained_feature_repair_recovery
+                    ),
+                    "model_sessions_that_would_launch": [],
+                    "child_sessions_that_would_launch": [],
+                    "sessions_that_would_launch": [],
+                    "execution": {"models_planned": 0},
+                    "deterministic_only": True,
+                    "application_mutation_expected": True,
+                    "feature_factory_would_launch": False,
+                    "milestone_integrator_would_launch": False,
+                    "expected_stop_condition": (
+                        "Authenticate the exhausted repair chain, validate, "
+                        "and stop at integration_pending."
+                    ),
+                    "compatibility_preflight": None,
+                })
+                return plan
             retained_feature_repair = self._retained_feature_repair_plan(
                 effective, authoritative
             )

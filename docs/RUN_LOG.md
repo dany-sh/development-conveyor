@@ -1144,3 +1144,28 @@ This log records model configuration and deterministic deployment evidence. It n
   rejection, queue JSON validation, profile-aware content audit, and `git diff
   --check` passed. The complete controller suite and application tests were
   not run.
+
+### Model execution — 2026-07-25T05:13:05+00:00
+
+- Agent role: `controller-repair-writer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `exhausted_retained_repair_recovery`
+- Safety and autonomy contracts unchanged: `true`
+## Exhausted retained-feature repair recovery — 2026-07-24
+
+- Controller branch: `codex/m1-13-retained-repair-envelope-recovery`; direct parent: `36ab4a3ebb4dafce32887ef403923db015f6f467`.
+- Scope: controller-only recovery and workflow normalization. No application repository was written during development, no application command ran, and no model or child session was launched by a recovery dry-run.
+- Observed repair route: `retained-feature-validation-repair`; invoked launcher workflow: `feature_cycle`; emitted terminal workflow: `feature_execution`.
+- Both terminal results used schema version 1 and classification `FEATURE_ACCEPTED`; the controller classified both as `structured_output_invalid` solely because of the workflow comparison.
+- Attempt 1 content chain: `2d0661c18375f06c36e7d7974676b9f20405c02f2764772f05456db5bdd629c0` to `a26bce430b4433d57cde584f6fc0ceab71aca9f949fec5d842904225100f6e99`.
+- Attempt 2 content chain: `a26bce430b4433d57cde584f6fc0ceab71aca9f949fec5d842904225100f6e99` to `c14c5f6d67c61da1b34db2256e0f8b65f91c3740e3826d1e7965feb1c13250b5`.
+- Both exact sessions changed only `docs/CURRENT_STATUS.md` and `docs/RUN_LOG.md`; the tracked 12-path set remained unchanged, no untracked path appeared, and neither session reported an unauthorized path.
+- Original retained tracked fingerprint: `bdbb94f672b0a16185087a96d1bfe9cfddb47e3f219e005f2d509ffe43b37535`; exhausted/current tracked fingerprint: `8f97cd0f90cd818857e1217966a7a8edae7fe80ada68fbbcfa11465b135ca965`; empty-untracked fingerprint: `44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a`.
+- `recover-feature-repair` authenticates that full chain and previews or applies canonical normalization limited to `docs/CURRENT_STATUS.md`, `docs/FEATURE_CATALOG.md`, `docs/FEATURE_QUEUE.yaml`, `docs/RUN_LOG.md`, and the F068 specification.
+- Apply is zero-model, runs the two exact Swift test filters, `swift build`, and `git diff --check` before one possible direct-child commit, supersedes the original gate and both failed recovery transactions append-only, refreshes projection/caches, and stops at `integration_pending` without integration or queue reconciliation.
+- Focused validation passed for the new seven-case exhausted-repair suite plus retained-result, Autopilot, cache-binding, post-transition cache, projection, execution-plan, cycle-engine, and configuration modules. Python compilation, controller/application configuration validation, controller queue JSON parsing, CLI help, missing/conflicting mode rejection, and `git diff --check` passed. The complete controller suite and application tests were not run.
+- Live F068 dry-run: every authentication check passed; current candidate content fingerprint `c14c5f6d67c61da1b34db2256e0f8b65f91c3740e3826d1e7965feb1c13250b5`; current tracked fingerprint `8f97cd0f90cd818857e1217966a7a8edae7fe80ada68fbbcfa11465b135ca965`; five acceptance-metadata paths would change; four host commands would run only on apply; one commit could be created; expected terminal state `integration_pending`.
+- Live isolation: application branch, HEAD, binary diff fingerprint, 12-path status, empty untracked set, writer-lease absence, application cycle cache, controller ledger, projection, and compatibility cache matched byte-for-byte before and after dry-run. Zero models, children, application commands, transactions, reservations, commits, integrations, and queue reconciliations occurred.

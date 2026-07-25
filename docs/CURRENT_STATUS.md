@@ -4,6 +4,31 @@ Last updated: 2026-07-24
 
 ## Summary
 
+Deterministic exhausted retained-feature repair recovery is implemented on
+`codex/m1-13-retained-repair-envelope-recovery` from required starting commit
+`36ab4a3ebb4dafce32887ef403923db015f6f467`. The new
+`recover-feature-repair` route authenticates the original retained snapshot,
+both exact repair-session mutation links, the exhausted terminal snapshot, and
+the unchanged live branch, HEAD, 12-path set, empty untracked set, repository
+identity, and ownership state before exposing a write-free plan.
+
+The observed F068 sessions were invoked through `feature_cycle` in
+`retained-feature-validation-repair` mode and emitted canonical
+`feature_execution` schema-v1 `FEATURE_ACCEPTED` envelopes. That alias now
+normalizes only for this exact route after transaction, session, feature,
+repository, branch, HEAD, authorized paths, zero-child, and no-Git-operation
+checks. Stable duplicate signatures exclude volatile run, session,
+transaction, attempt, timestamp, and evolving candidate fingerprints.
+
+Dry-run launches zero models and children, runs no application command, and
+shows the complete chain, current candidate, five-path acceptance-metadata
+normalization, four required host commands, one possible direct-child commit,
+append-only gate/transaction supersession, and the expected
+`integration_pending` stop. The exact live F068 dry-run passed with candidate
+content fingerprint `c14c5f6d`, current tracked fingerprint `8f97cd0f`, all
+chain and ownership checks true, and byte-identical before/after application
+and controller runtime evidence. Apply remains unexecuted.
+
 Controller-managed retained-feature validation repair is implemented on
 `codex/m1-12-retained-feature-validation-repair` from required starting commit
 `14c944a4d6d052983f979e6111a2214a9e09b19f`. The new
@@ -265,12 +290,12 @@ M1 — Transactional workflow kernel
 
 ## Active controller repair
 
-Retained feature validation repair (`implementation prepared`)
+Exhausted retained-feature repair recovery (`review`)
 
 ## Next boundary
 
 Commit the controller repair. Run only the live F068
-`repair-feature-result --dry-run`; do not run repair apply, restart
+`recover-feature-repair --dry-run`; do not run recovery apply, restart
 Autopilot, run ordinary Conveyor resume, resolve the technical gate through
 the generic human-decision route, integrate F068, reconcile its queue, merge,
 push, tag, publish, deploy, or release.
