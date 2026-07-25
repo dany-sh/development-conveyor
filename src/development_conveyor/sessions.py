@@ -30,6 +30,7 @@ from .contracts import TERMINAL_ENVELOPE_MARKER, extract_terminal_envelope
 ACTION_PROMPTS = {
     "queue_reconciliation": "queue-reconciliation.md",
     "scope_features": "scope-features.md",
+    "reconcile_product_plan": "reconcile-product-plan.md",
     "feature_cycle": "feature-cycle.md",
     "milestone_integration": "milestone-integration.md",
     "milestone_gate": "milestone-gate.md",
@@ -148,7 +149,7 @@ class SessionRequest:
                 raise SessionError("direct feature session requires a parent session budget")
             if self.child_session_budget is None:
                 raise SessionError("direct feature session requires a child session budget")
-        if self.action == "scope_features":
+        if self.action in {"scope_features", "reconcile_product_plan"}:
             bindings = {
                 "transaction_id": self.transaction_id,
                 "repository_identity": self.repository_identity,
@@ -161,13 +162,13 @@ class SessionRequest:
             )
             if missing:
                 raise SessionError(
-                    "bounded scoping session lacks authoritative identity: "
+                    "planning-only session lacks authoritative identity: "
                     + ", ".join(missing)
                 )
             if self.parent_session_budget != 1:
-                raise SessionError("bounded scoping session requires exactly one parent")
+                raise SessionError("planning-only session requires exactly one parent")
             if self.child_session_budget != 0:
-                raise SessionError("bounded scoping session requires zero children")
+                raise SessionError("planning-only session requires zero children")
 
 
 @dataclass(frozen=True)
@@ -1301,7 +1302,9 @@ class SessionLauncher:
             terminal_example=terminal_example,
             focused_context=(
                 self._focused_feature_context(request)
-                if request.action in {"feature_cycle", "scope_features"}
+                if request.action in {
+                    "feature_cycle", "scope_features", "reconcile_product_plan"
+                }
                 else self._focused_integration_context(request)
                 if request.action == "milestone_integration"
                 else ""
@@ -1351,7 +1354,9 @@ class SessionLauncher:
         return prompt
 
     def plan(self, request: SessionRequest) -> SessionPlan:
-        if request.action in {"feature_cycle", "scope_features"} and request.child_session_budget not in {0, None}:
+        if request.action in {
+            "feature_cycle", "scope_features", "reconcile_product_plan"
+        } and request.child_session_budget not in {0, None}:
             raise SessionError(
                 "positive child-session budgets are not enforceable by this direct launcher"
             )
@@ -1565,14 +1570,19 @@ class SessionLauncher:
         validation = "not_required"
         classification = None
         if request.transaction_id and request.action in {
-            "queue_reconciliation", "scope_features", "feature_cycle",
-            "milestone_integration", "milestone_gate",
+            "queue_reconciliation", "scope_features", "reconcile_product_plan",
+            "feature_cycle", "milestone_integration", "milestone_gate",
         }:
             try:
+                corroborated_workflow = (
+                    "queue_reconciliation"
+                    if request.action in {"scope_features", "reconcile_product_plan"}
+                    else request.action
+                )
                 envelope = extract_terminal_envelope(
                     result.stdout,
                     corroborated={
-                        "workflow_type": request.action,
+                        "workflow_type": corroborated_workflow,
                         "project_id": request.project.project_id,
                         "repository_identity": str(request.repository_identity or ""),
                         "transaction_id": str(request.transaction_id or ""),

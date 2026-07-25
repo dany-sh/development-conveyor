@@ -100,6 +100,28 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-009",
+      "title": "Transactional approved product-plan reconciliation",
+      "status": "integration_pending",
+      "priority": 9,
+      "milestone": "M1",
+      "dependencies": ["M1-001"],
+      "spec": "docs/features/M1-009-product-plan-reconciliation.md",
+      "acceptance_criteria": [
+        "An immutable approved brief is identity-bound to one planning-only reconciliation transaction",
+        "Dry-run is write-free and apply permits one parent, zero children, one planning commit, and no feature execution",
+        "Stable IDs, F097 evidence, product semantics, dependency topology, planning surfaces, and path boundaries fail closed",
+        "Ledger, projection, controller compatibility state, and application cycle state finalize transactionally with exact zero-model recovery"
+      ],
+      "requires_human_decision": false,
+      "branch": "codex/m1-9-product-plan-reconciliation",
+      "integration_base_commit": "4a34f8eafa443c7c2ed3c51df02d9fdcbd42f497",
+      "accepted_commit": "SELF",
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

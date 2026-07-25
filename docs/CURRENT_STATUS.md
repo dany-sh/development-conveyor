@@ -4,6 +4,32 @@ Last updated: 2026-07-24
 
 ## Summary
 
+Transactional approved product-plan reconciliation is implemented on
+`codex/m1-9-product-plan-reconciliation` from required starting commit
+`4a34f8eafa443c7c2ed3c51df02d9fdcbd42f497`. The new
+`reconcile-product-plan` route pins a regular non-symlink brief, repository,
+branch, HEAD, queue, ledger, and projection; dry-run is write-free; apply uses
+one `gpt-5.6-sol`/medium planning parent and zero children under the existing
+planning lease, kernel, commit, ledger, projection, and cache finalizers.
+
+The route permits only the approved planning surface, preserves stable feature
+IDs and F097 accepted/integrated evidence, requires compatibility-only legacy
+simulation language, validates ownership, Practice, Live, question, transcript,
+review, scoring, and export semantics, and selects F068 as the sole ready
+feature. Exact retained diffs have a dedicated zero-model
+`recover-product-plan` path that revalidates the brief, file hashes, diff,
+semantics, and lease boundary before committing.
+
+The exact Interview Companion dry-run passed on `codex/m0-foundation` at
+`4eb4d69b5918644c6291cc466cac0678c1e9715a`, ledger sequence 508, with approved
+brief SHA-256 `e95f55f73b75754966a7e5533f0705f4c36733ca910328b0d042bcc0494c3cc4`.
+It reported the stable post-F097 topology, zero model and child launches, no
+application source or tests, no integration or feature execution, and the
+planned `queue_reconciliation` to `feature_ready` path with F068 selected.
+Before/after controller runtime and application `.factory` hashes were
+byte-identical, the application remained clean, and consistency remained
+`CONSISTENT`.
+
 Post-transition application cycle-cache finalization is implemented on
 `codex/m1-8-post-transition-cycle-cache-finalization` from required starting
 commit `470f0c3c7cd0894fc37009f053e916a704dd3926`. The repair keeps the M1-7
@@ -153,19 +179,20 @@ M1 — Transactional workflow kernel
 
 ## Active controller repair
 
-Post-transition cycle-cache finalization (`implementation prepared`)
+Transactional approved product-plan reconciliation (`implementation prepared`)
 
 ## Next boundary
 
-Commit the post-transition cache finalization repair. Do not run
-`repair-cycle-cache --apply`, ordinary Conveyor resume, queue reconciliation,
-another integration, merge, push, tag, publish, deploy, or release.
+Commit the product-plan reconciliation implementation. Run only the live
+`reconcile-product-plan --dry-run`; do not run its apply, ordinary Conveyor
+resume, existing queue reconciliation, feature execution, integration, merge,
+push, tag, publish, deploy, or release.
 
 ## Validation scope
 
-Validation is limited to M1-6/M1-7 feature-result regressions, canonical
-cycle-cache and deterministic integration tests, focused status/consistency
-regressions, the exact Interview Companion repair dry-run, `compileall`,
-configuration validation, command help/mode checks, and `git diff --check`.
-Application tests, the complete controller suite, live repair apply, ordinary
-resume, new feature work, and milestone integration are intentionally excluded.
+Validation is limited to the new product-plan suite, shared feature-scoping and
+planning-finalization regressions, Python compilation, configuration
+validation, command help/mode checks, the exact Interview Companion product-plan
+dry-run, and `git diff --check`. Application tests, the complete controller
+suite, live product-plan apply, ordinary resume, existing queue reconciliation,
+feature work, and milestone integration are intentionally excluded.

@@ -27,6 +27,7 @@ from .execution_profiles import PROFILE_NAMES
 from .feature_scoping import FeatureScoper
 from .feature_decisions import FeatureDecisionResolver
 from .cycle_cache_repair import CycleCacheRepair
+from .product_plan import ProductPlanReconciler
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
 
@@ -195,6 +196,30 @@ def _parser() -> argparse.ArgumentParser:
     mode = recover_scope.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
+    product_plan = subparsers.add_parser(
+        "reconcile-product-plan",
+        help=(
+            "transactionally reconcile application planning from an immutable "
+            "approved brief"
+        ),
+    )
+    product_plan.add_argument("--project", required=True)
+    product_plan.add_argument("--brief", required=True)
+    mode = product_plan.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    recover_product_plan = subparsers.add_parser(
+        "recover-product-plan",
+        help=(
+            "validate or finalize one exact retained approved product-plan diff "
+            "without launching a model"
+        ),
+    )
+    recover_product_plan.add_argument("--project", required=True)
+    recover_product_plan.add_argument("--run-id", required=True)
+    mode = recover_product_plan.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
     resolve_features = subparsers.add_parser(
         "resolve-feature-decisions",
         help="resolve exact queue-feature decisions and select one ready feature without launching a model",
@@ -249,6 +274,35 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
     controller_root = discover_root(root)
     configuration = load_configuration(controller_root)
     registry = ProjectRegistry(configuration)
+    if args.command == "reconcile-product-plan":
+        reconciler = ProductPlanReconciler(
+            configuration,
+            SessionLauncher(controller_root, configuration.conveyor),
+        )
+        request = reconciler.inspect(
+            project=registry.get(args.project),
+            brief_path=Path(args.brief),
+        )
+        return (
+            reconciler.apply(request)
+            if args.apply
+            else request.public_plan(dry_run=True)
+        )
+    if args.command == "recover-product-plan":
+        reconciler = ProductPlanReconciler(
+            configuration,
+            SessionLauncher(controller_root, configuration.conveyor),
+        )
+        plan = reconciler.inspect_recovery(
+            project=registry.get(args.project),
+            run_id=args.run_id,
+        )
+        if args.apply:
+            return reconciler.recover(plan)
+        return {
+            key: value for key, value in plan.items()
+            if key != "_request"
+        }
     if args.command == "repair-cycle-cache":
         repair = CycleCacheRepair(
             controller_root=controller_root,

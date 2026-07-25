@@ -954,3 +954,61 @@ This log records model configuration and deterministic deployment evidence. It n
 - Focused validation: 109 tests passed across post-transition repair, M1-6/M1-7 feature-result recovery, cache binding, deterministic integration handoff, two-ref recovery, projection/status/consistency, and post-integration finalization. The complete controller suite and all application tests were intentionally excluded.
 - Mechanical validation: `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, repair command help, required-mode rejection, and `git diff --check` passed.
 - Live dry-run: stale schema-valid application cache SHA-256 `9312a681abccea7a7b5e6bebfa93a46abda1dd279a1df5a0f89817aa96ed901c` was recognized at sequence 497; transaction `22d297a3-628a-4cc8-af18-bd9022929621` and terminal HEAD `4eb4d69b5918644c6291cc466cac0678c1e9715a` produced a schema-valid canonical replacement at sequence 508. The plan listed only `.factory/conveyor-state.json`, no ledger/projection or Git-tracked changes, no queue reconciliation, and zero model or child launches. Live apply was not run.
+
+### Model execution — 2026-07-25T01:03:01+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `product_plan_reconciliation`
+- Safety and autonomy contracts unchanged: `true`
+
+### Transactional approved product-plan reconciliation — 2026-07-24
+
+- Scope and execution: controller-only implementation on
+  `codex/m1-9-product-plan-reconciliation` from exact starting commit
+  `4a34f8eafa443c7c2ed3c51df02d9fdcbd42f497`; one direct parent
+  `gpt-5.6-sol`/`medium` session and zero child or named-agent sessions.
+- Dedicated routes: `reconcile-product-plan` requires a registered project,
+  immutable brief, and exact dry-run/apply mode. `recover-product-plan`
+  reauthenticates a retained planning diff and completes it with zero models.
+- Immutable authority: the transaction pins the brief's absolute path, regular
+  non-symlink file identity, link count, size, mtime, exact and normalized
+  SHA-256, plus application repository/path identity, branch, HEAD, queue,
+  ledger sequence/fingerprint, and projection fingerprint. Apply copies the
+  exact brief bytes into controller-owned report evidence.
+- Planning boundary: apply reuses the typed planning lease, launch reservation,
+  workflow kernel, one-commit finalizer, append-only ledger, projection, and
+  compatibility/application cache binders. The only model policy is one
+  `gpt-5.6-sol` parent with medium reasoning and mechanically enforced zero
+  children.
+- Semantic validation: every stable feature ID and F097's integrated evidence
+  remain fixed; dependencies are acyclic; F068 is the sole ready feature;
+  production, tests, fixtures, build files, and runtime state are forbidden;
+  Test Call has no future user-facing requirement; simulation is
+  compatibility-only; and ownership, Practice, Live, questions, transcripts,
+  review, scoring, and export agree across planning surfaces.
+- Failure and recovery: malformed or invalid terminal output records exact
+  retained paths, per-file SHA-256 values, and the binary diff fingerprint,
+  releases the lease, creates no partial commit, and exposes a dedicated
+  recovery that revalidates all retained evidence after lease acquisition.
+- Focused validation: the new 11-test product-plan suite, 10 shared
+  feature-scoping regressions, and 29 planning-finalization regressions passed.
+  Python compilation, configuration validation, command help, required and
+  conflicting mode rejection, and `git diff --check` passed. The complete
+  controller suite and all application tests were intentionally excluded.
+- Live boundary: only the final Interview Companion
+  `reconcile-product-plan --dry-run` is authorized. Apply, ordinary resume,
+  existing queue reconciliation, feature execution, integration, merge, push,
+  tag, publication, deployment, and release remain prohibited.
+- Exact live dry-run: Interview Companion remained clean on
+  `codex/m0-foundation` at
+  `4eb4d69b5918644c6291cc466cac0678c1e9715a`, ledger sequence 508, with brief
+  SHA-256 `e95f55f73b75754966a7e5533f0705f4c36733ca910328b0d042bcc0494c3cc4`.
+  The plan reported zero model/child launches, F097 integrated, F068 as the
+  intended sole ready feature, and no source, test, integration, or feature
+  execution. Controller runtime hash `1e23ccf2aa13…979cfb` and application
+  `.factory` hash `80e0dddad31b…e5585c` were identical before and after;
+  consistency remained `CONSISTENT`.

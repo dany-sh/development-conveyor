@@ -4,6 +4,12 @@
 
 M1 replaces phase-specific mutable-state authority with an append-only transaction ledger and rebuildable projections. M1-001 is the sole integrated feature; its post-integration repair/finalization commits remain distinct from the immutable accepted feature commit.
 
+M1-009 adds an approved product-plan reconciliation boundary before ordinary
+queue reconciliation. It reuses the transactional kernel for a brief-bound,
+planning-only one-parent/zero-child session, exact semantic validation, one
+planning commit, transactional cache finalization, and zero-model retained-diff
+recovery.
+
 ## Later milestones
 
 - M2 may simplify or remove compatibility caches after all registered repositories have migrated.

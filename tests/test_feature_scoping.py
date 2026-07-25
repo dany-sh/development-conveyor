@@ -223,6 +223,14 @@ class ScopeLauncher:
                 "target_features": [*TARGETS, "F097"],
                 "ready_feature": "F008",
                 "feature_execution_started": False,
+                "queue_validation": {
+                    "valid": True,
+                    "milestone_found": True,
+                    "feature_count": len(queue["features"]),
+                    "global_feature_count": len(queue["features"]),
+                    "global_milestone_count": len(queue["milestones"]),
+                    "warning_count": 0,
+                },
             },
             "next_state": "feature_ready",
         }
