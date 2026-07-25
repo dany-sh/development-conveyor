@@ -4,6 +4,23 @@ Last updated: 2026-07-24
 
 ## Summary
 
+Post-integration planning-result recovery is implemented on
+`codex/m1-14-post-integration-planning-recovery` from exact parent
+`1b7e8d979b8e287fd40ce8203f5ce9af017003ff`. The existing
+`recover-planning` route now recognizes only the authenticated F070 topology
+where the valid queue-reconciliation parent completed, both named nested roles
+failed at the app-server initialization boundary before inspection or
+mutation, F070 is the sole ready feature, and the exact retained eight-file
+diff remains unchanged.
+
+Dry-run uses the immutable parent report's recorded inventory and diff-check
+evidence instead of executing application commands. Apply remains
+unexecuted; it would revalidate under the planning writer lease, run the
+authoritative inventory validator and `git diff --check`, create at most one
+direct-child planning commit, refresh projection and caches, and stop at
+`feature_ready` with F070 selected. It cannot prepare or execute F070, repeat
+queue reconciliation, or integrate.
+
 Deterministic exhausted retained-feature repair recovery is implemented on
 `codex/m1-13-retained-repair-envelope-recovery` from required starting commit
 `36ab4a3ebb4dafce32887ef403923db015f6f467`. The new
@@ -290,22 +307,21 @@ M1 — Transactional workflow kernel
 
 ## Active controller repair
 
-Exhausted retained-feature repair recovery (`review`)
+Post-integration planning-result recovery (`review`)
 
 ## Next boundary
 
-Commit the controller repair. Run only the live F068
-`recover-feature-repair --dry-run`; do not run recovery apply, restart
+Commit the controller repair. Do not run `recover-planning --apply`, restart
 Autopilot, run ordinary Conveyor resume, resolve the technical gate through
 the generic human-decision route, integrate F068, reconcile its queue, merge,
 push, tag, publish, deploy, or release.
 
 ## Validation scope
 
-Validation is limited to focused retained-feature repair, feature-result recovery, Autopilot,
-cycle-cache, projection, status, and consistency regressions, Python
+Validation is limited to focused planning recovery, Autopilot, cycle-cache,
+projection, status, consistency, and execution-plan regressions, Python
 compilation, configuration validation, command help/mode checks, the exact
-Interview Companion F068 recovery dry-run, and `git diff --check`.
+Interview Companion F070 planning-recovery dry-run, and `git diff --check`.
 Application tests, the complete controller suite, Autopilot apply, ordinary
 resume, existing queue reconciliation, feature work, and milestone integration
 are intentionally excluded.

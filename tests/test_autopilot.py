@@ -215,6 +215,35 @@ class AutopilotTests(unittest.TestCase):
         self.assertIn("RECOVERY_STARTED", events)
         self.assertIn("RECOVERY_APPLIED", events)
 
+    def test_planning_recovery_continues_to_normal_feature_selection(self):
+        engine = FakeEngine(
+            [
+                plan("planning_finalization", feature=None, state="validation_failed"),
+                plan("feature_cycle", feature="F070", state="feature_ready"),
+                plan("paused", feature=None, state="paused"),
+            ],
+            [
+                {
+                    "outcome": "planning_recovery_committed",
+                    "selected_feature": "F070",
+                    "model_sessions_launched": [],
+                    "child_sessions_launched": [],
+                },
+                {"outcome": "feature_accepted"},
+            ],
+        )
+        result = self.make(engine).apply()
+        self.assertEqual(
+            engine.calls,
+            [("resume", False), ("one_feature", False)],
+        )
+        events = [item["event"] for item in result["events"]]
+        self.assertLess(
+            events.index("RECOVERY_STARTED"),
+            events.index("RECOVERY_APPLIED"),
+        )
+        self.assertIn("FEATURE_SELECTED", events)
+
     def test_structured_output_gate_recovers_then_continues_to_integration(self):
         technical = plan(
             "feature_result_recovery",

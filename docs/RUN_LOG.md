@@ -1169,3 +1169,55 @@ This log records model configuration and deterministic deployment evidence. It n
 - Focused validation passed for the new seven-case exhausted-repair suite plus retained-result, Autopilot, cache-binding, post-transition cache, projection, execution-plan, cycle-engine, and configuration modules. Python compilation, controller/application configuration validation, controller queue JSON parsing, CLI help, missing/conflicting mode rejection, and `git diff --check` passed. The complete controller suite and application tests were not run.
 - Live F068 dry-run: every authentication check passed; current candidate content fingerprint `c14c5f6d67c61da1b34db2256e0f8b65f91c3740e3826d1e7965feb1c13250b5`; current tracked fingerprint `8f97cd0f90cd818857e1217966a7a8edae7fe80ada68fbbcfa11465b135ca965`; five acceptance-metadata paths would change; four host commands would run only on apply; one commit could be created; expected terminal state `integration_pending`.
 - Live isolation: application branch, HEAD, binary diff fingerprint, 12-path status, empty untracked set, writer-lease absence, application cycle cache, controller ledger, projection, and compatibility cache matched byte-for-byte before and after dry-run. Zero models, children, application commands, transactions, reservations, commits, integrations, and queue reconciliations occurred.
+
+### Model execution — 2026-07-25T06:34:10+00:00
+
+- Agent role: `controller-repair-writer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `post_integration_planning_recovery`
+- Safety and autonomy contracts unchanged: `true`
+
+## Post-integration planning-result recovery — 2026-07-24
+
+- Controller branch:
+  `codex/m1-14-post-integration-planning-recovery`; exact direct parent:
+  `1b7e8d979b8e287fd40ce8203f5ce9af017003ff`.
+- Scope: one direct `gpt-5.6-sol`/`medium` parent, zero child or named-agent
+  sessions, controller-only source/tests/docs, and no application repository
+  mutation.
+- Root cause: the valid F070 `RECONCILED_READY_WORK` parent result was
+  preserved, but recovery rejected the terminal planning failure because the
+  newly-ready F070 entry lacked an explicit execution policy after both named
+  role launches failed before inspection.
+- Classification: the directly classified `product-architect` and
+  `feature-inventory-lead` attempts ended at the exact in-process app-server
+  initialization error with nonzero exit, no nested thread/model session, no
+  findings, and no role-attributable file mutation. This topology is
+  `preinspection_role_launch_unavailable` and does not invalidate the
+  authenticated parent. Post-inspection, mutating, missing, malformed, or
+  contradictory evidence remains invalid.
+- Focused validation: 107 planning recovery, Autopilot, cache-binding,
+  projection, status/consistency, and execution-plan tests passed. The two
+  excluded F097 post-transition cache tests copy the mutable current
+  Interview Companion ledger while asserting the old sequence-508 topology;
+  they fail independently with the current post-F068 ledger and were not
+  counted as passing.
+- Mechanical validation: Python compilation, `validate-config`, controller
+  feature-inventory validation, JSON queue parsing, `recover-planning --help`,
+  required-mode rejection, profile-aware changed-file content audit, and
+  `git diff --check` passed.
+- Live dry-run: run `899b8fbd-edce-4547-a8a9-7d9bdb82da7a`, transaction
+  `f4027903-dfd5-4f5d-83af-b7a15792cf07`, session
+  `019f97c7-629e-7de3-b01b-37eaee3e385e`, starting HEAD `15b9d984`,
+  retained fingerprint `fad6df7c`, and all eight planning paths
+  authenticated. F070 is the sole ready feature; recorded inventory and
+  diff-check evidence are valid; one commit maximum would be created only on
+  apply; zero models and children would launch.
+- Isolation: application status and HEAD, controller ledger and projection,
+  and both source reports were byte-identical before and after dry-run.
+  `recover-planning --apply`, ordinary resume, queue reconciliation, Autopilot
+  restart, application tests/builds, integration, merge, push, tag,
+  publication, deployment, and release were not run.

@@ -70,6 +70,16 @@ FULL_INVENTORY_PATHS = (
     "docs/adr",
 )
 
+POST_INTEGRATION_PLANNING_RECOVERY_FEATURE = "F070"
+PREINSPECTION_ROLE_LAUNCH_ERROR = (
+    "Error: failed to initialize in-process app-server client: "
+    "Operation not permitted (os error 1)"
+)
+PREINSPECTION_ROLE_LAUNCHES = {
+    "product-architect",
+    "feature-inventory-lead",
+}
+
 LEGACY_WARNING_SUMMARY_COMPATIBILITY = {
     "project_id": "interview-companion",
     "transaction_id": "13b0828a-68e7-48a6-8c74-af5d3d411d26",
@@ -455,6 +465,101 @@ def _inventory_validation(project: Project) -> dict[str, Any]:
     }
 
 
+def _recorded_post_integration_validation_evidence(
+    session_report: dict[str, Any],
+    project: Project,
+    queue: FeatureQueue,
+) -> dict[str, Any]:
+    """Authenticate already-recorded validators without executing application commands."""
+
+    inventory_event: dict[str, Any] | None = None
+    diff_event: dict[str, Any] | None = None
+    for line in str(session_report.get("redacted_stdout") or "").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        item = event.get("item") if isinstance(event, dict) else None
+        if (
+            event.get("type") != "item.completed"
+            or not isinstance(item, dict)
+            or item.get("type") != "command_execution"
+            or item.get("exit_code") != 0
+        ):
+            continue
+        command = str(item.get("command") or "")
+        if (
+            "feature-inventory/scripts/validate_inventory.py --root ." in command
+            and inventory_event is None
+        ):
+            inventory_event = item
+        if "git diff --check" in command and diff_event is None:
+            diff_event = item
+    if inventory_event is None or diff_event is None:
+        raise RecoveryError(
+            "post-integration planning recovery lacks recorded deterministic validation"
+        )
+    try:
+        raw_inventory = json.loads(
+            str(inventory_event.get("aggregated_output") or "")
+        )
+    except json.JSONDecodeError as exc:
+        raise RecoveryError(
+            "recorded post-integration inventory validation is malformed"
+        ) from exc
+    classified = _classify_inventory_validation(
+        exit_code=0,
+        value=raw_inventory,
+        blocking_warning_patterns=project.inventory_blocking_warning_patterns,
+    )
+    authoritative = authoritative_queue_validation_evidence(project, queue)
+    if (
+        classified.get("feature_count")
+        != authoritative["global_feature_count"]
+        or classified.get("milestone_count")
+        != authoritative["global_milestone_count"]
+    ):
+        raise RecoveryError(
+            "recorded post-integration inventory counts disagree with the authoritative queue"
+        )
+    inventory = {
+        **classified,
+        **authoritative,
+        "errors": classified["errors"],
+        "warnings": classified["warnings"],
+        "warning_count": len(classified["warnings"]),
+        "blocking_warnings": classified["blocking_warnings"],
+        "raw_inventory_counts": {
+            "feature_count": classified.get("feature_count"),
+            "milestone_count": classified.get("milestone_count"),
+            "global_feature_count": classified.get("global_feature_count"),
+            "global_milestone_count": classified.get("global_milestone_count"),
+        },
+        "validator": "recorded feature-inventory validator",
+        "evidence_source": "authenticated_parent_session_report",
+    }
+    return {
+        "inventory": inventory,
+        "commands": [
+            {
+                "command": [
+                    "python3",
+                    "~/.agents/skills/feature-inventory/scripts/validate_inventory.py",
+                    "--root",
+                    ".",
+                ],
+                "exit_code": 0,
+                "source": "authenticated_parent_session_report",
+            },
+            {
+                "command": ["git", "diff", "--check"],
+                "exit_code": 0,
+                "source": "authenticated_parent_session_report",
+            },
+        ],
+    }
+
+
 def _diff_check(project: Project) -> dict[str, Any]:
     result = subprocess.run(
         ["git", "diff", "--check"],
@@ -577,6 +682,144 @@ def _recoverable_planning_validation_failure(transaction: dict[str, Any]) -> dic
     raise RecoveryError(
         "blocked planning transaction is not a recoverable deterministic validation failure"
     )
+
+
+def _preinspection_role_launch_failure_evidence(
+    session_report: dict[str, Any],
+) -> dict[str, Any]:
+    """Authenticate nested role launches that never crossed process initialization."""
+
+    events: list[dict[str, Any]] = []
+    for line in str(session_report.get("redacted_stdout") or "").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+
+    started: dict[str, tuple[int, str]] = {}
+    failures: list[dict[str, Any]] = []
+    for index, event in enumerate(events):
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "command_execution":
+            continue
+        item_id = item.get("id")
+        command = str(item.get("command") or "")
+        shell_payload = command.partition("-lc")[2].lstrip().lstrip("\"'")
+        first_command = shell_payload.split(";", 1)[0].strip()
+        roles = sorted(
+            role
+            for role in PREINSPECTION_ROLE_LAUNCHES
+            if role in command
+        )
+        is_direct_codex_exec = (
+            first_command.startswith("codex exec ")
+            or (
+                first_command.startswith("CODEX_HOME=")
+                and " codex exec " in first_command
+            )
+        )
+        is_nested_launch = is_direct_codex_exec and len(roles) == 1
+        if not is_nested_launch or not isinstance(item_id, str):
+            continue
+        if event.get("type") == "item.started":
+            started[item_id] = (index, roles[0])
+            continue
+        if event.get("type") != "item.completed" or item_id not in started:
+            continue
+        start_index, role = started.pop(item_id)
+        output = str(item.get("aggregated_output") or "")
+        output_lines = [line.strip() for line in output.splitlines() if line.strip()]
+        allowed_output = all(
+            line == PREINSPECTION_ROLE_LAUNCH_ERROR
+            or line == "Reading prompt from stdin..."
+            or line == "Reading additional input from stdin..."
+            or (
+                line.startswith(
+                    "WARNING: proceeding, even though we could not create PATH aliases:"
+                )
+                and line.endswith("Operation not permitted (os error 1)")
+            )
+            for line in output_lines
+        )
+        intervening = events[start_index + 1:index]
+        role_mutation = any(
+            isinstance(candidate.get("item"), dict)
+            and (candidate["item"].get("type") == "file_change")
+            for candidate in intervening
+        )
+        nested_session_started = any(
+            '"type":"thread.started"' in line.replace(" ", "")
+            or '"type": "thread.started"' in line
+            for line in output_lines
+        )
+        checks = {
+            "nonzero_exit": (
+                isinstance(item.get("exit_code"), int)
+                and item.get("exit_code") != 0
+            ),
+            "initialization_error": (
+                PREINSPECTION_ROLE_LAUNCH_ERROR in output_lines
+            ),
+            "preinspection_output_only": bool(output_lines) and allowed_output,
+            "no_model_session_started": not nested_session_started,
+            "no_findings_attributed": allowed_output,
+            "no_role_mutation": not role_mutation,
+        }
+        failures.append({
+            "role": role,
+            "command_event_id": item_id,
+            "classification": "preinspection_role_launch_unavailable",
+            "checks": checks,
+        })
+
+    roles = sorted({failure["role"] for failure in failures})
+    checks = {
+        "required_roles_attempted": roles == sorted(PREINSPECTION_ROLE_LAUNCHES),
+        "all_attempts_preinspection": bool(failures)
+        and all(all(failure["checks"].values()) for failure in failures),
+        "no_incomplete_role_launch": not started,
+    }
+    if not all(checks.values()):
+        raise RecoveryError(
+            "nested role launch failure evidence is not pre-inspection and non-mutating"
+        )
+    return {
+        "classification": "preinspection_role_launch_unavailable",
+        "roles": roles,
+        "attempts": failures,
+        "checks": checks,
+        "invalidates_parent_result": False,
+    }
+
+
+def _recoverable_post_integration_role_failure(
+    transaction: dict[str, Any],
+    session_report: dict[str, Any],
+) -> dict[str, Any] | None:
+    feature_id = POST_INTEGRATION_PLANNING_RECOVERY_FEATURE
+    if transaction.get("error") != (
+        f"newly readied feature {feature_id} lacks required execution_policy"
+    ):
+        return None
+    if (
+        transaction.get("failure_classification") != "PLANNING_VALIDATION_FAILED"
+        or transaction.get("result_classification") != "RECONCILED_READY_WORK"
+    ):
+        raise RecoveryError(
+            "post-integration planning failure classification is contradictory"
+        )
+    role_failures = _preinspection_role_launch_failure_evidence(session_report)
+    return {
+        "classification": "preinspection_role_launch_unavailable",
+        "exit_code": 0,
+        "errors": [],
+        "warnings": [],
+        "historical_disagreements": [],
+        "missing_execution_policy_feature": feature_id,
+        "role_launch_failures": role_failures,
+    }
 
 
 def normalize_queue_validation_evidence(
@@ -956,16 +1199,23 @@ def inspect_planning_finalization_recovery(
     planning_paths = sorted(planning_transaction.get("changed_paths") or [])
     envelope_paths = sorted(envelope.get("changed_paths") or [])
     mutation_fingerprint = inspector.planning_diff_fingerprint()
+    post_integration_role_failure = _recoverable_post_integration_role_failure(
+        planning_transaction,
+        session_report,
+    )
     recoverable_failure = (
-        {
-            "classification": "compatible_terminal_envelope_recovered",
-            "exit_code": 0,
-            "errors": [],
-            "warnings": [],
-            "historical_disagreements": [],
-        }
-        if compatible_terminal_recovered
-        else _recoverable_planning_validation_failure(planning_transaction)
+        post_integration_role_failure
+        or (
+            {
+                "classification": "compatible_terminal_envelope_recovered",
+                "exit_code": 0,
+                "errors": [],
+                "warnings": [],
+                "historical_disagreements": [],
+            }
+            if compatible_terminal_recovered
+            else _recoverable_planning_validation_failure(planning_transaction)
+        )
     )
     policy = start_payload.get("allowed_mutation_policy") or {}
     allowed_paths = set(policy.get("allowed_paths") or [])
@@ -1022,6 +1272,11 @@ def inspect_planning_finalization_recovery(
         "head": inspector.head == starting_head,
         "terminal_branch": terminal_snapshot.get("branch") == starting_branch,
         "terminal_head": terminal_snapshot.get("head") == starting_head,
+        "no_git_operation": not any(inspector.git_operation_state().values()),
+        "terminal_no_git_operation": not any(
+            bool(value)
+            for value in (terminal_snapshot.get("git_operations") or {}).values()
+        ),
         "changed_paths": current_paths == recorded_paths == planning_paths == envelope_paths,
         "planning_paths_only": bool(current_paths) and all(allowed_planning_path(path) for path in current_paths),
         "original_policy_authorizes_paths": policy_authorized,
@@ -1062,6 +1317,22 @@ def inspect_planning_finalization_recovery(
             and envelope.get("starting_commit") == starting_head
             and envelope.get("current_commit") == starting_head
         ),
+        "post_integration_parent_identity": (
+            post_integration_role_failure is None
+            or (
+                session_report.get("exit_classification")
+                == "structured_result_successfully_returned"
+                and envelope.get("workflow_type") == "queue_reconciliation"
+                and envelope.get("project_id") == project.project_id
+                and envelope.get("repository_identity")
+                == inspector.identity()["repository_id"]
+                and envelope.get("transaction_id") == original_transaction_id
+                and envelope.get("run_id") == run_id
+                and envelope.get("session_id") == session_id
+                and envelope.get("classification") == "RECONCILED_READY_WORK"
+                and envelope.get("next_state") == "feature_ready"
+            )
+        ),
         "compatible_terminal_normalization": (
             not isinstance(normalization, dict) or compatible_terminal_recovered
         ),
@@ -1075,13 +1346,40 @@ def inspect_planning_finalization_recovery(
         )
 
     queue = FeatureQueue.from_location(project.repository, project.queue_location)
-    newly_policy_bound = _require_new_ready_execution_policies(
-        project, inspector, starting_head, queue
-    )
     selection = _selected_feature_evidence(project, queue, report_evidence["classification"])
     selected = selection.get("selected_feature")
+    missing_policy_feature = recoverable_failure.get(
+        "missing_execution_policy_feature"
+    )
+    if missing_policy_feature is not None and (
+        selected != missing_policy_feature
+        or selection["ready_features"] != [missing_policy_feature]
+    ):
+        raise RecoveryError(
+            "pre-inspection role failure recovery does not select the exact ready feature"
+        )
+    newly_policy_bound = _require_new_ready_execution_policies(
+        project,
+        inspector,
+        starting_head,
+        queue,
+        recoverable_missing_policy_feature=missing_policy_feature,
+    )
     result_queue = (report_evidence.get("structured_result") or {}).get("queue_validation") or {}
-    inventory = _inventory_validation(project)
+    recorded_validations = (
+        _recorded_post_integration_validation_evidence(
+            session_report,
+            project,
+            queue,
+        )
+        if post_integration_role_failure is not None
+        else None
+    )
+    inventory = (
+        recorded_validations["inventory"]
+        if recorded_validations is not None
+        else _inventory_validation(project)
+    )
     canonical_result_queue = normalize_legacy_planning_warning_evidence(
         project=project,
         original_transaction_id=original_transaction_id,
@@ -1120,6 +1418,10 @@ def inspect_planning_finalization_recovery(
                 compatible_terminal_recovered
                 and "selected_feature" not in result_queue
             )
+            and not (
+                post_integration_role_failure is not None
+                and "selected_feature" not in result_queue
+            )
         )
         or list(reported_ready or []) != selection["ready_features"]
         or (
@@ -1131,6 +1433,10 @@ def inspect_planning_finalization_recovery(
             )
             and not (
                 compatible_terminal_recovered
+                and "dependencies_complete" not in result_queue
+            )
+            and not (
+                post_integration_role_failure is not None
                 and "dependencies_complete" not in result_queue
             )
         )
@@ -1196,6 +1502,11 @@ def inspect_planning_finalization_recovery(
         "result_classification": report_evidence["terminal_classification"],
         "selected_feature": selected,
         "ready_features": selection["ready_features"],
+        "expected_final_state": (
+            "feature_ready" if selected is not None else "paused"
+        ),
+        "expected_final_current_feature": None,
+        "expected_final_selected_next_feature": selected,
         "dependencies": selection["dependencies"],
         "dependency_evidence": dependency_evidence,
         "newly_readied_execution_policies": newly_policy_bound,
@@ -1205,6 +1516,16 @@ def inspect_planning_finalization_recovery(
             if item.get("status") in {"done", "integrated"} and isinstance(item.get("id"), str)
         ),
         "inventory_validation": inventory,
+        "recorded_validation_evidence": recorded_validations,
+        "deterministic_validators_that_would_run": [
+            [
+                "python3",
+                "~/.agents/skills/feature-inventory/scripts/validate_inventory.py",
+                "--root",
+                ".",
+            ],
+            ["git", "diff", "--check"],
+        ],
         "queue_validation_evidence": queue_comparison,
         "recovered_failure_classification": recoverable_failure["classification"],
         "historical_count_disagreements": recoverable_failure[
@@ -1217,6 +1538,10 @@ def inspect_planning_finalization_recovery(
             if isinstance(normalization, dict)
             else []
         ),
+        "nested_role_launch_failures": recoverable_failure.get(
+            "role_launch_failures"
+        ),
+        "recoverable_missing_execution_policy_feature": missing_policy_feature,
         "warnings_scope": canonical_result_queue.get("warnings_scope"),
         "nonfatal_warnings": nonfatal_warnings,
         "checks": checks,
@@ -1229,6 +1554,7 @@ def inspect_planning_finalization_recovery(
         "feature_factory_would_launch": False,
         "milestone_integrator_would_launch": False,
         "planning_content_regeneration_would_run": False,
+        "planning_commits_that_would_be_created": 1,
     }
 
 
@@ -1267,6 +1593,8 @@ def _require_new_ready_execution_policies(
     inspector: RepositoryInspector,
     starting_head: str,
     queue: FeatureQueue,
+    *,
+    recoverable_missing_policy_feature: str | None = None,
 ) -> list[str]:
     """Require explicit policy only for features newly promoted to ready.
 
@@ -1284,6 +1612,8 @@ def _require_new_ready_execution_policies(
         if feature.get("status") != "ready" or (before or {}).get("status") == "ready":
             continue
         if "execution_policy" not in feature:
+            if feature.get("id") == recoverable_missing_policy_feature:
+                continue
             raise RecoveryError(
                 f"newly readied feature {feature['id']} lacks required execution_policy"
             )
@@ -1306,6 +1636,7 @@ def validate_planning_changes(
     expected_changed_paths: list[str] | None = None,
     expected_session_id: str | None = None,
     expected_transaction_id: str | None = None,
+    recoverable_missing_execution_policy_feature: str | None = None,
 ) -> dict[str, Any]:
     report_evidence = validate_reconciliation_report(
         report,
@@ -1342,7 +1673,11 @@ def validate_planning_changes(
         raise RecoveryError("planning diff fingerprint differs from the recovery expectation")
     queue = FeatureQueue.from_location(project.repository, project.queue_location)
     newly_policy_bound = _require_new_ready_execution_policies(
-        project, inspector, starting_head, queue
+        project,
+        inspector,
+        starting_head,
+        queue,
+        recoverable_missing_policy_feature=recoverable_missing_execution_policy_feature,
     )
     classification = report_evidence["classification"]
     selection = _selected_feature_evidence(project, queue, classification)

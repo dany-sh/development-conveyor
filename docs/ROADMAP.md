@@ -4,6 +4,12 @@
 
 M1 replaces phase-specific mutable-state authority with an append-only transaction ledger and rebuildable projections. M1-001 is the sole integrated feature; its post-integration repair/finalization commits remain distinct from the immutable accepted feature commit.
 
+M1-014 adds a fail-closed recovery boundary for a valid post-integration
+planning parent whose named nested roles were unavailable before inspection.
+It authenticates recorded validation and the retained planning diff in
+dry-run, reruns validators only on apply, and stops at the recovered
+feature-ready selection.
+
 M1-009 adds an approved product-plan reconciliation boundary before ordinary
 queue reconciliation. It reuses the transactional kernel for a brief-bound,
 planning-only one-parent/zero-child session, exact semantic validation, one

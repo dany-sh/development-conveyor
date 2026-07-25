@@ -1504,6 +1504,8 @@ class CycleEngine:
             if isinstance(transaction, dict)
             else None
         )
+        if not isinstance(snapshot, dict):
+            snapshot = {}
         sessions = (
             transaction.get("session_ids")
             if isinstance(transaction, dict)
@@ -6621,6 +6623,13 @@ class CycleEngine:
         ):
             raise RecoveryError("planning recovery selected-feature evidence is malformed")
         next_state = "feature_ready" if selected_feature else "paused"
+        defer_current_feature_until_preparation = (
+            selected_feature is not None
+            and expected_plan.get(
+                "recoverable_missing_execution_policy_feature"
+            )
+            == selected_feature
+        )
         expected_paths = tuple(expected_plan["existing_planning_changes"]["paths"])
         existing_commit = expected_plan.get("existing_commit")
         committed_recovery = isinstance(existing_commit, str)
@@ -6650,7 +6659,11 @@ class CycleEngine:
             transaction = kernel.begin(
                 workflow_type=WorkflowType.RECOVERY,
                 milestone=project.active_milestone,
-                feature_id=selected_feature,
+                feature_id=(
+                    None
+                    if defer_current_feature_until_preparation
+                    else selected_feature
+                ),
                 run_id=recovery_run_id,
                 policy=adapter.policy,
                 start_evidence={
@@ -6801,6 +6814,9 @@ class CycleEngine:
                     starting_head=expected_plan["starting_commit"], expected_diff_fingerprint=expected_plan["mutation_fingerprint"],
                     expected_changed_paths=list(expected_paths), expected_session_id=expected_plan["original_session_id"],
                     expected_transaction_id=expected_plan["original_transaction_id"],
+                    recoverable_missing_execution_policy_feature=expected_plan.get(
+                        "recoverable_missing_execution_policy_feature"
+                    ),
                 )
                 inventory = validation.get("inventory_validation") or {}
                 validation_warnings = list(inventory.get("nonfatal_warnings") or [])
@@ -6908,7 +6924,11 @@ class CycleEngine:
                 next_state,
                 run_id=recovery_run_id,
                 checkpoint="planning_finalization_recovered",
-                feature=selected_feature,
+                feature=(
+                    None
+                    if defer_current_feature_until_preparation
+                    else selected_feature
+                ),
                 state_evidence={"planning_transaction": committed},
                 event_branch=inspector.current_branch,
                 event_commit=commit,
@@ -6925,7 +6945,11 @@ class CycleEngine:
                     FeatureQueue.from_location(project.repository, project.queue_location).feature(selected_feature),
                 )
             cycle.update({
-                "current_feature": selected_feature,
+                "current_feature": (
+                    None
+                    if defer_current_feature_until_preparation
+                    else selected_feature
+                ),
                 "selected_feature": selected_feature,
                 "current_phase": next_state,
                 "conveyor_run_id": recovery_run_id,

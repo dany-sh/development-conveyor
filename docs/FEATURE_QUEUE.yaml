@@ -152,7 +152,7 @@
     {
       "id": "M1-011",
       "title": "Phase-aware retained feature-result recovery",
-      "status": "implementation prepared",
+      "status": "review",
       "priority": 11,
       "milestone": "M1",
       "dependencies": ["M1-001", "M1-010"],
@@ -179,7 +179,7 @@
     {
       "id": "M1-012",
       "title": "Retained feature validation repair",
-      "status": "implementation prepared",
+      "status": "review",
       "priority": 12,
       "milestone": "M1",
       "dependencies": ["M1-001", "M1-010", "M1-011"],
@@ -230,6 +230,37 @@
       },
       "branch": "codex/m1-13-retained-repair-envelope-recovery",
       "integration_base_commit": "36ab4a3ebb4dafce32887ef403923db015f6f467",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
+    },
+    {
+      "id": "M1-014",
+      "title": "Post-integration planning-result recovery",
+      "status": "review",
+      "priority": 14,
+      "milestone": "M1",
+      "dependencies": [
+        "M1-001",
+        "M1-010",
+        "M1-013"
+      ],
+      "spec": "docs/features/M1-014-post-integration-planning-recovery.md",
+      "acceptance_criteria": [
+        "Valid authenticated queue reconciliation survives only exact pre-inspection non-mutating nested-role launch failures",
+        "Dry-run authenticates recorded validation and the exact retained eight-file diff without commands, writes, models, children, leases, or transactions",
+        "Apply reruns deterministic validators and creates at most one direct-child planning commit before projecting feature_ready with F070 selected",
+        "Autopilot attempts deterministic planning recovery before another planning model and then continues through normal F070 selection"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-14-post-integration-planning-recovery",
+      "integration_base_commit": "1b7e8d979b8e287fd40ce8203f5ce9af017003ff",
       "accepted_commit": null,
       "integrated_commit": null,
       "integration_status": "pending",
