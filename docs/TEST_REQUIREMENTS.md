@@ -83,4 +83,16 @@ The common subprocess authority exposes a scoped, privacy-safe attempted-command
 
 Additional adversarial invariants are covered by `MigrationAndSimulatorTests.test_recovered_lease_archive_rejects_symlink_and_hardlink_targets`, `test_orphaned_prestart_lease_blocks_live_owner_and_recovers_dead_owner`, `test_terminal_completion_evidence_cannot_override_canonical_fields`, and `test_bridge_terminal_evidence_spoof_is_terminalized_as_failure`.
 
+## M1-010 continuous Autopilot
+
+`tests/test_autopilot.py` uses disposable synthetic repositories and fake
+lifecycle routes to cover zero-write dry-run, exact first routing, normal
+feature-to-integration continuation, canonical aliases, registered recovery,
+durable stops before model/integration/next work, duplicate rejection,
+authenticated crash ownership recovery, bounded identical failures, human
+gates, ownership release on success/stop/failure, concise structured events,
+zero children, status reporting, and absence of prohibited publish routes.
+Existing focused cycle, recovery, integration-finalization, execution-plan,
+and consistency tests remain authoritative for the reused route internals.
+
 The final blocker closure also directly covers exact accepted-commit recovery after integration finalization (`test_integration_after_commit_recovery_preserves_exact_accepted_commit`), canonical ledger/cache routing after real fixture migration (`test_post_migration_real_fixtures_route_only_fresh_kernel_actions`), non-repeating legacy terminal replay (`LedgerTests.test_legacy_terminal_replay_does_not_repeat_mutation`), and projection-aware resume compatibility (`CycleEngineTests.test_complete_one_feature_cycle_integrates_exactly_one_commit`, `SyntheticIntegrationTests.test_resume_after_verified_integration_does_not_repeat_feature`).

@@ -122,6 +122,32 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-010",
+      "title": "Durable continuous feature-delivery Autopilot",
+      "status": "integration_pending",
+      "priority": 10,
+      "milestone": "M1",
+      "dependencies": ["M1-001", "M1-002"],
+      "spec": "docs/features/M1-010-continuous-autopilot.md",
+      "acceptance_criteria": [
+        "Autopilot repeatedly invokes authoritative normal and deterministic recovery routes without duplicating application workflow logic",
+        "Durable ownership, stop requests, crash authentication, bounded retries, structured events, and monitoring reports are enforced",
+        "Dry-run is zero-write and initial apply uses one project loop, one parent model session at a time, and zero children"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-10-continuous-autopilot",
+      "integration_base_commit": "d9ea135e1e6aee0dc990478e1b3dc6193986624a",
+      "accepted_commit": "SELF",
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

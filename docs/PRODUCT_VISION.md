@@ -8,6 +8,10 @@ Application repositories need a durable controller that can schedule Factory wor
 
 The owner can run one controller across isolated application repositories and receive deterministic scheduling, exact recovery, and review-ready evidence. Application writers retain repository-local authority; the Conveyor never becomes a cross-repository production-code writer.
 
+For continuous delivery, the owner can start one durable Autopilot per project,
+observe concise lifecycle events and a JSON status report, request a safe stop,
+and later continue without keeping one model context alive across features.
+
 ## Principles
 
 - Append immutable phase evidence before projecting current state.

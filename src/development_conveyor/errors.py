@@ -53,6 +53,10 @@ class RetryExhausted(ConveyorError):
     """The configured focused-attempt limit was reached."""
 
 
+class AutopilotStopRequested(ConveyorError):
+    """A durable Autopilot stop was observed at a safe lifecycle boundary."""
+
+
 class TransactionError(ConveyorError):
     """A workflow transaction violates the kernel contract."""
 

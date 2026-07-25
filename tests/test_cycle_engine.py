@@ -112,7 +112,11 @@ class CycleEngineTests(unittest.TestCase):
             engine = CycleEngine(controller_configuration(root, project), launcher)
             result = engine.run_project(project, "one_feature")
             self.assertEqual(result["outcome"], "one_feature_integrated")
-            self.assertEqual(launcher.actions, ["feature_cycle", "milestone_integration"])
+            self.assertEqual(
+                launcher.actions,
+                ["feature_cycle"],
+                "milestone integration is controller-deterministic and launches no model",
+            )
             inspector = RepositoryInspector(repository)
             self.assertTrue(inspector.is_clean)
             self.assertEqual(inspector.patch_fingerprint(result["accepted_commit"]), inspector.patch_fingerprint(result["integrated_commit"]))

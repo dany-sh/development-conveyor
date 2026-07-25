@@ -28,6 +28,7 @@ from .feature_scoping import FeatureScoper
 from .feature_decisions import FeatureDecisionResolver
 from .cycle_cache_repair import CycleCacheRepair
 from .product_plan import ProductPlanReconciler
+from .autopilot import Autopilot, autopilot_status, request_stop
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
 
@@ -241,6 +242,26 @@ def _parser() -> argparse.ArgumentParser:
     mode = repair_cycle_cache.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
+    autopilot = subparsers.add_parser(
+        "autopilot",
+        help="continuously execute authoritative project transitions until safely stopped",
+    )
+    autopilot.add_argument("--project", required=True)
+    mode = autopilot.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    stop_autopilot = subparsers.add_parser(
+        "stop-autopilot",
+        help="write a durable stop request for one project autopilot",
+    )
+    stop_autopilot.add_argument("--project", required=True)
+    stop_autopilot.add_argument("--reason")
+    autopilot_status_parser = subparsers.add_parser(
+        "autopilot-status",
+        help="show durable autopilot ownership, stop, and report state",
+    )
+    autopilot_status_parser.add_argument("--project", required=True)
+    autopilot_status_parser.add_argument("--json", action="store_true")
     return parser
 
 
@@ -274,6 +295,14 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
     controller_root = discover_root(root)
     configuration = load_configuration(controller_root)
     registry = ProjectRegistry(configuration)
+    if args.command == "stop-autopilot":
+        return request_stop(
+            configuration,
+            registry.get(args.project),
+            reason=args.reason,
+        )
+    if args.command == "autopilot-status":
+        return autopilot_status(configuration, registry.get(args.project))
     if args.command == "reconcile-product-plan":
         reconciler = ProductPlanReconciler(
             configuration,
@@ -326,6 +355,13 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
         launcher,
         execution_profile_override=getattr(args, "execution_profile", None),
     )
+    if args.command == "autopilot":
+        controller = Autopilot(
+            configuration=configuration,
+            project=registry.get(args.project),
+            engine=engine,
+        )
+        return controller.apply() if args.apply else controller.dry_run()
 
     if args.command == "scope-features":
         scoper = FeatureScoper(configuration, launcher)
@@ -524,6 +560,7 @@ def main(arguments: list[str] | None = None) -> int:
         return 2 if (
             result.get("launch_allowed") is False
             or result.get("outcome") == "resolution_rejected"
+            or result.get("classification") == "AUTOPILOT_FAILED"
             or result.get("classification") in {
                 "HUMAN_DECISION_REQUIRED", "CORRUPT_EVIDENCE", "UNSAFE_REPOSITORY_STATE"
             }

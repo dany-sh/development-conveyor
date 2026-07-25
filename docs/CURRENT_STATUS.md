@@ -4,6 +4,30 @@ Last updated: 2026-07-24
 
 ## Summary
 
+Durable continuous feature-delivery Autopilot is implemented on
+`codex/m1-10-continuous-autopilot` from required starting commit
+`d9ea135e1e6aee0dc990478e1b3dc6193986624a`. The controller now exposes
+`autopilot`, `stop-autopilot`, and `autopilot-status`; owns one exact
+process-start-authenticated loop per project; reloads authoritative projection
+and consistency evidence between existing lifecycle routes; checks durable
+stop requests at outer and inner safety boundaries; and writes concise
+structured events plus an atomic monitoring report.
+
+Autopilot reuses the existing feature, planning, validation, integration,
+cache, lease, and recovery implementations. Configurable conservative budgets
+bound implementation, validation, deterministic recovery, planning, and
+integration-finalization attempts, and identical evidence cannot repeat
+indefinitely. Initial execution preserves one parent at a time and zero
+children. Default-branch merge, push, tag, publication, deployment, release,
+and notarization remain prohibited.
+
+The exact Interview Companion Autopilot dry-run is `CONSISTENT` at
+`feature_ready`, selects F068 first through `feature_cycle`, estimates one
+`gpt-5.6-terra`/high parent and zero children, and performs zero writes,
+models, children, leases, transactions, tests, feature executions,
+integrations, or application mutations. Before/after controller runtime,
+Interview Companion, and Case Manager snapshots are identical.
+
 Transactional approved product-plan reconciliation is implemented on
 `codex/m1-9-product-plan-reconciliation` from required starting commit
 `4a34f8eafa443c7c2ed3c51df02d9fdcbd42f497`. The new
@@ -179,20 +203,21 @@ M1 — Transactional workflow kernel
 
 ## Active controller repair
 
-Transactional approved product-plan reconciliation (`implementation prepared`)
+Durable continuous feature-delivery Autopilot (`implementation prepared`)
 
 ## Next boundary
 
-Commit the product-plan reconciliation implementation. Run only the live
-`reconcile-product-plan --dry-run`; do not run its apply, ordinary Conveyor
-resume, existing queue reconciliation, feature execution, integration, merge,
-push, tag, publish, deploy, or release.
+Commit the Autopilot implementation. Run only the live
+`autopilot --project interview-companion --dry-run`; do not run its apply,
+ordinary Conveyor resume, existing queue reconciliation, feature execution,
+integration, merge, push, tag, publish, deploy, or release.
 
 ## Validation scope
 
-Validation is limited to the new product-plan suite, shared feature-scoping and
-planning-finalization regressions, Python compilation, configuration
-validation, command help/mode checks, the exact Interview Companion product-plan
-dry-run, and `git diff --check`. Application tests, the complete controller
-suite, live product-plan apply, ordinary resume, existing queue reconciliation,
-feature work, and milestone integration are intentionally excluded.
+Validation is limited to the new Autopilot suite plus focused cycle-engine,
+recovery, integration-finalization, status, and consistency regressions,
+Python compilation, configuration validation, command help/mode checks, the
+exact Interview Companion Autopilot dry-run, and `git diff --check`.
+Application tests, the complete controller suite, Autopilot apply, ordinary
+resume, existing queue reconciliation, feature work, and milestone integration
+are intentionally excluded.

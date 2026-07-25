@@ -19,6 +19,33 @@ CLI -> phase adapter -> WorkflowKernel -> typed writer lease
 
 `WorkflowWriterLease` is the sole typed repository writer lease. It binds and revalidates repository and path identity, project, transaction and lease identity, workflow and lease type, milestone, feature, branch, HEAD, run, current session, process start, host, and mutation policy. Lease and mutation targets reject symbolic links, non-regular files, and unsafe hard-link counts. `DurableLock` remains only a controller launch reservation.
 
+`Autopilot` is a controller-level coordinator above `CycleEngine`; it is not a
+second workflow engine. It reads the same authoritative plan and consistency
+classification, dispatches one existing normal or deterministic recovery route
+at a time, and then reloads projection evidence before advancing. Each
+model-backed feature therefore receives a fresh focused session and its
+authoritative execution profile, while deterministic transitions launch no
+model.
+
+One controller-owned ownership record under
+`state/autopilot/<project>/ownership.json` binds project, repository identity
+and path fingerprint, host, PID, process-start evidence, heartbeat, and last
+completed lifecycle event. A live record rejects duplicate startup. A dead
+record is recoverable only after exact repository, process, Git, last-event,
+and writer-lease authentication; elapsed time is never sufficient. The loop
+writes monitoring state atomically to
+`reports/autopilot/<project>/latest.json` and removes ownership on every
+terminal path.
+
+`stop-autopilot` writes an atomic durable request independent of the running
+process. The loop checks it at the outer transition boundary and through
+CycleEngine lifecycle observation before transaction open, model launch,
+application mutation, commit, deterministic integration, between validation
+tiers, and before the next transition. A request never kills an in-flight Git,
+commit, ledger, projection, or cache operation; the current existing route
+reaches a coherent checkpoint, the request is acknowledged durably, and the
+ownership record is released.
+
 `ExecutionPlan` is the only writable-routing contract once a valid ledger and matching projection cache exist. It binds the ledger and projection fingerprints, workflow, feature and accepted commit, starting branch and commit, session recovery eligibility, typed lease, and success state. Planner-facing status is derived from that plan; legacy cycles remain diagnostics only. Immediately before a writable transaction, the controller reloads the projection under its launch reservation, validates the exact queue and Git identities, and passes the planned branch and HEAD into `WorkflowKernel`. The kernel preacquires the typed writer lease, recaptures the repository and target ref while leased, and appends `TransactionStarted` only if the leased snapshot still matches the plan. Compatibility project state is a fingerprint-bound, atomic, idempotent cache and never overrides routing.
 
 Application feature mutation uses one direct bounded parent Codex session. The selected feature identity is rechecked at queue selection, kernel creation, `SessionRequest` construction, prompt rendering, terminal parsing, semantic validation, reporting, and projection. A zero child-session budget sets `agents.enabled=false`, disables both multi-agent feature variants, and runs a model-free prompt-input capability probe before fresh or resumed invocation. The launcher also treats any observed collaboration tool event as a hard budget violation and terminates the parent process. Failure to prove the tools absent blocks before model launch. The exact terminal JSON schema binds every execution identity and requires the actual launcher-observed session UUID, unchanged branch and HEAD, the exact live changed-path set, implementation evidence, and controller-owned acceptance acknowledgment. Feature Factory and named child roles are not part of this execution path.

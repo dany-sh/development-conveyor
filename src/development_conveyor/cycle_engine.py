@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from .config import Configuration
 from .errors import (
+    AutopilotStopRequested,
     ConveyorError,
     IntegrationPlanError,
     LockError,
@@ -148,17 +149,44 @@ class CycleEngine:
         launcher: SessionLauncher | None = None,
         *,
         execution_profile_override: str | None = None,
+        lifecycle_observer: Callable[[str, dict[str, Any]], bool | None] | None = None,
     ):
         self.configuration = configuration
         self.root = configuration.root
         self.launcher = launcher or SessionLauncher(self.root, configuration.conveyor)
         self.execution_profile_override = execution_profile_override
+        self.lifecycle_observer = lifecycle_observer
         self.project_store = JsonStateStore(self.root / "schemas/project-state.schema.json")
         self.cycle_store = JsonStateStore(self.root / "schemas/cycle-state.schema.json")
         self.events = EventLogger(
             configuration.owned_path(configuration.conveyor["log_directory"]) / "run-events.jsonl",
             self.root / "schemas/run-event.schema.json",
         )
+
+    def _observe_lifecycle(
+        self, boundary: str, evidence: dict[str, Any] | None = None
+    ) -> None:
+        if (
+            self.lifecycle_observer is not None
+            and self.lifecycle_observer(boundary, dict(evidence or {})) is True
+        ):
+            raise AutopilotStopRequested(
+                f"durable autopilot stop observed at {boundary}"
+            )
+
+    def _kernel_interruption(self, boundary: str, transaction: Any) -> None:
+        aliases = {
+            "before_lease": "before_transaction",
+            "after_snapshot": "before_application_mutation",
+            "before_validation": "between_validation_tiers",
+        }
+        self._observe_lifecycle(aliases.get(boundary, boundary), {
+            "project_id": transaction.project_id,
+            "feature_id": transaction.feature_id,
+            "transaction_id": transaction.transaction_id,
+            "workflow_type": transaction.workflow_type.value,
+            "state": transaction.current_state.value,
+        })
 
     def project_state_path(self, project: Project) -> Path:
         return self.configuration.owned_path(self.configuration.conveyor["state_directory"]) / "projects" / f"{project.project_id}.json"
@@ -215,7 +243,8 @@ class CycleEngine:
             self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
         ))
         planner = RecoveryPlanner(
-            project=project, ledger=ledger, projection=projection, lease=lease
+            project=project, ledger=ledger, projection=projection, lease=lease,
+            interruption_hook=self._kernel_interruption,
         )
         plan = planner.inspect()
         if plan.get("classification") in {"nothing_to_recover", "no_transaction"}:
@@ -240,7 +269,8 @@ class CycleEngine:
             # fresh typed transaction without competing authorities.
             recovered_id = str(applied["transaction_id"])
             kernel = WorkflowKernel(
-                project=project, ledger=ledger, projection=projection, lease=lease
+                project=project, ledger=ledger, projection=projection, lease=lease,
+                interruption_hook=self._kernel_interruption,
             )
             recovered = kernel.restore(recovered_id)
             if applied.get("changed_paths") and applied.get("session_result_recorded"):
@@ -399,11 +429,16 @@ class CycleEngine:
             ))
         return authority, records
 
-    @staticmethod
-    def _kernel_required_commands(project: Project) -> tuple[CommandAuthority, list[Any]]:
-        return CycleEngine._execute_kernel_commands(
-            project, CycleEngine._configured_kernel_commands(project)
-        )
+    def _kernel_required_commands(
+        self, project: Project
+    ) -> tuple[CommandAuthority, list[Any]]:
+        commands = self._configured_kernel_commands(project)
+        for command in commands:
+            self._observe_lifecycle("between_validation_tiers", {
+                "project_id": project.project_id,
+                "command": list(command),
+            })
+        return self._execute_kernel_commands(project, commands)
 
     @staticmethod
     def _milestone_gate_adapter(
@@ -2474,6 +2509,12 @@ class CycleEngine:
         reservation_held: bool = False,
         on_session_started: Callable[[str], None] | None = None,
     ) -> SessionResult:
+        self._observe_lifecycle("before_model", {
+            "project_id": request.project.project_id,
+            "feature_id": request.feature,
+            "transaction_id": request.transaction_id,
+            "action": request.action,
+        })
         # The common controller launch boundary enforces child budgets before a
         # repository writer lease, Codex process, or mutation can be reached.
         if request.session_kind == "child" and (request.child_session_budget is None or request.child_session_budget <= 0):
@@ -3553,6 +3594,7 @@ class CycleEngine:
                 lease=WorkflowWriterLease(inspector.writer_lock_path(
                     self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
                 )),
+                interruption_hook=self._kernel_interruption,
             )
             compatibility_transaction = compatibility_kernel.begin(
                 workflow_type=WorkflowType.FEATURE_PREPARATION,
@@ -3659,6 +3701,7 @@ class CycleEngine:
                 lease=WorkflowWriterLease(inspector.writer_lock_path(
                     self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
                 )),
+                interruption_hook=self._kernel_interruption,
             )
             phase_kernels.append((preparation_kernel, preparation))
             preparation_transaction = preparation_kernel.begin(
@@ -3776,6 +3819,7 @@ class CycleEngine:
                 lease=WorkflowWriterLease(inspector.writer_lock_path(
                     self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
                 )),
+                interruption_hook=self._kernel_interruption,
             )
             phase_kernels.append((feature_kernel, feature_adapter))
             feature_transaction = feature_kernel.begin(
@@ -3925,6 +3969,7 @@ class CycleEngine:
                 lease=WorkflowWriterLease(inspector.writer_lock_path(
                     self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
                 )),
+                interruption_hook=self._kernel_interruption,
             )
             phase_kernels.append((acceptance_kernel, acceptance_adapter))
             acceptance_transaction = acceptance_kernel.begin(
@@ -4163,6 +4208,7 @@ class CycleEngine:
         )
         kernel = WorkflowKernel(
             project=project, ledger=ledger, projection=projection, lease=workflow_lease,
+            interruption_hook=self._kernel_interruption,
         )
         try:
             self._validate_projected_dispatch(
@@ -4650,6 +4696,7 @@ class CycleEngine:
                 lease=WorkflowWriterLease(inspector.writer_lock_path(
                     self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
                 )),
+                interruption_hook=self._kernel_interruption,
             )
             compatibility_transaction = compatibility_kernel.begin(
                 workflow_type=WorkflowType.MILESTONE_GATE,
@@ -4721,6 +4768,7 @@ class CycleEngine:
                 lease=WorkflowWriterLease(inspector.writer_lock_path(
                     self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
                 )),
+                interruption_hook=self._kernel_interruption,
             )
             transaction = kernel.begin(
                 workflow_type=WorkflowType.MILESTONE_GATE,
@@ -4795,6 +4843,11 @@ class CycleEngine:
                     kernel_projection={"transaction_id": transaction.transaction_id, **gate_blocked},
                 )
                 return {"outcome": gate_envelope.next_state, "classification": gate_envelope.classification}
+            for command in pinned_commands:
+                self._observe_lifecycle("between_validation_tiers", {
+                    "project_id": project.project_id,
+                    "command": list(command),
+                })
             authority, commands = self._execute_kernel_commands(project, pinned_commands)
             kernel.record_file_mutation_boundary()
             kernel.validate(
@@ -5564,6 +5617,7 @@ class CycleEngine:
             ledger=ledger,
             projection=ProjectionEngine(ledger, state_root / "projection-cache.json"),
             lease=lease,
+            interruption_hook=self._kernel_interruption,
         )
         reservation = self._launch_lock(project, inspector)
         reservation.acquire(
@@ -5868,6 +5922,7 @@ class CycleEngine:
             project=project, ledger=ledger,
             projection=ProjectionEngine(ledger, state_root / "projection-cache.json"),
             lease=lease,
+            interruption_hook=self._kernel_interruption,
         )
         reservation = None if reservation_held else self._launch_lock(project, inspector)
         if reservation is not None:
@@ -5981,6 +6036,12 @@ class CycleEngine:
                 / f"{transaction.transaction_id}.json",
                 plan,
             )
+            self._observe_lifecycle("before_integration", {
+                "project_id": project.project_id,
+                "feature_id": feature_id,
+                "transaction_id": transaction.transaction_id,
+                "plan_path": str(plan_path),
+            })
             result = execute_integration_plan(plan_path)
             kernel.accept_deterministic_integration_result(plan, result)
             if result["classification"] == "SEMANTIC_CONFLICT":
@@ -6132,6 +6193,7 @@ class CycleEngine:
             ledger=ledger,
             projection=projection,
             lease=workflow_lease,
+            interruption_hook=self._kernel_interruption,
         )
         try:
             refreshed_projection = self._authoritative_projection(project)
@@ -7328,6 +7390,7 @@ class CycleEngine:
             project=project, ledger=ledger,
             projection=ProjectionEngine(ledger, state_root / "projection-cache.json"),
             lease=lease,
+            interruption_hook=self._kernel_interruption,
         )
         kernel.restore(transaction_id)
         kernel.complete()
@@ -8073,6 +8136,7 @@ class CycleEngine:
                 lease=WorkflowWriterLease(inspector.writer_lock_path(
                     self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
                 )),
+                interruption_hook=self._kernel_interruption,
             )
             ledger_events = ledger.read()
             replay_transaction_id = next((

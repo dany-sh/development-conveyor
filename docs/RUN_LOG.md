@@ -1012,3 +1012,44 @@ This log records model configuration and deterministic deployment evidence. It n
   execution. Controller runtime hash `1e23ccf2aa13…979cfb` and application
   `.factory` hash `80e0dddad31b…e5585c` were identical before and after;
   consistency remained `CONSISTENT`.
+
+### Model execution — 2026-07-25T01:50:04+00:00
+
+- Agent role: `controller-autopilot-writer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `continuous_autopilot_parent_implementation`
+- Safety and autonomy contracts unchanged: `true`
+
+### Continuous Autopilot implementation — 2026-07-24
+
+- Scope: controller-owned continuous coordination only; no registered
+  application file, branch, commit, runtime cache, lease, or transaction was
+  modified during implementation.
+- Lifecycle: one process-start-authenticated ownership record, one existing
+  route per loop transition, fresh focused model sessions, zero children by
+  default, durable stop acknowledgment, atomic monitoring report, and
+  ownership release on every terminal path.
+- Recovery: compatibility/cache/planning/result/accepted-commit/integration
+  finalization routes remain delegated to their existing deterministic
+  implementations; dead ownership is recovered only with exact local identity,
+  Git, process, last-event, and writer-lease evidence.
+- Safety: stop requests are observed at transaction, model, application
+  mutation, validation, commit, integration, and next-transition boundaries.
+  Atomic Git and evidence operations are allowed to reach a coherent
+  checkpoint and are never killed.
+- Validation boundary: focused controller tests only; no complete controller
+  suite, application tests, live Autopilot apply, ordinary resume, feature
+  execution, or integration.
+- Focused validation: 32 Autopilot, configuration, cycle-engine, recovery,
+  integration-finalization, status, and consistency tests passed. Python
+  compilation, `validate-config`, all three command help checks, missing and
+  conflicting mode rejection, and `git diff --check` passed.
+- Exact live dry-run: Interview Companion remained `CONSISTENT` at
+  `feature_ready`, selected F068 through `feature_cycle`, planned one
+  `gpt-5.6-terra`/high parent and zero children, and performed zero writes,
+  model/child launches, leases, transactions, tests, feature executions,
+  integrations, or application mutations. Controller runtime and both
+  registered application snapshots were identical before and after.

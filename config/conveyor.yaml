@@ -25,6 +25,16 @@
     "additional_adversarial_reviews": 2,
     "queue_reconciliation_repairs": 1
   },
+  "autopilot": {
+    "retry_budgets": {
+      "implementation_retries_per_feature": 3,
+      "validation_retries": 2,
+      "deterministic_recovery_attempts": 3,
+      "planning_retries": 2,
+      "integration_finalization_retries": 2
+    },
+    "max_identical_failures": 1
+  },
   "logging": {
     "structured_events": true,
     "redact_sensitive_output": true,
@@ -55,4 +65,3 @@
     "production_source_edit_by_controller"
   ]
 }
-
