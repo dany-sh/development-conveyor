@@ -4,6 +4,43 @@ Last updated: 2026-07-24
 
 ## Summary
 
+Phase-aware retained feature-result recovery is implemented on
+`codex/m1-11-autopilot-retained-feature-recovery` from required starting
+commit `4b5cd4b9df2da1860047c520e7430a4a8047c74b`. Feature preparation,
+execution, acceptance, and terminal cycle-cache binding now authenticate the
+active feature from transaction and projection-current identity plus
+run/session, branch, starting commit, and queue evidence. Consumed null
+`selected_feature` and `selected_next_feature` fields no longer reject the
+active result; genuine non-null contradictions still fail closed.
+
+General retained-result recovery now binds an optional deterministic
+preparation transaction to the execution transaction and permits an
+`in_progress` queue feature only when that exact preparation topology is
+authenticated. The execution start and terminal queue fingerprints are
+validated at their own phases, allowing the authenticated retained acceptance
+metadata diff without pretending the queue remained byte-identical throughout
+execution.
+
+Autopilot recognizes the exact structured-output-invalid retained-result
+topology before generic human-gate stopping, invokes the registered
+zero-model recovery, emits recovery lifecycle events only on success, and
+reloads authoritative projection before integration. Identical deterministic
+failures are bounded as recoverable technical failures, create no new human
+gate, and release ownership.
+
+The exact live F068 dry-run authenticated preparation transaction
+`ec4e9bc3-d8f1-4462-860c-bdb1b455cc04`, execution transaction
+`d13ab73a-d696-4689-9923-9172c89b3f0e`, session
+`019f9707-712f-7ae3-824d-32808b6edaa5`, branch
+`codex/F068-job-application-data-model`, starting HEAD `a56d0b1`, all 12
+retained paths, tracked fingerprint `bdbb94f6`, and empty-untracked
+fingerprint `44136fa3`. It planned the two focused Swift filters, `swift
+build`, and `git diff --check`; one candidate commit only after validation;
+technical-gate supersession; zero models and children; and a stop at
+`integration_pending` without integration or queue reconciliation. Before
+and after application diff, `.factory`, controller project state, and original
+report hashes were identical. Apply was not run.
+
 Durable continuous feature-delivery Autopilot is implemented on
 `codex/m1-10-continuous-autopilot` from required starting commit
 `d9ea135e1e6aee0dc990478e1b3dc6193986624a`. The controller now exposes
@@ -203,21 +240,22 @@ M1 — Transactional workflow kernel
 
 ## Active controller repair
 
-Durable continuous feature-delivery Autopilot (`implementation prepared`)
+Phase-aware retained feature-result recovery (`implementation prepared`)
 
 ## Next boundary
 
-Commit the Autopilot implementation. Run only the live
-`autopilot --project interview-companion --dry-run`; do not run its apply,
-ordinary Conveyor resume, existing queue reconciliation, feature execution,
-integration, merge, push, tag, publish, deploy, or release.
+Commit the controller repair. Run only the live F068
+`recover-feature-result --dry-run`; do not run recovery apply, restart
+Autopilot, run ordinary Conveyor resume, resolve the technical gate through
+the generic human-decision route, integrate F068, reconcile its queue, merge,
+push, tag, publish, deploy, or release.
 
 ## Validation scope
 
-Validation is limited to the new Autopilot suite plus focused cycle-engine,
-recovery, integration-finalization, status, and consistency regressions,
-Python compilation, configuration validation, command help/mode checks, the
-exact Interview Companion Autopilot dry-run, and `git diff --check`.
+Validation is limited to focused feature-result recovery, Autopilot,
+cycle-cache, projection, status, and consistency regressions, Python
+compilation, configuration validation, command help/mode checks, the exact
+Interview Companion F068 recovery dry-run, and `git diff --check`.
 Application tests, the complete controller suite, Autopilot apply, ordinary
 resume, existing queue reconciliation, feature work, and milestone integration
 are intentionally excluded.

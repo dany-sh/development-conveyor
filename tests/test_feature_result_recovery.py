@@ -302,8 +302,15 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
     ORIGINAL_TRANSACTION = "b8b6c22f-7c1a-4124-9dee-135647905331"
     ORIGINAL_RUN = "8b4d5f27-7466-4430-9d12-51256a6e9f88"
     ORIGINAL_SESSION = "019f9628-e836-79f3-bb95-20ca8fa610ec"
+    PREPARATION_TRANSACTION = "ec4e9bc3-d8f1-4462-860c-bdb1b455cc04"
 
-    def _fixture(self, root: Path):
+    def _fixture(
+        self,
+        root: Path,
+        *,
+        prepared: bool = False,
+        preparation_projection_feature: str | None = None,
+    ):
         repository, project = synthetic_repository(root)
         queue_path = repository / project.queue_location
         queue = json.loads(queue_path.read_text(encoding="utf-8"))
@@ -312,10 +319,10 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
             {
                 "id": self.FEATURE,
                 "title": "Imported Audio Transcription Workflow",
-                "status": "ready",
+                "status": "in_progress" if prepared else "ready",
                 "implementation_status": "Proposed",
                 "spec": "docs/features/F097-imported-audio-transcription-workflow.md",
-                "branch": None,
+                "branch": self.BRANCH if prepared else None,
                 "integration_base_commit": None,
                 "accepted_commit": None,
                 "requires_human_decision": False,
@@ -417,6 +424,116 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
             "require_clean_start": True,
             "commit_subject": "F097: Imported Audio Transcription Workflow",
         }
+        if prepared:
+            preparation_session = (
+                "deterministic-feature-preparation:"
+                + self.PREPARATION_TRANSACTION
+            )
+            ledger.append(
+                event_type="TransactionStarted",
+                transaction_id=self.PREPARATION_TRANSACTION,
+                workflow_type=WorkflowType.FEATURE_PREPARATION,
+                payload={
+                    "run_id": self.ORIGINAL_RUN,
+                    "milestone": "M0",
+                    "feature_id": self.FEATURE,
+                    "starting_branch": str(project.milestone_branch),
+                    "starting_head": head,
+                    "starting_queue_fingerprint": (
+                        capture_repository_snapshot(project).queue_fingerprint
+                    ),
+                    "allowed_mutation_policy": {},
+                },
+            )
+            ledger.append(
+                event_type="LeaseAcquired",
+                transaction_id=self.PREPARATION_TRANSACTION,
+                workflow_type=WorkflowType.FEATURE_PREPARATION,
+                payload={
+                    "lease_id": "preparation-lease",
+                    "lease_type": "feature_writer",
+                },
+            )
+            ledger.append(
+                event_type="SnapshotCaptured",
+                transaction_id=self.PREPARATION_TRANSACTION,
+                workflow_type=WorkflowType.FEATURE_PREPARATION,
+                payload={
+                    "snapshot": {
+                        "repository_identity": identity["repository_id"],
+                        "repository_path_fingerprint": identity[
+                            "path_fingerprint"
+                        ],
+                        "branch": str(project.milestone_branch),
+                        "head": head,
+                        "tracked_changed_paths": [],
+                        "untracked_paths": [],
+                    }
+                },
+            )
+            ledger.append(
+                event_type="SessionLaunched",
+                transaction_id=self.PREPARATION_TRANSACTION,
+                workflow_type=WorkflowType.FEATURE_PREPARATION,
+                payload={"session_id": preparation_session},
+            )
+            ledger.append(
+                event_type="SessionResultAccepted",
+                transaction_id=self.PREPARATION_TRANSACTION,
+                workflow_type=WorkflowType.FEATURE_PREPARATION,
+                payload={
+                    "session_id": preparation_session,
+                    "classification": "FEATURE_PREPARED",
+                    "next_state": "feature_preparing",
+                },
+            )
+            ledger.append(
+                event_type="ValidationStarted",
+                transaction_id=self.PREPARATION_TRANSACTION,
+                workflow_type=WorkflowType.FEATURE_PREPARATION,
+                payload={},
+            )
+            ledger.append(
+                event_type="ValidationPassed",
+                transaction_id=self.PREPARATION_TRANSACTION,
+                workflow_type=WorkflowType.FEATURE_PREPARATION,
+                payload={},
+            )
+            ledger.append(
+                event_type="TransactionCompleted",
+                transaction_id=self.PREPARATION_TRANSACTION,
+                workflow_type=WorkflowType.FEATURE_PREPARATION,
+                payload={
+                    "classification": "FEATURE_PREPARED",
+                    "feature_id": self.FEATURE,
+                    "next_state": "feature_preparing",
+                    "terminal_snapshot": {
+                        "branch": self.BRANCH,
+                        "head": head,
+                        "queue_fingerprint": (
+                            capture_repository_snapshot(project).queue_fingerprint
+                        ),
+                    },
+                },
+            )
+            ledger.append(
+                event_type="LeaseReleased",
+                transaction_id=self.PREPARATION_TRANSACTION,
+                workflow_type=WorkflowType.FEATURE_PREPARATION,
+                payload={"lease_id": "preparation-lease"},
+            )
+            ledger.append(
+                event_type="ProjectionUpdated",
+                transaction_id=self.PREPARATION_TRANSACTION,
+                workflow_type=WorkflowType.FEATURE_PREPARATION,
+                payload={
+                    "current_state": "feature_preparing",
+                    "current_feature": (
+                        preparation_projection_feature or self.FEATURE
+                    ),
+                    "selected_feature": None,
+                },
+            )
         ledger.append(
             event_type="TransactionStarted",
             transaction_id=self.ORIGINAL_TRANSACTION,
@@ -707,6 +824,81 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(plan["model_sessions_that_would_launch"], 0)
             self.assertEqual(plan["child_sessions_that_would_launch"], 0)
+            self.assertEqual(
+                "supersede_and_resolve_after_host_validation",
+                plan["gate_supersession"]["action"],
+            )
+            self.assertEqual(
+                "integration_pending", plan["final_projected_state"]
+            )
+
+    def test_consumed_selection_uses_preparation_and_current_feature_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            configuration, project, head, changed, _ = self._fixture(
+                Path(temporary), prepared=True
+            )
+            plan = self._inspect(self._recovery(configuration, project), head)
+            self.assertEqual(
+                self.PREPARATION_TRANSACTION,
+                plan["preparation_transaction_id"],
+            )
+            self.assertTrue(plan["phase_feature_identity"]["selection_consumed"])
+            self.assertEqual(
+                self.FEATURE,
+                plan["phase_feature_identity"]["transaction_feature_id"],
+            )
+            self.assertEqual(
+                self.FEATURE,
+                plan["phase_feature_identity"]["projection_current_feature"],
+            )
+            self.assertEqual(list(changed), plan["changed_paths"])
+
+    def test_cycle_engine_routes_exact_technical_gate_to_recovery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            configuration, project, head, changed, gate = self._fixture(
+                Path(temporary), prepared=True
+            )
+            controller_cache = (
+                configuration.root
+                / "state/projects"
+                / f"{project.project_id}.json"
+            )
+            if controller_cache.exists():
+                controller_cache.unlink()
+            routed = CycleEngine(
+                configuration, SyntheticLauncher()
+            ).project_plan(project)
+            self.assertEqual(
+                "feature_result_recovery",
+                routed["proposed_next_action"],
+            )
+            self.assertTrue(routed["recognized_technical_recovery"])
+            self.assertIsNone(routed["human_gate"])
+            self.assertEqual(
+                gate["gate_id"],
+                routed["technical_gate_to_supersede"]["gate_id"],
+            )
+            recovery = routed["feature_result_recovery"]
+            self.assertEqual(self.FEATURE, recovery["feature_id"])
+            self.assertTrue(recovery["evidence_authenticated"])
+            self.assertEqual(
+                self.PREPARATION_TRANSACTION,
+                recovery["preparation_transaction_id"],
+            )
+            self.assertEqual(list(changed), recovery["changed_paths"])
+            self.assertEqual(head, recovery["expected_head"])
+            self.assertEqual(0, recovery["model_sessions_that_would_launch"])
+            self.assertEqual(0, recovery["child_sessions_that_would_launch"])
+
+    def test_unrelated_preparation_feature_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            configuration, project, head, _, _ = self._fixture(
+                Path(temporary),
+                prepared=True,
+                preparation_projection_feature="F999",
+            )
+            with self.assertRaisesRegex(Exception, "preparation_topology"):
+                self._inspect(self._recovery(configuration, project), head)
 
     def test_unrelated_workflow_mismatch_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -919,6 +1111,27 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
             )
             with self.assertRaises(Exception):
                 self._inspect(recovery, head)
+
+    def test_prepared_in_progress_apply_commits_once_and_stops(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            configuration, project, head, _, gate = self._fixture(
+                Path(temporary), prepared=True
+            )
+            recovery = self._recovery(configuration, project)
+            result = recovery.apply(self._inspect(recovery, head))
+            inspector = RepositoryInspector(project.repository)
+            self.assertEqual("integration_pending", result["outcome"])
+            self.assertEqual(head, inspector.rev_parse(f"{inspector.head}^"))
+            self.assertTrue(inspector.is_clean)
+            self.assertEqual(gate["gate_id"], result["resolved_gate_id"])
+            self.assertEqual(
+                self.PREPARATION_TRANSACTION,
+                result["preparation_transaction_id"],
+            )
+            self.assertEqual(0, result["model_sessions_launched"])
+            self.assertEqual(0, result["child_sessions_launched"])
+            self.assertFalse(result["milestone_integration_performed"])
+            self.assertFalse(result["queue_reconciliation_performed"])
 
     def test_cycle_cache_repair_is_dry_run_atomic_and_idempotent(self):
         with tempfile.TemporaryDirectory() as temporary:

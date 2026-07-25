@@ -8,3 +8,4 @@
 | M1-005 | Deterministic queue-feature decision resolution | integration_pending | M1 | `docs/features/M1-005-queue-feature-decision-resolution.md` |
 | M1-009 | Transactional approved product-plan reconciliation | integration_pending | M1 | `docs/features/M1-009-product-plan-reconciliation.md` |
 | M1-010 | Durable continuous feature-delivery Autopilot | integration_pending | M1 | `docs/features/M1-010-continuous-autopilot.md` |
+| M1-011 | Phase-aware retained feature-result recovery | implementation prepared | M1 | `docs/features/M1-011-autopilot-retained-feature-recovery.md` |

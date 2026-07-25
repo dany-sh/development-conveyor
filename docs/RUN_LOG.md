@@ -1053,3 +1053,56 @@ This log records model configuration and deterministic deployment evidence. It n
   model/child launches, leases, transactions, tests, feature executions,
   integrations, or application mutations. Controller runtime and both
   registered application snapshots were identical before and after.
+
+### Phase-aware retained feature-result recovery — 2026-07-24
+
+- Scope: controller-only repair on
+  `codex/m1-11-autopilot-retained-feature-recovery` from exact parent
+  `4b5cd4b9df2da1860047c520e7430a4a8047c74b`; one direct
+  `gpt-5.6-sol`/`medium` parent and zero child or named-agent sessions.
+- Identity: feature-phase cycle-cache binding now requires exact transaction
+  and projection-current feature identity, permits consumed null selection,
+  and rejects any non-null contradiction. General recovery additionally binds
+  the deterministic preparation transaction, execution run/session, branch,
+  starting commit, queue feature, fingerprints, paths, gate, leases,
+  reservations, and Git-operation state.
+- Autopilot: the recognized structured-output-invalid topology routes to
+  `feature_result_recovery` before generic human-gate stopping. Successful
+  recovery emits `RECOVERY_STARTED` and `RECOVERY_APPLIED`, reloads
+  projection, and may integrate only from `integration_pending`. Identical
+  technical failures are bounded without creating a new human gate and
+  release ownership.
+- Focused validation: 83 recovery, Autopilot, cache-binding, projection,
+  status, consistency, and execution-plan tests passed; 10
+  correction-specific tests passed on the final code. The affected
+  cycle-engine terminal-failure regression also passed. Two unrelated stale
+  cycle-engine assertions were proven to fail identically at starting commit
+  `4b5cd4b`; they were not changed or counted as regressions.
+- Mechanical validation: Python compilation, `validate-config`,
+  `recover-feature-result --help`, missing-mode rejection, conflicting-mode
+  rejection, profile-aware changed-file content audit, JSON queue validation,
+  and `git diff --check` passed.
+- Live dry-run: F068 preparation `ec4e9bc3-d8f1-4462-860c-bdb1b455cc04`,
+  execution `d13ab73a-d696-4689-9923-9172c89b3f0e`, session
+  `019f9707-712f-7ae3-824d-32808b6edaa5`, starting HEAD `a56d0b1`,
+  tracked fingerprint `bdbb94f6`, empty-untracked fingerprint `44136fa3`,
+  and all 12 retained paths authenticated. The plan lists
+  `DomainModelTests`, `PersistentDomainStoreTests`, `swift build`, and `git
+  diff --check`; one candidate commit only after validation; append-only gate
+  supersession; final `integration_pending`; zero models and children; and no
+  integration or queue reconciliation.
+- Preservation: before/after tracked diff, status, application `.factory`,
+  controller project state, and original report hashes were byte-identical.
+  Live apply, Autopilot restart, ordinary resume, application tests, complete
+  controller suite, integration, queue reconciliation, merge, push, tag,
+  publication, deployment, and release were not run.
+
+### Model execution — 2026-07-25T02:29:37+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `phase_aware_retained_feature_recovery`
+- Safety and autonomy contracts unchanged: `true`

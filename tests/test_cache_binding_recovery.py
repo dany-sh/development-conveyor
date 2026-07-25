@@ -917,6 +917,96 @@ class CacheBindingRecoveryTests(unittest.TestCase):
             ephemeral_fingerprint, finalized["kernel_projection_fingerprint"]
         )
 
+    def test_feature_preparation_binding_allows_consumed_selection(self):
+        binding = CanonicalProjectionBinding(
+            ledger_sequence=539,
+            ledger_fingerprint="a" * 64,
+            projection_fingerprint="b" * 64,
+            canonical_projection={
+                "current_state": "feature_preparing",
+                "current_feature": "F068",
+                "selected_next_feature": None,
+                "accepted_feature_commit": None,
+                "integration_status": None,
+                "allowed_next_action": "verify_consistency",
+                "transactions": [
+                    {
+                        "transaction_id": "preparation",
+                        "feature_id": "F068",
+                    }
+                ],
+            },
+        )
+        ledger = mock.Mock()
+        ledger.terminal_event.return_value = {
+            "event_type": "TransactionCompleted",
+            "workflow_type": "feature_preparation",
+            "payload": {
+                "feature_id": "F068",
+                "selected_feature": None,
+            },
+        }
+        finalized = _bind_terminal_cycle_cache(
+            {
+                "current_phase": "feature_preparing",
+                "current_feature": "F068",
+                "selected_feature": None,
+                "accepted_feature_commit": None,
+                "integration_status": None,
+                "next_safe_action": "verify_consistency",
+            },
+            ledger=ledger,
+            binding=binding,
+            transaction_id="preparation",
+            expected_feature="F068",
+        )
+        self.assertEqual("F068", finalized["current_feature"])
+        self.assertIsNone(finalized["selected_feature"])
+
+    def test_feature_phase_binding_rejects_transaction_contradiction(self):
+        binding = CanonicalProjectionBinding(
+            ledger_sequence=539,
+            ledger_fingerprint="a" * 64,
+            projection_fingerprint="b" * 64,
+            canonical_projection={
+                "current_state": "feature_preparing",
+                "current_feature": "F068",
+                "selected_next_feature": None,
+                "accepted_feature_commit": None,
+                "integration_status": None,
+                "allowed_next_action": "verify_consistency",
+                "transactions": [
+                    {
+                        "transaction_id": "preparation",
+                        "feature_id": "F999",
+                    }
+                ],
+            },
+        )
+        ledger = mock.Mock()
+        ledger.terminal_event.return_value = {
+            "event_type": "TransactionCompleted",
+            "workflow_type": "feature_preparation",
+            "payload": {"feature_id": "F068"},
+        }
+        with self.assertRaisesRegex(
+            RecoveryError, "active feature disagrees"
+        ):
+            _bind_terminal_cycle_cache(
+                {
+                    "current_phase": "feature_preparing",
+                    "current_feature": "F068",
+                    "selected_feature": None,
+                    "accepted_feature_commit": None,
+                    "integration_status": None,
+                    "next_safe_action": "verify_consistency",
+                },
+                ledger=ledger,
+                binding=binding,
+                transaction_id="preparation",
+                expected_feature="F068",
+            )
+
     def test_recovery_and_consistency_share_canonical_binding_helper(self):
         import development_conveyor.consistency as consistency_module
         import development_conveyor.cycle_engine as cycle_engine_module

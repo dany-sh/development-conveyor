@@ -148,6 +148,33 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-011",
+      "title": "Phase-aware retained feature-result recovery",
+      "status": "implementation prepared",
+      "priority": 11,
+      "milestone": "M1",
+      "dependencies": ["M1-001", "M1-010"],
+      "spec": "docs/features/M1-011-autopilot-retained-feature-recovery.md",
+      "acceptance_criteria": [
+        "Consumed selected-feature fields do not override exact transaction, projection-current-feature, session, branch, commit, and queue identity",
+        "Exact retained structured-output-invalid results recover deterministically with zero models and children and at most one post-validation feature commit",
+        "Successful recovery supersedes its technical gate, refreshes compatibility caches, and stops at integration_pending without integration",
+        "Autopilot invokes the registered recovery automatically, bounds identical failures, creates no new human gate, and releases ownership"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-11-autopilot-retained-feature-recovery",
+      "integration_base_commit": "4b5cd4b9df2da1860047c520e7430a4a8047c74b",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

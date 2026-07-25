@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from development_conveyor.autopilot import (
     AUTOPILOT_EVENTS,
@@ -15,7 +16,11 @@ from development_conveyor.autopilot import (
     request_stop,
 )
 from development_conveyor.cycle_engine import CycleEngine
-from development_conveyor.errors import AutopilotStopRequested, LockError
+from development_conveyor.errors import (
+    AutopilotStopRequested,
+    LockError,
+    RecoveryError,
+)
 from development_conveyor.logging import atomic_write_json
 from tests.helpers import controller_configuration, synthetic_repository
 
@@ -209,6 +214,151 @@ class AutopilotTests(unittest.TestCase):
         events = [item["event"] for item in result["events"]]
         self.assertIn("RECOVERY_STARTED", events)
         self.assertIn("RECOVERY_APPLIED", events)
+
+    def test_structured_output_gate_recovers_then_continues_to_integration(self):
+        technical = plan(
+            "feature_result_recovery",
+            state="technical_recovery_required",
+            human_gate={"gate_id": "technical-gate"},
+        )
+        technical["recognized_technical_recovery"] = True
+        technical["feature_result_recovery"] = {
+            "feature_id": "F001",
+            "original_transaction_id": "execution-transaction",
+            "original_run_id": "feature-run",
+            "original_session_id": "feature-session",
+            "expected_branch": "codex/F001",
+            "expected_head": "a" * 40,
+        }
+        engine = FakeEngine(
+            [
+                technical,
+                plan(
+                    "milestone_integration",
+                    state="integration_pending",
+                ),
+                plan("paused", feature=None, state="paused"),
+            ],
+            [
+                {"outcome": "unused"},
+                {"outcome": "feature_integrated"},
+            ],
+        )
+        recovered = {
+            "outcome": "integration_pending",
+            "model_sessions_launched": 0,
+            "child_sessions_launched": 0,
+        }
+
+        def apply_recovery(_plan):
+            engine.index = 1
+            return recovered
+
+        with mock.patch(
+            "development_conveyor.autopilot.FeatureResultRecovery"
+        ) as recovery_type:
+            recovery_type.return_value.inspect.return_value = {
+                "plan_fingerprint": "recovery-plan"
+            }
+            recovery_type.return_value.apply.side_effect = apply_recovery
+            result = self.make(engine).apply()
+
+        events = [item["event"] for item in result["events"]]
+        self.assertIn("RECOVERY_STARTED", events)
+        self.assertIn("RECOVERY_APPLIED", events)
+        self.assertIn("FEATURE_INTEGRATED", events)
+        self.assertEqual(engine.calls, [("milestone", False)])
+        self.assertNotIn("FEATURE_BLOCKED", events)
+
+    def test_feature_execution_technical_gate_auto_recovers(self):
+        technical = plan(
+            "feature_result_recovery",
+            state="technical_recovery_required",
+        )
+        technical["recognized_technical_recovery"] = True
+        technical["feature_result_recovery"] = {
+            "feature_id": "F001",
+            "original_transaction_id": "execution-transaction",
+            "original_run_id": "feature-run",
+            "original_session_id": "feature-session",
+            "expected_branch": "codex/F001",
+            "expected_head": "a" * 40,
+        }
+        engine = FakeEngine(
+            [
+                plan("feature_cycle"),
+                technical,
+                plan("milestone_integration", state="integration_pending"),
+                plan("paused", feature=None, state="paused"),
+            ],
+            [
+                {
+                    "outcome": "human_decision_required",
+                    "human_gate": {
+                        "classification": "structured_output_invalid"
+                    },
+                },
+                {"outcome": "unused"},
+                {"outcome": "feature_integrated"},
+            ],
+        )
+
+        def apply_recovery(_plan):
+            engine.index = 2
+            return {
+                "outcome": "integration_pending",
+                "model_sessions_launched": 0,
+                "child_sessions_launched": 0,
+            }
+
+        with mock.patch(
+            "development_conveyor.autopilot.FeatureResultRecovery"
+        ) as recovery_type:
+            recovery_type.return_value.inspect.return_value = {
+                "plan_fingerprint": "recovery-plan"
+            }
+            recovery_type.return_value.apply.side_effect = apply_recovery
+            result = self.make(engine).apply()
+
+        events = [item["event"] for item in result["events"]]
+        self.assertEqual(
+            [("one_feature", False), ("milestone", False)],
+            engine.calls,
+        )
+        self.assertIn("RECOVERY_STARTED", events)
+        self.assertIn("RECOVERY_APPLIED", events)
+        self.assertIn("FEATURE_INTEGRATED", events)
+        self.assertNotIn("FEATURE_BLOCKED", events)
+
+    def test_identical_technical_recovery_failure_is_bounded_without_gate(self):
+        technical = plan(
+            "feature_result_recovery",
+            state="technical_recovery_required",
+        )
+        technical["recognized_technical_recovery"] = True
+        technical["feature_result_recovery"] = {
+            "feature_id": "F001",
+            "original_transaction_id": "execution-transaction",
+            "original_run_id": "feature-run",
+            "original_session_id": "feature-session",
+            "expected_branch": "codex/F001",
+            "expected_head": "a" * 40,
+        }
+        engine = FakeEngine([technical], [])
+        with mock.patch(
+            "development_conveyor.autopilot.FeatureResultRecovery"
+        ) as recovery_type:
+            recovery_type.return_value.inspect.side_effect = RecoveryError(
+                "same retained evidence mismatch"
+            )
+            result = self.make(engine).apply()
+
+        events = [item["event"] for item in result["events"]]
+        self.assertEqual(events.count("RECOVERY_STARTED"), 2)
+        self.assertNotIn("RECOVERY_APPLIED", events)
+        self.assertIn("FEATURE_BLOCKED", events)
+        self.assertTrue(result["ownership_released"])
+        self.assertIn("recoverable technical failure", result["diagnostic"])
 
     def test_canonical_feature_execution_alias_uses_feature_route(self):
         engine = FakeEngine(

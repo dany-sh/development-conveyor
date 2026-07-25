@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .contracts import fingerprint
+from .contracts import WorkflowType, fingerprint
 from .errors import ProjectionError, RecoveryError, StaleProjectionCache
 from .ledger import EvidenceLedger, TERMINAL_EVENT_TYPES
 from .logging import atomic_write_json
@@ -340,16 +340,53 @@ def _bind_terminal_cycle_cache(
     canonical_projection = binding.canonical_projection
     terminal = ledger.terminal_event(transaction_id)
     terminal_payload = (terminal or {}).get("payload", {})
-    terminal_feature = terminal_payload.get("selected_feature") or terminal_payload.get(
-        "feature_id"
+    workflow = (terminal or {}).get("workflow_type")
+    transaction = next(
+        (
+            item
+            for item in canonical_projection.get("transactions", ())
+            if item.get("transaction_id") == transaction_id
+        ),
+        None,
     )
-    selected_feature = canonical_projection.get(
-        "selected_next_feature"
-    ) or canonical_projection.get("current_feature")
-    if expected_feature is not None and (
-        terminal_feature != expected_feature or selected_feature != expected_feature
-    ):
-        raise RecoveryError("cycle cache selected feature disagrees with terminal projection")
+    transaction_feature = (
+        transaction.get("feature_id") if isinstance(transaction, dict) else None
+    )
+    terminal_feature = terminal_payload.get("feature_id")
+    terminal_selection = terminal_payload.get("selected_feature")
+    projection_feature = canonical_projection.get("current_feature")
+    projection_selection = canonical_projection.get("selected_next_feature")
+    feature_phase = workflow in {
+        WorkflowType.FEATURE_PREPARATION.value,
+        WorkflowType.FEATURE_EXECUTION.value,
+        WorkflowType.FEATURE_ACCEPTANCE.value,
+    }
+    if expected_feature is not None and feature_phase:
+        if (
+            transaction_feature != expected_feature
+            or projection_feature != expected_feature
+            or terminal_feature not in {None, expected_feature}
+        ):
+            raise RecoveryError(
+                "cycle cache active feature disagrees with terminal projection"
+            )
+        if any(
+            value not in {None, expected_feature}
+            for value in (terminal_selection, projection_selection)
+        ):
+            raise RecoveryError(
+                "cycle cache selected feature contradicts active feature identity"
+            )
+    elif expected_feature is not None:
+        selected_feature = terminal_selection or terminal_feature
+        projected_feature = projection_selection or projection_feature
+        if (
+            selected_feature != expected_feature
+            or projected_feature != expected_feature
+        ):
+            raise RecoveryError(
+                "cycle cache selected feature disagrees with terminal projection"
+            )
     finalized = dict(state)
     finalized.pop(LEGACY_CACHE_BINDING_RECOVERY_FIELD, None)
     finalized.update(

@@ -1469,6 +1469,123 @@ class CycleEngine:
     def project_plan(self, project: Project) -> dict[str, Any]:
         return self._project_plan(project, allow_cache_binding_recovery=True)
 
+    def _feature_result_recovery_plan(
+        self, project: Project, projection: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Recognize one exact retained structured-output-invalid feature result."""
+
+        gate = projection.get("human_gate")
+        if (
+            projection.get("current_state") != "human_decision_required"
+            or not isinstance(gate, dict)
+            or gate.get("classification") != "structured_output_invalid"
+            or gate.get("workflow_type")
+            != WorkflowType.FEATURE_EXECUTION.value
+            or gate.get("resolved") not in {None, False}
+        ):
+            return None
+        transaction_id = gate.get("transaction_id")
+        run_id = gate.get("run_id")
+        feature_id = gate.get("feature")
+        transactions = projection.get("transactions")
+        transaction = next(
+            (
+                item
+                for item in transactions or ()
+                if isinstance(item, dict)
+                and item.get("transaction_id") == transaction_id
+                and item.get("workflow_type")
+                == WorkflowType.FEATURE_EXECUTION.value
+            ),
+            None,
+        )
+        snapshot = (
+            transaction.get("starting_snapshot")
+            if isinstance(transaction, dict)
+            else None
+        )
+        sessions = (
+            transaction.get("session_ids")
+            if isinstance(transaction, dict)
+            else None
+        )
+        exact_session = (
+            sessions[0]
+            if isinstance(sessions, list)
+            and len(sessions) == 1
+            and isinstance(sessions[0], str)
+            and sessions[0]
+            else None
+        )
+        if not all(
+            (
+                isinstance(transaction_id, str) and transaction_id,
+                isinstance(run_id, str) and run_id,
+                isinstance(feature_id, str) and feature_id,
+                projection.get("current_feature") == feature_id,
+                projection.get("selected_next_feature") is None,
+                isinstance(snapshot, dict),
+                isinstance(snapshot.get("branch"), str)
+                and snapshot.get("branch"),
+                isinstance(snapshot.get("head"), str) and snapshot.get("head"),
+                exact_session is not None,
+            )
+        ):
+            return None
+        arguments = {
+            "feature_id": feature_id,
+            "original_transaction_id": transaction_id,
+            "original_run_id": run_id,
+            "original_session_id": exact_session,
+            "expected_branch": snapshot["branch"],
+            "expected_head": snapshot["head"],
+        }
+        from .feature_result_recovery import FeatureResultRecovery
+
+        try:
+            inspected = FeatureResultRecovery(
+                controller_root=self.root,
+                configuration=self.configuration.conveyor,
+                project=project,
+            ).inspect(**arguments)
+        except RecoveryError as exc:
+            return {
+                **arguments,
+                "evidence_authenticated": False,
+                "preflight_error": redact_text(str(exc)),
+                "model_sessions_that_would_launch": 0,
+                "child_sessions_that_would_launch": 0,
+                "milestone_integration_performed": False,
+                "queue_reconciliation_performed": False,
+            }
+        return {
+            **arguments,
+            "evidence_authenticated": True,
+            "preparation_transaction_id": inspected.get(
+                "preparation_transaction_id"
+            ),
+            "tracked_diff_fingerprint": inspected[
+                "tracked_diff_fingerprint"
+            ],
+            "untracked_fingerprint": inspected["untracked_fingerprint"],
+            "changed_paths": inspected["changed_paths"],
+            "host_validation_commands": inspected[
+                "host_validation_commands"
+            ],
+            "candidate_commits_that_would_be_created": inspected[
+                "candidate_commits_that_would_be_created"
+            ],
+            "original_gate_id": inspected["original_gate_id"],
+            "gate_supersession": inspected["gate_supersession"],
+            "next_state_on_success": inspected["next_state_on_success"],
+            "final_projected_state": inspected["final_projected_state"],
+            "model_sessions_that_would_launch": 0,
+            "child_sessions_that_would_launch": 0,
+            "milestone_integration_performed": False,
+            "queue_reconciliation_performed": False,
+            "inspected_plan_fingerprint": inspected["plan_fingerprint"],
+        }
+
     def _project_plan(
         self, project: Project, *, allow_cache_binding_recovery: bool
     ) -> dict[str, Any]:
@@ -1526,6 +1643,48 @@ class CycleEngine:
                     ),
                 },
             })
+            feature_result_recovery = self._feature_result_recovery_plan(
+                effective, authoritative
+            )
+            if feature_result_recovery is not None:
+                plan.update({
+                    "current_state": "technical_recovery_required",
+                    "workflow_type": "feature_result_recovery",
+                    "transaction_mode": "recovery",
+                    "proposed_next_action": "feature_result_recovery",
+                    "next_action": "feature_result_recovery",
+                    "selected_feature": feature_result_recovery["feature_id"],
+                    "human_gate": None,
+                    "human_decision_required": None,
+                    "technical_gate_to_supersede": authoritative.get(
+                        "human_gate"
+                    ),
+                    "recognized_technical_recovery": True,
+                    "feature_result_recovery": feature_result_recovery,
+                    "model_sessions_that_would_launch": [],
+                    "child_sessions_that_would_launch": [],
+                    "sessions_that_would_launch": [],
+                    "execution": {"models_planned": 0},
+                    "deterministic_only": True,
+                    "application_mutation_expected": True,
+                    "feature_factory_would_launch": False,
+                    "milestone_integrator_would_launch": False,
+                    "expected_stop_condition": (
+                        "Authenticate and recover the exact retained feature "
+                        "result, then stop at integration_pending."
+                    ),
+                    "compatibility_preflight": None,
+                })
+                plan["cost_aware_run_plan"] = build_run_plan(
+                    plan,
+                    self.root,
+                    project=effective,
+                    profile_configuration=(
+                        self.configuration.execution_profiles or None
+                    ),
+                    override_profile=self.execution_profile_override,
+                )
+                return plan
             planning_recovery = self._planning_finalization_recovery_plan(
                 effective, authoritative
             )

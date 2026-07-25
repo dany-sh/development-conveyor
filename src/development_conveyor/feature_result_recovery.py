@@ -454,6 +454,60 @@ class FeatureResultRecovery:
             ),
             None,
         )
+        preparation_candidates: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+        for candidate in events:
+            if (
+                candidate.get("event_type") != "TransactionStarted"
+                or candidate.get("workflow_type")
+                != WorkflowType.FEATURE_PREPARATION.value
+                or candidate.get("sequence", 0) >= (start or {}).get(
+                    "sequence", 0
+                )
+            ):
+                continue
+            payload = candidate.get("payload") or {}
+            if (
+                payload.get("run_id") != original_run_id
+                or payload.get("feature_id") != feature_id
+            ):
+                continue
+            candidate_events = [
+                event
+                for event in events
+                if event["transaction_id"] == candidate["transaction_id"]
+            ]
+            preparation_candidates.append((candidate, candidate_events))
+        preparation = (
+            max(preparation_candidates, key=lambda item: item[0]["sequence"])
+            if preparation_candidates
+            else None
+        )
+        preparation_start = preparation[0] if preparation else None
+        preparation_events = preparation[1] if preparation else []
+        preparation_terminal = next(
+            (
+                event
+                for event in preparation_events
+                if event.get("event_type") == "TransactionCompleted"
+            ),
+            None,
+        )
+        preparation_projection = next(
+            (
+                event
+                for event in preparation_events
+                if event.get("event_type") == "ProjectionUpdated"
+            ),
+            None,
+        )
+        preparation_session = next(
+            (
+                event
+                for event in preparation_events
+                if event.get("event_type") == "SessionLaunched"
+            ),
+            None,
+        )
         report_path, report, terminal_payload = self._report(original_run_id)
         identity = self.inspector.identity()
         writer = inspect_repository_writer_lock(
@@ -496,6 +550,26 @@ class FeatureResultRecovery:
         starting_snapshot = (captured or {}).get("payload", {}).get("snapshot")
         starting_snapshot = (
             starting_snapshot if isinstance(starting_snapshot, dict) else {}
+        )
+        preparation_payload = (
+            preparation_start.get("payload")
+            if isinstance(preparation_start, dict)
+            else {}
+        )
+        preparation_terminal_payload = (
+            preparation_terminal.get("payload")
+            if isinstance(preparation_terminal, dict)
+            else {}
+        )
+        preparation_terminal_snapshot = (
+            preparation_terminal_payload.get("terminal_snapshot")
+            if isinstance(preparation_terminal_payload, dict)
+            else {}
+        )
+        preparation_projection_payload = (
+            preparation_projection.get("payload")
+            if isinstance(preparation_projection, dict)
+            else {}
         )
         start_policy = start_payload.get("allowed_mutation_policy")
         start_policy = start_policy if isinstance(start_policy, dict) else {}
@@ -603,6 +677,49 @@ class FeatureResultRecovery:
         expected_alias_error = (
             "terminal session-result envelope workflow_type conflicts with invoked workflow"
         )
+        preparation_authenticated = bool(
+            preparation_start
+            and len(preparation_candidates) == 1
+            and preparation_payload.get("feature_id") == feature_id
+            and preparation_payload.get("run_id") == original_run_id
+            and preparation_payload.get("starting_head") == expected_head
+            and preparation_terminal_payload.get("classification")
+            == "FEATURE_PREPARED"
+            and preparation_terminal_payload.get("feature_id") == feature_id
+            and preparation_terminal_payload.get("next_state")
+            == "feature_preparing"
+            and preparation_terminal_snapshot.get("branch") == expected_branch
+            and preparation_terminal_snapshot.get("head") == expected_head
+            and preparation_terminal_snapshot.get("queue_fingerprint")
+            == preparation_payload.get("starting_queue_fingerprint")
+            == start_payload.get("starting_queue_fingerprint")
+            and preparation_projection_payload.get("current_feature")
+            == feature_id
+            and preparation_projection_payload.get("selected_feature") is None
+            and (
+                preparation_session or {}
+            ).get("payload", {}).get("session_id")
+            == "deterministic-feature-preparation:"
+            + str(preparation_start.get("transaction_id"))
+        )
+        phase_feature_identity = {
+            "transaction_feature_id": start_payload.get("feature_id"),
+            "projection_current_feature": projection.get("current_feature"),
+            "projection_selected_next_feature": projection.get(
+                "selected_next_feature"
+            ),
+            "run_id": start_payload.get("run_id"),
+            "session_id": (launch or {}).get("payload", {}).get("session_id"),
+            "branch": self.inspector.current_branch,
+            "starting_commit": start_payload.get("starting_head"),
+            "queue_feature_id": feature.get("id") if isinstance(feature, dict) else None,
+            "preparation_transaction_id": (
+                preparation_start.get("transaction_id")
+                if preparation_start
+                else None
+            ),
+            "selection_consumed": projection.get("selected_next_feature") is None,
+        }
         checks = {
             "ledger_integrity": integrity.valid,
             "original_transaction_exact_event_topology": event_types
@@ -692,6 +809,7 @@ class FeatureResultRecovery:
                 "queue_fingerprint"
             )
             == current_snapshot.queue_fingerprint
+            and starting_snapshot.get("queue_fingerprint")
             == start_payload.get("starting_queue_fingerprint"),
             "no_unauthorized_paths": not unauthorized,
             "index_unstaged": not self.inspector.staged_changed_paths(),
@@ -713,6 +831,26 @@ class FeatureResultRecovery:
             "projection_feature": projection.get("current_feature")
             == feature_id
             and projection.get("selected_next_feature") is None,
+            "phase_feature_identity": all(
+                (
+                    phase_feature_identity["transaction_feature_id"]
+                    == feature_id,
+                    phase_feature_identity["projection_current_feature"]
+                    == feature_id,
+                    phase_feature_identity["run_id"] == original_run_id,
+                    phase_feature_identity["session_id"]
+                    == original_session_id,
+                    phase_feature_identity["branch"] == expected_branch,
+                    phase_feature_identity["starting_commit"] == expected_head,
+                    phase_feature_identity["queue_feature_id"] == feature_id,
+                )
+            ),
+            "preparation_topology": (
+                preparation_authenticated
+                if isinstance(feature, dict)
+                and feature.get("status") == "in_progress"
+                else not preparation_candidates or preparation_authenticated
+            ),
             "projection_transaction_inactive": projection.get(
                 "active_transaction"
             )
@@ -729,8 +867,14 @@ class FeatureResultRecovery:
             "gate_contract_exact": gate == terminal_gate
             and (terminal or {}).get("payload", {}).get("gate_fingerprint")
             == fingerprint(terminal_gate),
-            "queue_feature_ready": isinstance(feature, dict)
-            and feature.get("status") == "ready",
+            "queue_feature_recoverable": isinstance(feature, dict)
+            and (
+                feature.get("status") == "ready"
+                or (
+                    feature.get("status") == "in_progress"
+                    and preparation_authenticated
+                )
+            ),
             "queue_decision_approved": isinstance(feature, dict)
             and feature.get("requires_human_decision") is False
             and (decision is None or decision_contract),
@@ -778,8 +922,22 @@ class FeatureResultRecovery:
             "original_event_fingerprints": [
                 event["fingerprint"] for event in transaction_events
             ],
+            "preparation_transaction_id": (
+                preparation_start["transaction_id"]
+                if preparation_start
+                else None
+            ),
+            "preparation_event_fingerprints": [
+                event["fingerprint"] for event in preparation_events
+            ],
+            "phase_feature_identity": phase_feature_identity,
             "original_gate_id": gate["gate_id"],
             "original_gate_fingerprint": fingerprint(gate),
+            "gate_supersession": {
+                "gate_id": gate["gate_id"],
+                "action": "supersede_and_resolve_after_host_validation",
+                "append_only_history_preserved": True,
+            },
             "report_path": str(report_path),
             "report_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
             "report_error": expected_alias_error,
@@ -813,6 +971,7 @@ class FeatureResultRecovery:
             "application_repository_written": False,
             "lease_type": "feature_writer",
             "next_state_on_success": "integration_pending",
+            "final_projected_state": "integration_pending",
             "milestone_integration_performed": False,
             "queue_reconciliation_performed": False,
         }
@@ -1110,7 +1269,12 @@ class FeatureResultRecovery:
         if len(matches) != 1:
             raise RecoveryError("recovery acceptance queue feature is not unique")
         feature = matches[0]
-        if feature.get("status") != "ready" or feature.get("accepted_commit"):
+        recoverable_status = feature.get("status") == "ready" or (
+            feature.get("status") == "in_progress"
+            and isinstance(plan.get("preparation_transaction_id"), str)
+            and bool(plan["preparation_transaction_id"])
+        )
+        if not recoverable_status or feature.get("accepted_commit"):
             raise RecoveryError(
                 "recovery acceptance queue changed before finalization"
             )
@@ -2005,6 +2169,9 @@ class FeatureResultRecovery:
                 "run_id": run_id,
                 "recovery_transaction_id": transaction.transaction_id,
                 "recovered_transaction_id": plan["original_transaction_id"],
+                "preparation_transaction_id": plan.get(
+                    "preparation_transaction_id"
+                ),
                 "resolved_gate_id": plan["original_gate_id"],
                 "candidate_implementation_commit": accepted_commit,
                 "accepted_feature_commit": accepted_commit,

@@ -23,6 +23,7 @@ from .errors import (
     AutopilotStopRequested,
     ConveyorError,
     LockError,
+    RecoveryError,
 )
 from .locks import process_alive, read_lock
 from .logging import atomic_write_json, utc_now
@@ -718,16 +719,28 @@ class Autopilot:
                 plan = self.engine.project_plan(self.project)
                 consistency = self._consistency()
                 classification = consistency.get("classification")
-                if classification not in {"CONSISTENT", "RECOVERABLE_INCONSISTENCY"}:
+                action = self._action(plan)
+                recognized_recovery = bool(
+                    action == "feature_result_recovery"
+                    and plan.get("recognized_technical_recovery") is True
+                )
+                if (
+                    classification
+                    not in {"CONSISTENT", "RECOVERABLE_INCONSISTENCY"}
+                    and not recognized_recovery
+                ):
                     terminal = "AUTOPILOT_FAILED"
                     diagnostic = (
                         "consistency requires a genuine gate: "
                         f"{classification or 'unknown'}"
                     )
                     break
-                action = self._action(plan)
                 feature = self._feature(plan)
-                if action in {"human_decision_resolution", "human_merge_approval"} or plan.get("human_gate"):
+                if (
+                    action
+                    in {"human_decision_resolution", "human_merge_approval"}
+                    or (plan.get("human_gate") and not recognized_recovery)
+                ):
                     terminal = "AUTOPILOT_STOPPED"
                     diagnostic = "authoritative projection contains a genuine human gate"
                     break
@@ -771,11 +784,32 @@ class Autopilot:
                 # Stop requests arriving during it are observed immediately
                 # after the route returns, never by killing a Git/ledger write.
                 started = time.monotonic()
-                result = self._route(action, plan)
+                try:
+                    result = self._route(action, plan)
+                except RecoveryError as exc:
+                    if not recovery:
+                        raise
+                    result = {
+                        "outcome": "deterministic_recovery_failed",
+                        "reason": redact_text(str(exc)),
+                        "recoverable_technical_failure": True,
+                        "human_gate_created": False,
+                        "model_sessions_launched": 0,
+                        "child_sessions_launched": 0,
+                    }
                 elapsed = time.monotonic() - started
                 self._record_result(plan, result, elapsed=elapsed)
 
-                if recovery:
+                recovery_failed = result.get(
+                    "recoverable_technical_failure"
+                ) is True or str(
+                    result.get("outcome") or result.get("classification") or ""
+                ) in {
+                    "deterministic_recovery_failed",
+                    "validation_failed",
+                    "VALIDATION_FAILED",
+                }
+                if recovery and not recovery_failed:
                     self._emit(
                         "RECOVERY_APPLIED",
                         plan=plan,
@@ -809,6 +843,13 @@ class Autopilot:
 
                 result_terminal = self._terminal_result(result)
                 if result_terminal == "human_gate":
+                    next_plan = self.engine.project_plan(self.project)
+                    if (
+                        self._action(next_plan) == "feature_result_recovery"
+                        and next_plan.get("recognized_technical_recovery")
+                        is True
+                    ):
+                        continue
                     terminal = "AUTOPILOT_STOPPED"
                     diagnostic = "normal route produced a genuine human gate"
                     break
@@ -825,6 +866,7 @@ class Autopilot:
                     "TERMINAL_FEATURE_FAILURE",
                     "TERMINAL_PLANNING_FAILURE",
                     "VALIDATION_FAILED",
+                    "deterministic_recovery_failed",
                 }
                 if failed:
                     signature = self._failure_signature(action, plan, result)
@@ -867,7 +909,8 @@ class Autopilot:
                             continue
                         terminal = "AUTOPILOT_STOPPED"
                         diagnostic = (
-                            "bounded recovery exhausted and no newly projected "
+                            "recoverable technical failure: bounded recovery "
+                            "exhausted and no newly projected "
                             "dependency-independent feature is safe"
                         )
                         break
