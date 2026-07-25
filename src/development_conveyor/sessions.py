@@ -26,6 +26,7 @@ from .repository import RepositoryInspector
 from .queue import FeatureQueue
 from .validation import SafetyPolicy
 from .contracts import TERMINAL_ENVELOPE_MARKER, extract_terminal_envelope
+from .context_pack import ContextReadError, build_context_pack
 
 ACTION_PROMPTS = {
     "queue_reconciliation": "queue-reconciliation.md",
@@ -187,6 +188,7 @@ class SessionPlan:
     launched_model: str | None = None
     launched_reasoning: str | None = None
     collaboration_tools_removed: bool = False
+    context_pack_evidence: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1238,21 +1240,12 @@ class SessionLauncher:
     def _focused_feature_context(self, request: SessionRequest) -> str:
         """Embed only the controller-selected application feature context pack."""
 
-        repository = request.project.repository.resolve()
-        rendered: list[str] = []
-        for relative in request.context_files:
-            candidate = (repository / relative).resolve()
-            try:
-                candidate.relative_to(repository)
-            except ValueError as exc:
-                raise SessionError("feature context path escapes the repository") from exc
-            if not candidate.is_file():
-                raise SessionError(f"feature context file is unavailable: {relative}")
-            try:
-                content = candidate.read_text(encoding="utf-8")
-            except OSError as exc:
-                raise SessionError(f"feature context file cannot be read: {relative}") from exc
-            rendered.append(f"### {relative}\n\n```text\n{content.rstrip()}\n```")
+        pack = build_context_pack(
+            request.project.repository,
+            request.context_files,
+            phase="feature_prompt_render",
+        )
+        rendered = [pack.rendered] if pack.rendered else []
         if request.embedded_context is not None:
             if not request.embedded_context.strip():
                 raise SessionError("embedded feature context cannot be empty")
@@ -1360,6 +1353,16 @@ class SessionLauncher:
             raise SessionError(
                 "positive child-session budgets are not enforceable by this direct launcher"
             )
+        context_evidence = None
+        if request.action == "feature_cycle":
+            try:
+                context_evidence = build_context_pack(
+                    request.project.repository,
+                    request.context_files,
+                    phase="feature_prompt_render",
+                ).evidence
+            except ContextReadError:
+                raise
         prompt = self._render_prompt(request)
         compatibility = self.compatibility(
             request.action,
@@ -1431,12 +1434,14 @@ class SessionLauncher:
             launched_model=launched_model,
             launched_reasoning=launched_reasoning,
             collaboration_tools_removed=collaboration_tools_removed,
+            context_pack_evidence=context_evidence,
         )
 
     def launch(
         self,
         request: SessionRequest,
         on_session_started: Callable[[str], None] | None = None,
+        on_context_ready: Callable[[dict[str, Any]], None] | None = None,
     ) -> SessionResult:
         if request.session_kind == "child" and (request.child_session_budget is None or request.child_session_budget <= 0):
             raise SessionError("child session budget exhausted or prohibited before Codex launch")
@@ -1452,6 +1457,8 @@ class SessionLauncher:
                 if launched >= request.parent_session_budget:
                     raise SessionError("parent session budget exhausted before Codex launch")
         plan = self.plan(request)
+        if on_context_ready is not None:
+            on_context_ready(dict(plan.context_pack_evidence or {}))
         if request.session_kind == "parent" and request.parent_session_budget is not None:
             with self._budget_lock:
                 launched = self._parent_launch_counts.get(key, 0)

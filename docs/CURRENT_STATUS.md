@@ -1,8 +1,29 @@
 # Current Status
 
-Last updated: 2026-07-24
+Last updated: 2026-07-25
 
 ## Summary
+
+Binary-safe feature context and deterministic prelaunch recovery are
+implemented on `codex/m1-15-binary-safe-feature-context` from exact parent
+`95cbafe54761590e24d12ac461852d73d4d505c4`. The F070 failure is traced to
+the broad source/test scorer admitting
+`output/native-final/test-call-setup-2.png`: the scorer first decoded it
+lossily and the prompt renderer later attempted strict UTF-8 without path or
+phase evidence.
+
+One shared byte-first reader now excludes generated output, recognizes PNG and
+other clear binary content, bounds text size, strictly decodes UTF-8
+candidates, safely renders relevant binary metadata, and fingerprints explicit
+context evidence. Autopilot separates context start/readiness from an
+authenticated model-session start.
+
+The new `recover-feature-prelaunch` route authenticates the exact clean F070
+zero-session topology and preserves the prepared branch and HEAD. Dry-run is
+write-free; apply remains unexecuted and would refresh projection and both
+compatibility caches under one recovery lease, keep F070 selected, consume no
+implementation attempt, and return to `feature_preparing` without queue
+reconciliation, application validation, or a commit.
 
 Post-integration planning-result recovery is implemented on
 `codex/m1-14-post-integration-planning-recovery` from exact parent

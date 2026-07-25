@@ -28,6 +28,7 @@ WORKFLOW_ACTIVE_STATE = {
 
 NEXT_ACTION = {
     "feature_ready": "feature_cycle",
+    "feature_preparing": "feature_cycle",
     "feature_accepted": "milestone_integration",
     "integration_pending": "milestone_integration",
     "integration_ready": "milestone_integration",

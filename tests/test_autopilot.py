@@ -118,6 +118,136 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual(result["dry_run_guarantees"]["children"], 0)
         self.assertEqual(engine.calls, [])
 
+    def test_feature_session_event_requires_authenticated_session_identity(self):
+        controller = self.make(FakeEngine([plan("feature_cycle")], []))
+        controller._observe_lifecycle(
+            "feature_context_started",
+            {"feature_id": "F001", "transaction_id": "tx"},
+        )
+        controller._observe_lifecycle(
+            "feature_context_ready",
+            {
+                "feature_id": "F001",
+                "transaction_id": "tx",
+                "context_pack": {"context_pack_fingerprint": "abc"},
+            },
+        )
+        self.assertNotIn(
+            "FEATURE_SESSION_STARTED",
+            [event["event"] for event in controller._events],
+        )
+        controller._observe_lifecycle(
+            "feature_session_started",
+            {
+                "feature_id": "F001",
+                "transaction_id": "tx",
+                "session_id": "019f-authenticated",
+            },
+        )
+        self.assertEqual(
+            controller._events[-1]["event"], "FEATURE_SESSION_STARTED"
+        )
+        self.assertIn(
+            "019f-authenticated", controller._events[-1]["diagnostic"]
+        )
+
+    def test_prelaunch_recovery_reaches_authenticated_feature_launch(self):
+        recovery_plan = plan(
+            "feature_prelaunch_recovery",
+            state="feature_prelaunch_failed",
+        )
+        recovery_plan.update({
+            "recognized_technical_recovery": True,
+            "feature_prelaunch_recovery": {
+                "feature_id": "F001",
+                "autopilot_run_id": "failed-autopilot",
+                "expected_branch": "codex/F001-synthetic-feature",
+                "expected_head": "a" * 40,
+            },
+        })
+        engine = FakeEngine(
+            [
+                recovery_plan,
+                plan("feature_cycle", state="feature_preparing"),
+                plan("paused", feature=None, state="paused"),
+            ],
+            [
+                {"outcome": "unused"},
+                {
+                    "outcome": "feature_accepted",
+                    "model_session_launched": True,
+                    "child_sessions_launched": 0,
+                },
+            ],
+        )
+        controller = self.make(engine)
+
+        class FakePrelaunchRecovery:
+            def __init__(self, **_kwargs):
+                pass
+
+            def inspect(self, **kwargs):
+                return kwargs
+
+            def apply(self, _inspected):
+                engine.index = 1
+                return {
+                    "outcome": "prelaunch_recovery_applied",
+                    "model_sessions_launched": 0,
+                    "child_sessions_launched": 0,
+                }
+
+        def observe_launch(index):
+            if index != 2:
+                return
+            engine.lifecycle_observer(
+                "feature_context_started",
+                {"feature_id": "F001", "transaction_id": "feature-tx"},
+            )
+            engine.lifecycle_observer(
+                "feature_context_ready",
+                {
+                    "feature_id": "F001",
+                    "transaction_id": "feature-tx",
+                    "context_pack": {"context_pack_fingerprint": "safe-pack"},
+                },
+            )
+            engine.lifecycle_observer(
+                "feature_session_started",
+                {
+                    "feature_id": "F001",
+                    "transaction_id": "feature-tx",
+                    "session_id": "authenticated-f070-equivalent",
+                },
+            )
+
+        engine.after_run = observe_launch
+        with mock.patch(
+            "development_conveyor.autopilot.FeaturePrelaunchRecovery",
+            FakePrelaunchRecovery,
+        ):
+            result = controller.apply()
+        events = [item["event"] for item in result["events"]]
+        self.assertLess(
+            events.index("RECOVERY_STARTED"), events.index("RECOVERY_APPLIED")
+        )
+        self.assertLess(
+            events.index("RECOVERY_APPLIED"), events.index("FEATURE_CONTEXT_READY")
+        )
+        self.assertLess(
+            events.index("FEATURE_CONTEXT_READY"),
+            events.index("FEATURE_SESSION_STARTED"),
+        )
+        self.assertIn(
+            "authenticated-f070-equivalent",
+            next(
+                item["diagnostic"]
+                for item in result["events"]
+                if item["event"] == "FEATURE_SESSION_STARTED"
+            ),
+        )
+        self.assertEqual(engine.calls, [("one_feature", False)])
+
     def test_normal_feature_acceptance_integration_and_next_feature_loop(self):
         engine = FakeEngine(
             [

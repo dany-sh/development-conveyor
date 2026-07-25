@@ -27,6 +27,15 @@ model-backed feature therefore receives a fresh focused session and its
 authoritative execution profile, while deterministic transitions launch no
 model.
 
+Feature context is a separate authenticated prelaunch phase. The shared
+byte-first context reader excludes generated output, bounds file size,
+classifies binaries before strict UTF-8 decoding, renders relevant binary
+assets as metadata only, and emits a deterministic evidence fingerprint.
+Autopilot records context start and readiness before launch, and records a
+feature session start only after the launcher exposes an authenticated session
+identity. A zero-session context failure remains a recoverable
+`feature_preparing` topology rather than an implementation failure.
+
 One controller-owned ownership record under
 `state/autopilot/<project>/ownership.json` binds project, repository identity
 and path fingerprint, host, PID, process-start evidence, heartbeat, and last

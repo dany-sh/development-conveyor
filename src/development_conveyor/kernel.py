@@ -1061,6 +1061,119 @@ class WorkflowKernel:
         transaction.next_project_state = next_state
         return commit
 
+    def finalize_clean_prelaunch_recovery(
+        self,
+        *,
+        failed_transaction_id: str,
+        failed_autopilot_run_id: str,
+        plan_fingerprint: str,
+        feature_id: str,
+    ) -> None:
+        """Supersede one authenticated zero-session feature prelaunch failure."""
+
+        transaction = self._require()
+        if (
+            transaction.workflow_type != WorkflowType.RECOVERY
+            or transaction.current_state != TransactionState.ACTIVE
+            or transaction.feature_id != feature_id
+            or transaction.session_ids
+            or not self.inspector.is_clean
+        ):
+            raise TransactionError(
+                "prelaunch recovery requires one clean active zero-session recovery"
+            )
+        if self._changed_paths():
+            raise TransactionError("prelaunch recovery refuses application changes")
+        self._revalidate_lease()
+        transaction.transition(TransactionState.RESULT_PENDING)
+        self.ledger.append(
+            event_type="DeterministicExecutionStarted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "execution_mode": "feature_prelaunch_recovery",
+                "plan_fingerprint": plan_fingerprint,
+                "failed_transaction_id": failed_transaction_id,
+                "failed_autopilot_run_id": failed_autopilot_run_id,
+                "model_session_launched": False,
+                "child_sessions_launched": 0,
+            },
+        )
+        transaction.transition(TransactionState.VALIDATING)
+        self.ledger.append(
+            event_type="DeterministicResultAccepted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "classification": "RECOVERY_APPLIED",
+                "plan_fingerprint": plan_fingerprint,
+                "current_commit": transaction.starting_head,
+                "changed_paths": [],
+                "model_session_launched": False,
+                "child_sessions_launched": 0,
+            },
+        )
+        self.ledger.append(
+            event_type="ChangesDetected",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "changed_paths": [],
+                "diff_fingerprint": self._diff_fingerprint(),
+            },
+        )
+        self.ledger.append(
+            event_type="ValidationStarted",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "changed_paths": [],
+                "executor": "feature_prelaunch_recovery",
+            },
+        )
+        self.ledger.append(
+            event_type="ValidationPassed",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "commands": [],
+                "checks": {
+                    "application_unchanged": True,
+                    "model_sessions_launched": 0,
+                    "child_sessions_launched": 0,
+                    "implementation_attempts_consumed": 0,
+                },
+            },
+        )
+        self.final_commit = transaction.starting_head
+        self.ledger.append(
+            event_type="CommitFinalized",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "commit": transaction.starting_head,
+                "parent": None,
+                "changed_paths": [],
+                "no_change": True,
+                "recovery_only": True,
+                "failed_transaction_id": failed_transaction_id,
+            },
+        )
+        self.ledger.append(
+            event_type="RecoveryApplied",
+            transaction_id=transaction.transaction_id,
+            workflow_type=transaction.workflow_type,
+            payload={
+                "classification": "FEATURE_PRELAUNCH_RECOVERY",
+                "failed_transaction_id": failed_transaction_id,
+                "selected_feature": feature_id,
+                "model_session_launched": False,
+                "child_sessions_launched": 0,
+            },
+        )
+        transaction.next_project_state = "feature_preparing"
+        transaction.transition(TransactionState.FINALIZING)
+
     def finalize_deterministic_feature_recovery(
         self,
         *,

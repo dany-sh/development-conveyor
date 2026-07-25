@@ -33,6 +33,7 @@ from .feature_decisions import FeatureDecisionResolver
 from .cycle_cache_repair import CycleCacheRepair
 from .product_plan import ProductPlanReconciler
 from .autopilot import Autopilot, autopilot_status, request_stop
+from .feature_prelaunch_recovery import FeaturePrelaunchRecovery
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
 
@@ -144,6 +145,21 @@ def _parser() -> argparse.ArgumentParser:
     recover_feature_result.add_argument("--expected-branch", required=True)
     recover_feature_result.add_argument("--expected-head", required=True)
     mode = recover_feature_result.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    recover_feature_prelaunch = subparsers.add_parser(
+        "recover-feature-prelaunch",
+        help=(
+            "authenticate and recover one clean feature context failure that "
+            "launched no model"
+        ),
+    )
+    recover_feature_prelaunch.add_argument("--project", required=True)
+    recover_feature_prelaunch.add_argument("--feature", required=True)
+    recover_feature_prelaunch.add_argument("--autopilot-run-id", required=True)
+    recover_feature_prelaunch.add_argument("--expected-branch", required=True)
+    recover_feature_prelaunch.add_argument("--expected-head", required=True)
+    mode = recover_feature_prelaunch.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
     repair_feature_result = subparsers.add_parser(
@@ -553,6 +569,24 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
         return recovery.apply(plan) if args.apply else {
             **plan,
             "outcome": "recovery_ready",
+            "application_repository_written": False,
+        }
+
+    if args.command == "recover-feature-prelaunch":
+        recovery = FeaturePrelaunchRecovery(
+            controller_root=controller_root,
+            configuration=configuration,
+            project=registry.get(args.project),
+        )
+        plan = recovery.inspect(
+            feature_id=args.feature,
+            autopilot_run_id=args.autopilot_run_id,
+            expected_branch=args.expected_branch,
+            expected_head=args.expected_head,
+        )
+        return recovery.apply(plan) if args.apply else {
+            **plan,
+            "outcome": "prelaunch_recovery_ready",
             "application_repository_written": False,
         }
 

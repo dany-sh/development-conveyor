@@ -1221,3 +1221,42 @@ This log records model configuration and deterministic deployment evidence. It n
   `recover-planning --apply`, ordinary resume, queue reconciliation, Autopilot
   restart, application tests/builds, integration, merge, push, tag,
   publication, deployment, and release were not run.
+
+### Model execution — 2026-07-25T07:12:02+00:00
+
+- Agent role: `interactive-feature-worker`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `m1_015_binary_safe_feature_context`
+- Safety and autonomy contracts unchanged: `true`
+
+## Binary-safe feature context and prelaunch recovery — 2026-07-25
+
+- Controller branch: `codex/m1-15-binary-safe-feature-context`; exact direct
+  parent: `95cbafe54761590e24d12ac461852d73d4d505c4`.
+- Root cause: `cost_policy._application_feature_context_pack` admitted
+  `output/native-final/test-call-setup-2.png` first through its broad
+  source/test traversal. The selector decoded it with replacement characters;
+  `SessionLauncher._focused_feature_context` then strictly decoded the same PNG
+  and raised a raw path-free `UnicodeDecodeError`.
+- Focused validation: 163 context-pack, cost-policy, prelaunch recovery,
+  Autopilot, projection, consistency/cache, retained-feature result and repair,
+  and post-integration planning/integration recovery tests passed. Python
+  compilation, controller configuration validation, JSON-compatible adapter
+  and queue parsing, command help, required-mode rejection, changed-file
+  content audit, and `git diff --check` passed.
+- Live dry-run: the exact F070 topology authenticated all recovery checks for
+  failed transaction `7880273c-d584-45c2-89e9-291622568c2e` and inner run
+  `cd1ea1dd-24bb-4494-b878-0a9f2ccaa5e0`. It planned zero models, children,
+  implementation attempts, application commands, application changes,
+  planning commits, and feature commits; queue reconciliation remained false.
+- Isolation: the Interview Companion branch
+  `codex/F070-applications-table`, HEAD
+  `b22f89af7a03af1b26b768b640b680daa900dba9`, clean worktree, application
+  cache, controller ledger/projection/compatibility records, and Autopilot
+  report were byte-identical before and after the dry-run.
+- Excluded by instruction: live recovery apply, ordinary resume, Autopilot
+  restart, application tests/builds, the complete controller suite, push,
+  merge, tag, publication, deployment, and release.

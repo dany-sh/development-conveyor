@@ -18,6 +18,11 @@ from typing import Any, Callable
 
 from .queue import FeatureQueue
 from .errors import SessionError
+from .context_pack import (
+    build_context_pack,
+    generated_context_reason,
+    read_context_file,
+)
 from .execution_profiles import (
     DEFAULT_PROFILES,
     resolve_execution_profile,
@@ -246,7 +251,14 @@ def _application_feature_context_pack(project: Any, feature: dict[str, Any]) -> 
     """Discover focused source/test context without influencing model choice."""
     repository = project.repository
     spec = str(feature.get("spec") or "")
-    spec_text = (repository / spec).read_text(encoding="utf-8") if spec and (repository / spec).is_file() else ""
+    spec_item = (
+        read_context_file(
+            repository, spec, phase="feature_context_selection"
+        )
+        if spec and (repository / spec).is_file()
+        else None
+    )
+    spec_text = spec_item.text if spec_item is not None else ""
     criteria = "\n".join(str(item) for item in feature.get("acceptance_criteria", []))
     contract = "\n".join((str(feature.get("title") or ""), spec_text, criteria))
     symbols = {
@@ -262,18 +274,25 @@ def _application_feature_context_pack(project: Any, feature: dict[str, Any]) -> 
     }
     ignored = {".git", ".build", ".factory", "build", "dist", "DerivedData", "node_modules"}
     candidates: list[tuple[int, str, bool]] = []
+    generated_candidates: list[str] = []
     for path in repository.rglob("*"):
-        if not path.is_file() or any(part in ignored for part in path.parts):
+        if not path.is_file():
             continue
         relative = path.relative_to(repository).as_posix()
         is_test = relative.startswith(("Tests/", "tests/")) or "test" in path.stem.lower()
         is_source = relative.startswith(("Sources/", "src/", "App/", "app/"))
         if not is_source and not is_test:
             continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")[:500_000]
-        except OSError:
+        if (
+            generated_context_reason(relative) is not None
+            or any(part in ignored for part in path.parts)
+        ):
+            generated_candidates.append(relative)
             continue
+        inspected = read_context_file(
+            repository, relative, phase="feature_context_selection"
+        )
+        text = inspected.text or ""
         relative_lower = relative.lower()
         text_lower = text.lower()
         score = sum(5 for symbol in symbols if symbol.lower() in text_lower)
@@ -314,14 +333,21 @@ def _application_feature_context_pack(project: Any, feature: dict[str, Any]) -> 
         )
         for path in files
     }
+    context = build_context_pack(
+        repository,
+        [*files, *sorted(set(generated_candidates))[:100]],
+        phase="feature_context_selection",
+        explicitly_requested=direct_paths,
+    )
     return {
         "files": files, "file_count": len(files),
-        "approximate_bytes_estimate": sum((repository / path).stat().st_size for path in files),
+        "approximate_bytes_estimate": context.evidence["total_textual_bytes"],
         "included_reasons": reasons,
         "source_files": source_files,
         "test_files": test_files,
         "excluded_categories": ["unrelated feature specifications", "unrelated milestones", "full Git history", "global memory", "unrelated skills/plugins", "full test logs"],
         "truncation": "none; bounded to the selected feature and direct contracts",
+        "evidence": context.evidence,
     }
 
 

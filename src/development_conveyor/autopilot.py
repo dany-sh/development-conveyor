@@ -22,6 +22,7 @@ from .retained_feature_repair import (
     RetainedFeatureValidationRepair,
 )
 from .accepted_commit_recovery import AcceptedCommitRecovery
+from .feature_prelaunch_recovery import FeaturePrelaunchRecovery
 from .errors import (
     AmbiguousLockError,
     AutopilotStopRequested,
@@ -40,6 +41,8 @@ from .workflow_lease import process_start_evidence
 AUTOPILOT_EVENTS = frozenset({
     "AUTOPILOT_STARTED",
     "FEATURE_SELECTED",
+    "FEATURE_CONTEXT_STARTED",
+    "FEATURE_CONTEXT_READY",
     "FEATURE_SESSION_STARTED",
     "FEATURE_ACCEPTED",
     "FEATURE_INTEGRATED",
@@ -67,6 +70,7 @@ DETERMINISTIC_RECOVERY_ROUTES = (
     "feature_result_recovery",
     "retained_feature_repair_recovery",
     "accepted_commit_recovery",
+    "feature_prelaunch_recovery",
     "integration_finalization_recovery",
     "kernel_recovery",
     "authenticated_writer_lease_recovery",
@@ -316,7 +320,7 @@ class Autopilot:
         self.engine.lifecycle_observer = self._observe_lifecycle
 
     def _observe_lifecycle(
-        self, boundary: str, _evidence: dict[str, Any]
+        self, boundary: str, evidence: dict[str, Any]
     ) -> bool:
         """Check a durable stop request at each inner lifecycle boundary.
 
@@ -325,9 +329,48 @@ class Autopilot:
         honored immediately after that route returns to a coherent checkpoint.
         """
 
+        lifecycle_event = {
+            "feature_context_started": (
+                "FEATURE_CONTEXT_STARTED",
+                "building bounded binary-safe feature context",
+            ),
+            "feature_context_ready": (
+                "FEATURE_CONTEXT_READY",
+                "feature context fingerprint="
+                + str((evidence.get("context_pack") or {}).get(
+                    "context_pack_fingerprint"
+                ) or "unavailable"),
+            ),
+            "feature_session_started": (
+                "FEATURE_SESSION_STARTED",
+                "authenticated model session="
+                + str(evidence.get("session_id") or "unavailable"),
+            ),
+        }.get(boundary)
+        if lifecycle_event is not None:
+            self._emit(
+                lifecycle_event[0],
+                plan={
+                    "selected_feature": evidence.get("feature_id"),
+                    "current_state": (
+                        "feature_running"
+                        if boundary == "feature_session_started"
+                        else "feature_preparing"
+                    ),
+                },
+                diagnostic=lifecycle_event[1],
+                transaction=(
+                    evidence.get("transaction_id")
+                    if isinstance(evidence.get("transaction_id"), str)
+                    else None
+                ),
+            )
         if boundary not in {
             "before_transaction",
             "before_model",
+            "feature_context_started",
+            "feature_context_ready",
+            "feature_session_started",
             "before_application_mutation",
             "before_commit",
             "before_integration",
@@ -526,6 +569,29 @@ class Autopilot:
         return value
 
     def _route(self, action: str, plan: dict[str, Any]) -> dict[str, Any]:
+        if action == "feature_prelaunch_recovery":
+            evidence = self._recovery_fields(
+                plan,
+                "feature_prelaunch_recovery",
+                (
+                    "feature_id",
+                    "autopilot_run_id",
+                    "expected_branch",
+                    "expected_head",
+                ),
+            )
+            recovery = FeaturePrelaunchRecovery(
+                controller_root=self.configuration.root,
+                configuration=self.configuration,
+                project=self.project,
+            )
+            inspected = recovery.inspect(
+                feature_id=evidence["feature_id"],
+                autopilot_run_id=evidence["autopilot_run_id"],
+                expected_branch=evidence["expected_branch"],
+                expected_head=evidence["expected_head"],
+            )
+            return recovery.apply(inspected)
         if action == "feature_result_recovery":
             evidence = self._recovery_fields(
                 plan,
@@ -782,6 +848,10 @@ class Autopilot:
                         and plan.get("recognized_technical_recovery") is True
                     )
                     or (
+                        action == "feature_prelaunch_recovery"
+                        and plan.get("recognized_technical_recovery") is True
+                    )
+                    or (
                         action == "retained_feature_repair"
                         and plan.get("recognized_technical_repair") is True
                     )
@@ -832,6 +902,7 @@ class Autopilot:
                     "retained_feature_repair_recovery",
                     "retained_feature_repair",
                     "accepted_commit_recovery",
+                    "feature_prelaunch_recovery",
                 }
                 if recovery:
                     self._emit(
@@ -858,15 +929,6 @@ class Autopilot:
                                 "validation plan before any commit"
                             ),
                         )
-                elif action == "feature_cycle":
-                    self._emit(
-                        "FEATURE_SESSION_STARTED",
-                        plan=plan,
-                        diagnostic=(
-                            "fresh focused parent route selected; child budget remains authoritative"
-                        ),
-                    )
-
                 # A route is the smallest safe controller-owned atomic unit.
                 # Stop requests arriving during it are observed immediately
                 # after the route returns, never by killing a Git/ledger write.

@@ -123,11 +123,13 @@ from .consistency import ConsistencyChecker
 from .workflow_recovery import RecoveryPlanner
 from .validation import SafetyPolicy
 from .cost_policy import build_run_plan
+from .context_pack import ContextReadError
 from .feature_branches import canonical_feature_branch
 from .accepted_commit import (
     acceptance_metadata_paths,
     materialize_acceptance_metadata,
 )
+from .feature_prelaunch_recovery import FeaturePrelaunchRecovery
 
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 DETERMINISTIC_COMPATIBILITY_FAILURES = {
@@ -831,6 +833,64 @@ class CycleEngine:
         })
         plan["plan_fingerprint"] = fingerprint(plan)
         return plan
+
+    def _feature_prelaunch_recovery_plan(
+        self, project: Project, projection: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        latest = max(
+            (
+                item for item in projection.get("transactions") or []
+                if item.get("workflow_type")
+                == WorkflowType.FEATURE_EXECUTION.value
+            ),
+            key=lambda item: int(item.get("last_sequence") or 0),
+            default={},
+        )
+        if (
+            projection.get("active_transaction") is not None
+            or latest.get("state") != "terminal_failure"
+            or latest.get("terminal_classification")
+            not in {
+                "FEATURE_PRELAUNCH_CONTEXT_FAILED",
+                "FEATURE_VALIDATION_FAILED",
+            }
+        ):
+            return None
+        feature_id = latest.get("feature_id")
+        snapshot = latest.get("starting_snapshot") or {}
+        report_root = self.configuration.owned_path(
+            self.configuration.conveyor["report_directory"]
+        )
+        report_path = (
+            report_root / "autopilot" / project.project_id / "latest.json"
+        )
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                feature_id,
+                snapshot.get("branch"),
+                snapshot.get("head"),
+                report.get("run_id"),
+            )
+        ):
+            return None
+        try:
+            return FeaturePrelaunchRecovery(
+                controller_root=self.root,
+                configuration=self.configuration,
+                project=project,
+            ).inspect(
+                feature_id=feature_id,
+                autopilot_run_id=report["run_id"],
+                expected_branch=snapshot["branch"],
+                expected_head=snapshot["head"],
+            )
+        except RecoveryError:
+            return None
 
     def _failed_planning_recovery_supersession(
         self,
@@ -1841,6 +1901,36 @@ class CycleEngine:
                     ),
                 },
             })
+            feature_prelaunch_recovery = self._feature_prelaunch_recovery_plan(
+                effective, authoritative
+            )
+            if feature_prelaunch_recovery is not None:
+                plan.update({
+                    "current_state": "technical_recovery_required",
+                    "workflow_type": "feature_prelaunch_recovery",
+                    "transaction_mode": "recovery",
+                    "proposed_next_action": "feature_prelaunch_recovery",
+                    "next_action": "feature_prelaunch_recovery",
+                    "selected_feature": feature_prelaunch_recovery["feature_id"],
+                    "human_gate": None,
+                    "human_decision_required": None,
+                    "recognized_technical_recovery": True,
+                    "feature_prelaunch_recovery": feature_prelaunch_recovery,
+                    "model_sessions_that_would_launch": [],
+                    "child_sessions_that_would_launch": [],
+                    "sessions_that_would_launch": [],
+                    "execution": {"models_planned": 0},
+                    "deterministic_only": True,
+                    "application_mutation_expected": False,
+                    "feature_factory_would_launch": False,
+                    "milestone_integrator_would_launch": False,
+                    "expected_stop_condition": (
+                        "Recover the clean prepared feature branch without "
+                        "consuming an implementation attempt, then retry F070."
+                    ),
+                    "compatibility_preflight": None,
+                })
+                return plan
             retained_feature_repair_recovery = (
                 self._retained_feature_repair_recovery_plan(
                     effective, authoritative
@@ -2954,7 +3044,7 @@ class CycleEngine:
         reservation_held: bool = False,
         on_session_started: Callable[[str], None] | None = None,
     ) -> SessionResult:
-        self._observe_lifecycle("before_model", {
+        self._observe_lifecycle("feature_context_started", {
             "project_id": request.project.project_id,
             "feature_id": request.feature,
             "transaction_id": request.transaction_id,
@@ -3031,16 +3121,49 @@ class CycleEngine:
             result: SessionResult
             try:
                 supports_observer = "on_session_started" in inspect.signature(self.launcher.launch).parameters
+                supports_context_observer = (
+                    "on_context_ready"
+                    in inspect.signature(self.launcher.launch).parameters
+                )
                 if request.transaction_id is not None and not supports_observer:
                     raise SessionError("typed workflow launcher cannot expose early session identity")
+                def context_ready(evidence: dict[str, Any]) -> None:
+                    self._observe_lifecycle("feature_context_ready", {
+                        "project_id": request.project.project_id,
+                        "feature_id": request.feature,
+                        "transaction_id": request.transaction_id,
+                        "action": request.action,
+                        "context_pack": evidence,
+                    })
+                    self._observe_lifecycle("before_model", {
+                        "project_id": request.project.project_id,
+                        "feature_id": request.feature,
+                        "transaction_id": request.transaction_id,
+                        "action": request.action,
+                    })
                 result = (
-                    self.launcher.launch(request, on_session_started=on_session_started)
+                    self.launcher.launch(
+                        request,
+                        on_session_started=on_session_started,
+                        on_context_ready=context_ready,
+                    )
+                    if supports_observer and supports_context_observer
+                    else self.launcher.launch(
+                        request, on_session_started=on_session_started
+                    )
                     if supports_observer else self.launcher.launch(request)
                 )
+                if not supports_context_observer:
+                    context_ready(
+                        dict(result.plan.context_pack_evidence or {})
+                    )
                 if on_session_started is not None and not supports_observer:
                     if not result.session_id:
                         raise SessionError("session launch returned no observable session identity")
                     on_session_started(result.session_id)
+            except ContextReadError as exc:
+                self._persist_launch_failure(request, phase, exc)
+                raise
             except SessionError as exc:
                 report_path = self._persist_launch_failure(request, phase, exc)
                 match = re.search(r"classification=([a-z_]+)", str(exc))
@@ -3143,10 +3266,28 @@ class CycleEngine:
         message = str(error)
         match = re.search(r"classification=([a-z_]+)", message)
         classification = (
-            match.group(1)
+            error.classification
+            if isinstance(error, ContextReadError)
+            else match.group(1)
             if match
             else ("process_launch_failure" if "process launch failed" in message else "session_execution_failed")
         )
+        failed_context_evidence = None
+        if isinstance(error, ContextReadError):
+            failed_context_evidence = {
+                "schema_version": 1,
+                "phase": error.phase,
+                "included_textual_paths": [],
+                "excluded_generated_paths": [],
+                "binary_metadata_paths": [],
+                "oversized_paths": [],
+                "typed_read_failures": [error.evidence()],
+                "total_textual_bytes": 0,
+                "approximate_textual_tokens": 0,
+            }
+            failed_context_evidence["context_pack_fingerprint"] = fingerprint(
+                failed_context_evidence
+            )
         atomic_write_json(path, {
             "schema_version": 1,
             "project_id": request.project.project_id,
@@ -3182,6 +3323,16 @@ class CycleEngine:
                 getattr(plan, "codex_executable", None) if "plan" in locals() else (compatibility or {}).get("executable")
             ),
             "compatibility": getattr(plan, "compatibility", None) if "plan" in locals() else compatibility,
+            "context_pack_evidence": (
+                failed_context_evidence
+                if failed_context_evidence is not None
+                else getattr(plan, "context_pack_evidence", None)
+                if "plan" in locals()
+                else None
+            ),
+            "context_read_failure": (
+                error.evidence() if isinstance(error, ContextReadError) else None
+            ),
             "planned_model": request.planned_model,
             "planned_reasoning": request.planned_reasoning,
             "launched_model": getattr(plan, "launched_model", None) if "plan" in locals() else None,
@@ -3246,6 +3397,7 @@ class CycleEngine:
             "collaboration_tools_removed": result.plan.collaboration_tools_removed,
             "codex_executable": result.plan.codex_executable,
             "compatibility": result.plan.compatibility,
+            "context_pack_evidence": result.plan.context_pack_evidence,
             "safe_resume_command": f"scripts/conveyor resume --project {request.project.project_id}",
             "created_at": utc_now(),
         })
@@ -4078,6 +4230,9 @@ class CycleEngine:
         feature_writer_acquired = False
         session_attempted = False
         phase_kernels: list[tuple[WorkflowKernel, Any]] = []
+        cycle_path: Path | None = None
+        state: dict[str, Any] | None = None
+        feature_transaction = None
         if reservation is not None:
             reservation.acquire(make_lock_record(
                 project_id=project.project_id,
@@ -4096,6 +4251,19 @@ class CycleEngine:
                 baseline=project.validated_baseline_commit,
                 milestone_branch=project.milestone_branch,
             )
+            milestone_head = inspector.rev_parse(
+                project.milestone_branch or "", check=False
+            )
+            prepared_feature_branch = bool(
+                expected_execution_plan is not None
+                and expected_execution_plan.workflow_type
+                == WorkflowType.FEATURE_EXECUTION.value
+                and expected_execution_plan.feature_branch
+                == repository.get("branch")
+                and repository.get("head")
+                == expected_execution_plan.starting_commit
+                == milestone_head
+            )
             writer = inspect_repository_writer_lock(
                 inspector.writer_lock_path(
                     self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
@@ -4105,8 +4273,11 @@ class CycleEngine:
             if (
                 repository.get("clean") is not True
                 or any(repository.get("git_operations", {}).values())
-                or repository.get("branch") != project.milestone_branch
-                or repository.get("head") != inspector.rev_parse(project.milestone_branch or "", check=False)
+                or (
+                    repository.get("branch") != project.milestone_branch
+                    and not prepared_feature_branch
+                )
+                or repository.get("head") != milestone_head
                 or writer.exists
             ):
                 raise RecoveryError(
@@ -4134,91 +4305,156 @@ class CycleEngine:
                 repository_identity=identity["repository_id"],
                 repository_path_fingerprint=identity["path_fingerprint"],
             )
-            preparation = FeaturePreparationAdapter(
-                allowed_paths=(),
-                commit_subject=f"factory: prepare {selection.feature_id}",
-                next_state="feature_preparing",
-            )
-            preparation_kernel = WorkflowKernel(
-                project=project,
-                ledger=phase_ledger,
-                projection=ProjectionEngine(phase_ledger, phase_root / "projection-cache.json"),
-                lease=WorkflowWriterLease(inspector.writer_lock_path(
-                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
-                )),
-                interruption_hook=self._kernel_interruption,
-            )
-            phase_kernels.append((preparation_kernel, preparation))
-            preparation_transaction = preparation_kernel.begin(
-                workflow_type=WorkflowType.FEATURE_PREPARATION,
-                milestone=project.active_milestone,
-                feature_id=selection.feature_id,
-                run_id=run_id,
-                policy=preparation.policy,
-                expected_starting_branch=(
-                    expected_execution_plan.milestone_branch
-                    if expected_execution_plan is not None else None
-                ),
-                expected_starting_head=(
-                    expected_execution_plan.starting_commit
-                    if expected_execution_plan is not None else None
-                ),
-            )
-            preparation_kernel.acquire_lease()
             state["superseded_cycle_archive"] = (
                 self._archive_superseded_cycle(project_state, cycle_path, run_id)
                 if cycle_path.exists() else None
             )
-            preparation_kernel.capture_snapshot()
-            inspector.ensure_runtime_ignored()
-            preparation_kernel.checkpoint("runtime_ignore_verified")
-            self._write_cycle_cache(
-                project, cycle_path, state, inspector, "cycle_initialized", kernel=preparation_kernel
-            )
-            self._advance_cycle(
-                cycle_path, state, "preflight", inspector, "preflight_verified", kernel=preparation_kernel
-            )
-            self._advance_cycle(
-                cycle_path, state, "feature_selected", inspector, selection.reason, kernel=preparation_kernel
-            )
-            self._advance_cycle(
-                cycle_path, state, "branch_preparing", inspector,
-                "feature_branch_preparation_started", kernel=preparation_kernel,
-            )
-            deterministic_session = f"deterministic-feature-preparation:{preparation_transaction.transaction_id}"
-            preparation_kernel.session_launched(deterministic_session)
-            preparation_envelope = SessionResultEnvelope.from_dict({
-                "schema_version": 1,
-                "workflow_type": WorkflowType.FEATURE_PREPARATION.value,
-                "classification": "FEATURE_PREPARED",
-                "project_id": project.project_id,
-                "repository_identity": identity["repository_id"],
-                "transaction_id": preparation_transaction.transaction_id,
-                "run_id": run_id,
-                "session_id": deterministic_session,
-                "starting_branch": preparation_transaction.starting_branch,
-                "starting_commit": preparation_transaction.starting_head,
-                "current_commit": preparation_transaction.starting_head,
-                "feature_id": selection.feature_id,
-                "changed_paths": [],
-                "evidence": {"deterministic_operation": "feature_branch_preparation"},
-                "next_state": "feature_preparing",
-            })
-            if self._route_kernel_result(preparation_kernel, preparation, preparation_envelope) is not None:
-                raise RecoveryError("deterministic feature preparation did not authorize success")
-            preparation_kernel.record_file_mutation_boundary()
-            preparation_kernel.validate(
-                authority=CommandAuthority(), command_results=(),
-                semantic_validator=preparation.semantic_validate,
-            )
-            preparation_kernel.finalize_feature_branch(str(state["feature_branch"]))
-            preparation_completion = preparation_kernel.complete(
-                evidence={"prepared_branch": state["feature_branch"]}
-            )
-            self._materialize_terminal_cycle_cache(
-                cycle_path, state, preparation_transaction.transaction_id,
-                preparation_completion, phase_ledger,
-            )
+            if prepared_feature_branch:
+                state["feature_worktree"] = str(project.repository.resolve())
+                self._write_cycle_cache(
+                    project,
+                    cycle_path,
+                    state,
+                    inspector,
+                    "authenticated_prepared_feature_branch_reused",
+                )
+                self._advance_cycle(
+                    cycle_path,
+                    state,
+                    "preflight",
+                    inspector,
+                    "preflight_verified_on_prepared_feature_branch",
+                )
+                self._advance_cycle(
+                    cycle_path,
+                    state,
+                    "feature_selected",
+                    inspector,
+                    selection.reason,
+                )
+            else:
+                preparation = FeaturePreparationAdapter(
+                    allowed_paths=(),
+                    commit_subject=f"factory: prepare {selection.feature_id}",
+                    next_state="feature_preparing",
+                )
+                preparation_kernel = WorkflowKernel(
+                    project=project,
+                    ledger=phase_ledger,
+                    projection=ProjectionEngine(
+                        phase_ledger, phase_root / "projection-cache.json"
+                    ),
+                    lease=WorkflowWriterLease(inspector.writer_lock_path(
+                        self.configuration.conveyor["lock_policy"][
+                            "writer_lock_relative_path"
+                        ]
+                    )),
+                    interruption_hook=self._kernel_interruption,
+                )
+                phase_kernels.append((preparation_kernel, preparation))
+                preparation_transaction = preparation_kernel.begin(
+                    workflow_type=WorkflowType.FEATURE_PREPARATION,
+                    milestone=project.active_milestone,
+                    feature_id=selection.feature_id,
+                    run_id=run_id,
+                    policy=preparation.policy,
+                    expected_starting_branch=(
+                        expected_execution_plan.milestone_branch
+                        if expected_execution_plan is not None else None
+                    ),
+                    expected_starting_head=(
+                        expected_execution_plan.starting_commit
+                        if expected_execution_plan is not None else None
+                    ),
+                )
+                preparation_kernel.acquire_lease()
+                preparation_kernel.capture_snapshot()
+                inspector.ensure_runtime_ignored()
+                preparation_kernel.checkpoint("runtime_ignore_verified")
+                self._write_cycle_cache(
+                    project,
+                    cycle_path,
+                    state,
+                    inspector,
+                    "cycle_initialized",
+                    kernel=preparation_kernel,
+                )
+                self._advance_cycle(
+                    cycle_path,
+                    state,
+                    "preflight",
+                    inspector,
+                    "preflight_verified",
+                    kernel=preparation_kernel,
+                )
+                self._advance_cycle(
+                    cycle_path,
+                    state,
+                    "feature_selected",
+                    inspector,
+                    selection.reason,
+                    kernel=preparation_kernel,
+                )
+                self._advance_cycle(
+                    cycle_path,
+                    state,
+                    "branch_preparing",
+                    inspector,
+                    "feature_branch_preparation_started",
+                    kernel=preparation_kernel,
+                )
+                deterministic_session = (
+                    "deterministic-feature-preparation:"
+                    f"{preparation_transaction.transaction_id}"
+                )
+                preparation_kernel.session_launched(deterministic_session)
+                preparation_envelope = SessionResultEnvelope.from_dict({
+                    "schema_version": 1,
+                    "workflow_type": WorkflowType.FEATURE_PREPARATION.value,
+                    "classification": "FEATURE_PREPARED",
+                    "project_id": project.project_id,
+                    "repository_identity": identity["repository_id"],
+                    "transaction_id": preparation_transaction.transaction_id,
+                    "run_id": run_id,
+                    "session_id": deterministic_session,
+                    "starting_branch": preparation_transaction.starting_branch,
+                    "starting_commit": preparation_transaction.starting_head,
+                    "current_commit": preparation_transaction.starting_head,
+                    "feature_id": selection.feature_id,
+                    "changed_paths": [],
+                    "evidence": {
+                        "deterministic_operation": "feature_branch_preparation"
+                    },
+                    "next_state": "feature_preparing",
+                })
+                if (
+                    self._route_kernel_result(
+                        preparation_kernel, preparation, preparation_envelope
+                    )
+                    is not None
+                ):
+                    raise RecoveryError(
+                        "deterministic feature preparation did not authorize success"
+                    )
+                preparation_kernel.record_file_mutation_boundary()
+                preparation_kernel.validate(
+                    authority=CommandAuthority(),
+                    command_results=(),
+                    semantic_validator=preparation.semantic_validate,
+                )
+                preparation_kernel.finalize_feature_branch(
+                    str(state["feature_branch"])
+                )
+                preparation_completion = preparation_kernel.complete(
+                    evidence={"prepared_branch": state["feature_branch"]}
+                )
+                self._materialize_terminal_cycle_cache(
+                    cycle_path,
+                    state,
+                    preparation_transaction.transaction_id,
+                    preparation_completion,
+                    phase_ledger,
+                )
             branch_evidence = self._verify_feature_branch_runtime(
                 project, inspector, state, require_starting_head=True
             )
@@ -4302,9 +4538,18 @@ class CycleEngine:
             )
             if request.feature != bound_feature_id:
                 raise SessionError("session request feature differs from the execution plan")
+            def authenticated_feature_session(session_id: str) -> None:
+                feature_kernel.session_launched(session_id)
+                self._observe_lifecycle("feature_session_started", {
+                    "project_id": project.project_id,
+                    "feature_id": selection.feature_id,
+                    "transaction_id": feature_transaction.transaction_id,
+                    "session_id": session_id,
+                })
             result, repairs, retry_status = self._launch_with_retries(
                 request, inspector, "feature_in_progress", "implementation_repairs",
-                reservation_held=True, on_session_started=feature_kernel.session_launched,
+                reservation_held=True,
+                on_session_started=authenticated_feature_session,
             )
             state["feature_session_id"] = result.session_id
             state["session_id"] = result.session_id
@@ -4576,6 +4821,68 @@ class CycleEngine:
                     },
                 )
             return evidence
+        except ContextReadError as exc:
+            feature_pair = next(
+                (
+                    (kernel, adapter)
+                    for kernel, adapter in reversed(phase_kernels)
+                    if isinstance(adapter, FeatureExecutionAdapter)
+                ),
+                None,
+            )
+            if feature_pair is None or state is None or cycle_path is None:
+                raise
+            failed_kernel, _ = feature_pair
+            terminal_projection = failed_kernel.block(
+                state=TransactionState.TERMINAL_FAILURE,
+                classification="FEATURE_PRELAUNCH_CONTEXT_FAILED",
+                next_state="feature_preparing",
+                reference="ContextReadError",
+            )
+            state.update({
+                "current_phase": "feature_prelaunch_failed",
+                "last_successful_checkpoint": "feature_context_failed",
+                "failure_classification": "FEATURE_PRELAUNCH_CONTEXT_FAILED",
+                "feature_session_id": None,
+                "session_id": None,
+                "human_decision_required": None,
+                "retry_exhausted": False,
+                "next_safe_action": (
+                    "scripts/conveyor recover-feature-prelaunch "
+                    f"--project {project.project_id} "
+                    f"--feature {bound_feature_id} "
+                    "--autopilot-run-id <failed-autopilot-run-id> "
+                    f"--expected-branch {inspector.current_branch} "
+                    f"--expected-head {inspector.head} --dry-run"
+                ),
+                "stop_reason": str(exc),
+                "validation_attempts": [],
+                "updated_at": utc_now(),
+            })
+            self._materialize_terminal_cycle_cache(
+                cycle_path,
+                state,
+                failed_kernel.transaction.transaction_id,
+                {"projection": terminal_projection},
+                phase_ledger,
+            )
+            return {
+                "outcome": "feature_prelaunch_context_failed",
+                "classification": "FEATURE_PRELAUNCH_CONTEXT_FAILED",
+                "feature": bound_feature_id,
+                "context_read_failure": exc.evidence(),
+                "model_sessions_launched": 0,
+                "parent_sessions_launched": 0,
+                "child_sessions_launched": 0,
+                "implementation_attempts_consumed": 0,
+                "human_gate_created": False,
+                "feature_commit_created": False,
+                "recoverable_technical_failure": True,
+                "recovery_action": state["next_safe_action"],
+                "feature_branch": inspector.current_branch,
+                "feature_head": inspector.head,
+                "kernel_projection": terminal_projection,
+            }
         except (ConveyorError, ValueError) as exc:
             for phase_kernel, phase_adapter in reversed(phase_kernels):
                 self._terminalize_handled_kernel_failure(phase_kernel, phase_adapter, exc)

@@ -265,6 +265,37 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-015",
+      "title": "Binary-safe feature context and prelaunch recovery",
+      "status": "review",
+      "priority": 15,
+      "milestone": "M1",
+      "dependencies": [
+        "M1-001",
+        "M1-010",
+        "M1-014"
+      ],
+      "spec": "docs/features/M1-015-binary-safe-feature-context.md",
+      "acceptance_criteria": [
+        "Feature context classifies bytes before strict UTF-8 decoding and represents relevant binaries only as bounded metadata",
+        "Generated output is excluded while ordinary UTF-8 source, tests, documentation, configuration, and legitimate binary assets remain safely representable",
+        "Context evidence is bounded and fingerprinted and FEATURE_SESSION_STARTED follows only an authenticated model session identity",
+        "Exact zero-session prelaunch failures recover deterministically without an implementation attempt, human gate, application command, or feature commit"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-15-binary-safe-feature-context",
+      "integration_base_commit": "95cbafe54761590e24d12ac461852d73d4d505c4",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }
