@@ -4,6 +4,33 @@ Last updated: 2026-07-25
 
 ## Summary
 
+Prepared-feature execution-plan binding is implemented on
+`codex/m1-16-prepared-feature-plan-binding` from exact parent
+`b19549cff80f416f4698db97d3ea33feb3820101`. Feature execution now carries an
+explicit workflow-scoped starting branch. An authenticated completed
+deterministic preparation binds the exact feature branch and feature starting
+commit, while the milestone branch remains the distinct integration
+destination even when both refs point to the same commit.
+
+The exact F070 failure was raised by
+`CycleEngine._validate_projected_dispatch`: it expected
+`execution_plan.milestone_branch` and `execution_plan.starting_commit` but
+observed the live repository branch and HEAD. The stale application-cache
+`last_verified_git_state.branch` was a separate finalization defect, not the
+raising authority. Prelaunch recovery now refreshes that checkpoint from the
+preserved live feature checkout.
+
+Focused prepared-feature, execution-plan, projection, context, Autopilot,
+cache, retained-result, post-integration planning, and integration regressions
+passed 213 tests. The two known F097 post-transition cache tests remain
+excluded because they copy the mutable live ledger while asserting the old
+sequence-508 topology; this is unchanged from M1-015. Compilation,
+configuration, inventory/queue validation, CLI boundaries, content audit, and
+`git diff --check` pass. Live read-only consistency is `CONSISTENT`, and the
+execution plan now binds F070 to `codex/F070-applications-table` at
+`b22f89af7a03af1b26b768b640b680daa900dba9` while retaining
+`codex/m0-foundation` as the milestone destination.
+
 Binary-safe feature context and deterministic prelaunch recovery are
 implemented on `codex/m1-15-binary-safe-feature-context` from exact parent
 `95cbafe54761590e24d12ac461852d73d4d505c4`. The F070 failure is traced to

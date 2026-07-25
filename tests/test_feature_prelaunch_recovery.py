@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from development_conveyor.contracts import MutationPolicy, TransactionState, WorkflowType
+from development_conveyor.contracts import (
+    MutationPolicy,
+    TransactionState,
+    WorkflowType,
+    WORKFLOW_LEASE,
+)
 from development_conveyor.consistency import ConsistencyChecker
 from development_conveyor.cycle_engine import CycleEngine
+from development_conveyor.errors import ProjectionError
 from development_conveyor.feature_prelaunch_recovery import FeaturePrelaunchRecovery
 from development_conveyor.kernel import FeatureExecutionAdapter, WorkflowKernel
 from development_conveyor.ledger import EvidenceLedger
@@ -49,6 +56,76 @@ class FeaturePrelaunchRecoveryTests(unittest.TestCase):
             repository_identity=identity["repository_id"],
             repository_path_fingerprint=identity["path_fingerprint"],
         )
+        queue_fingerprint = hashlib.sha256(queue_path.read_bytes()).hexdigest()
+        preparation_id = "deterministic-feature-preparation"
+        starting_snapshot = {
+            "branch": self.project.milestone_branch,
+            "head": self.head,
+            "clean": True,
+            "git_operations": {
+                "merge": False,
+                "cherry_pick": False,
+                "rebase_apply": False,
+                "rebase_merge": False,
+            },
+            "queue_fingerprint": queue_fingerprint,
+            "repository_identity": identity["repository_id"],
+            "repository_path_fingerprint": identity["path_fingerprint"],
+        }
+        terminal_snapshot = {
+            **starting_snapshot,
+            "branch": "codex/F001-synthetic-feature",
+        }
+        for event_type, payload in (
+            (
+                "TransactionStarted",
+                {
+                    "run_id": "deterministic-preparation-run",
+                    "feature_id": "F001",
+                    "milestone": "M0",
+                    "starting_branch": self.project.milestone_branch,
+                    "starting_head": self.head,
+                    "allowed_mutation_policy": {},
+                },
+            ),
+            (
+                "LeaseAcquired",
+                {"lease_id": "deterministic-preparation-lease"},
+            ),
+            ("SnapshotCaptured", {"snapshot": starting_snapshot}),
+            (
+                "SessionLaunched",
+                {"session_id": f"deterministic-feature-preparation:{preparation_id}"},
+            ),
+            ("ValidationStarted", {"changed_paths": []}),
+            ("ValidationPassed", {"commands": []}),
+            (
+                "TransactionCompleted",
+                {
+                    "classification": "FEATURE_PREPARED",
+                    "feature_id": "F001",
+                    "next_state": "feature_preparing",
+                    "terminal_snapshot": terminal_snapshot,
+                },
+            ),
+            (
+                "LeaseReleased",
+                {"lease_id": "deterministic-preparation-lease"},
+            ),
+            (
+                "ProjectionUpdated",
+                {
+                    "current_state": "feature_preparing",
+                    "current_feature": "F001",
+                },
+            ),
+        ):
+            ledger.append(
+                event_type=event_type,
+                transaction_id=preparation_id,
+                workflow_type=WorkflowType.FEATURE_PREPARATION,
+                payload=payload,
+            )
         projection = ProjectionEngine(
             ledger, state_root / "projection-cache.json"
         )
@@ -184,6 +261,127 @@ class FeaturePrelaunchRecoveryTests(unittest.TestCase):
             git(self.repository, "branch", "--show-current"),
             "codex/F001-synthetic-feature",
         )
+        cycle = json.loads(
+            (self.repository / ".factory/conveyor-state.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            cycle["last_verified_git_state"]["branch"],
+            "codex/F001-synthetic-feature",
+        )
+        self.assertEqual(cycle["last_verified_git_state"]["head"], self.head)
+        self.assertEqual(
+            cycle["feature_branch"], "codex/F001-synthetic-feature"
+        )
+        self.assertEqual(cycle["feature_starting_commit"], self.head)
+        self.assertEqual(cycle["milestone_branch"], self.project.milestone_branch)
         self.assertFalse(
             (self.repository / ".factory/locks/writer.json").exists()
         )
+
+    def _apply_and_engine(self):
+        plan = self.recovery().inspect(
+            feature_id="F001",
+            autopilot_run_id=self.autopilot_run,
+            expected_branch="codex/F001-synthetic-feature",
+            expected_head=self.head,
+        )
+        self.recovery().apply(plan)
+        return CycleEngine(self.configuration)
+
+    def test_prepared_feature_plan_binds_distinct_feature_and_milestone_roles(self):
+        engine = self._apply_and_engine()
+        projected = engine.project_plan(self.project)
+        execution = projected["execution_plan"]
+        self.assertEqual(execution["current_state"], "feature_preparing")
+        self.assertEqual(
+            execution["starting_branch"], "codex/F001-synthetic-feature"
+        )
+        self.assertEqual(execution["starting_commit"], self.head)
+        self.assertEqual(
+            execution["feature_branch"], "codex/F001-synthetic-feature"
+        )
+        self.assertEqual(
+            execution["milestone_branch"], self.project.milestone_branch
+        )
+        validated = engine._validate_projected_dispatch(
+            self.project,
+            workflow_type=WorkflowType.FEATURE_EXECUTION,
+            expected=None,
+        )
+        self.assertIsNotNone(validated)
+
+    def test_prepared_feature_rejects_same_commit_on_milestone_branch(self):
+        engine = self._apply_and_engine()
+        git(self.repository, "switch", self.project.milestone_branch)
+        with self.assertRaisesRegex(
+            ProjectionError,
+            "repository no longer matches the execution plan starting branch and commit",
+        ):
+            engine._validate_projected_dispatch(
+                self.project,
+                workflow_type=WorkflowType.FEATURE_EXECUTION,
+                expected=None,
+            )
+
+    def test_prepared_feature_rejects_correct_branch_at_wrong_commit(self):
+        engine = self._apply_and_engine()
+        git(self.repository, "commit", "--allow-empty", "-m", "synthetic drift")
+        with self.assertRaisesRegex(
+            ProjectionError,
+            "repository no longer matches the execution plan starting branch and commit",
+        ):
+            engine._validate_projected_dispatch(
+                self.project,
+                workflow_type=WorkflowType.FEATURE_EXECUTION,
+                expected=None,
+            )
+
+    def test_prepared_feature_rejects_dirty_repository_and_writer_lease(self):
+        engine = self._apply_and_engine()
+        app = self.repository / "app.txt"
+        app.write_text(app.read_text(encoding="utf-8") + "dirty\n", encoding="utf-8")
+        with self.assertRaisesRegex(ProjectionError, "requires a clean repository"):
+            engine._validate_projected_dispatch(
+                self.project,
+                workflow_type=WorkflowType.FEATURE_EXECUTION,
+                expected=None,
+            )
+        git(self.repository, "restore", "app.txt")
+
+        inspector = RepositoryInspector(self.repository)
+        identity = inspector.identity()
+        lease = WorkflowWriterLease(
+            self.repository / ".factory/locks/writer.json"
+        )
+        transaction_id = "active-prepared-feature-test"
+        lease.acquire(
+            lease_type=WORKFLOW_LEASE[WorkflowType.FEATURE_EXECUTION],
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+            project_id=self.project.project_id,
+            transaction_id=transaction_id,
+            workflow_type=WorkflowType.FEATURE_EXECUTION,
+            milestone=self.project.active_milestone,
+            feature_id="F001",
+            starting_branch=inspector.current_branch,
+            starting_head=inspector.head,
+            run_id="active-prepared-feature-test",
+            session_id=None,
+            policy=MutationPolicy(()),
+        )
+        try:
+            with self.assertRaisesRegex(ProjectionError, "writer lease"):
+                engine._validate_projected_dispatch(
+                    self.project,
+                    workflow_type=WorkflowType.FEATURE_EXECUTION,
+                    expected=None,
+                )
+        finally:
+            lease.release(
+                transaction_id=transaction_id,
+                workflow_type=WorkflowType.FEATURE_EXECUTION,
+                repository_identity=identity["repository_id"],
+                project_id=self.project.project_id,
+            )

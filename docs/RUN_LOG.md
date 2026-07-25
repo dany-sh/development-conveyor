@@ -1260,3 +1260,66 @@ This log records model configuration and deterministic deployment evidence. It n
 - Excluded by instruction: live recovery apply, ordinary resume, Autopilot
   restart, application tests/builds, the complete controller suite, push,
   merge, tag, publication, deployment, and release.
+
+### Model execution — 2026-07-25T08:05:32+00:00
+
+- Agent role: `interactive-feature-worker`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `m1_016_prepared_feature_plan_binding`
+- Safety and autonomy contracts unchanged: `true`
+
+## Prepared-feature execution-plan binding — 2026-07-25
+
+- Controller branch: `codex/m1-16-prepared-feature-plan-binding`; exact direct
+  parent: `b19549cff80f416f4698db97d3ea33feb3820101`.
+- Exact rejection: `CycleEngine._validate_projected_dispatch` raised
+  `ProjectionError: repository no longer matches the execution plan starting
+  branch and commit`. It used `execution_plan.milestone_branch` as the
+  expected branch and `execution_plan.starting_commit` as the expected commit,
+  compared with `RepositoryInspector.current_branch` and
+  `RepositoryInspector.head`. The stale cycle-cache
+  `last_verified_git_state.branch` was corroborating stale state, not the
+  raising authority.
+- Corrected authority: `ExecutionPlan.starting_branch` is now explicit.
+  Ordinary fresh preparation and integration remain milestone-bound.
+  Authenticated completed deterministic preparation binds feature execution
+  to its exact feature branch and terminal starting commit, even when the
+  milestone ref names the same commit. Wrong branch, wrong commit, dirt, Git
+  operation, or writer lease fails before feature context construction.
+- Cache finalization: synthetic prelaunch apply proves the rewritten cycle
+  cache records the actual feature branch, feature starting commit, milestone
+  destination, feature worktree, and fresh live `last_verified_git_state`.
+  No branch switch occurs during recovery finalization.
+- Focused validation: 35 prepared-feature, execution-plan, and projection
+  authority tests passed. A further 182 bounded context, Autopilot, cache,
+  retained-result, post-integration planning, and integration tests produced
+  180 passes and only the two previously documented live-ledger-coupled F097
+  post-transition cache failures. Total accepted focused evidence is 213
+  passing tests; the complete controller suite was not run.
+- Mechanical validation: Python compilation, `validate-config`, feature
+  inventory and JSON-compatible queue/config parsing, CLI help, invalid-mode
+  rejection, changed-file secret-pattern audit, and `git diff --check` passed.
+- Live read-only evidence: `verify-consistency` returned `CONSISTENT` with
+  ledger sequence 652 and no failed invariant. `plan --dry-run` and `status`
+  select F070 through fresh `feature_execution`, with starting branch
+  `codex/F070-applications-table`, starting commit `b22f89af`, feature branch
+  `codex/F070-applications-table`, and milestone branch
+  `codex/m0-foundation`.
+- Expected next Autopilot lifecycle is `AUTOPILOT_STARTED`,
+  `FEATURE_SELECTED F070`, `FEATURE_CONTEXT_STARTED F070`,
+  `FEATURE_CONTEXT_READY F070`, then `FEATURE_SESSION_STARTED F070` with the
+  authenticated model session ID. Deterministic preparation, planning, queue
+  reconciliation, implementation-retry consumption, and recovery transaction
+  creation do not repeat before launch.
+- Isolation: Interview Companion remained clean on
+  `codex/F070-applications-table` at exact HEAD `b22f89af`; both feature and
+  milestone refs remained at that commit. Its cycle-cache hash and the
+  controller ledger, projection, and Autopilot report hashes were byte
+  identical before and after development. No model session or child session
+  launched.
+- Excluded by instruction: application tests/builds or mutation, recovery
+  apply, ordinary resume, Autopilot restart, the complete controller suite,
+  push, merge, tag, publication, deployment, and release.

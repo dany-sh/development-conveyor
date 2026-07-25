@@ -279,6 +279,12 @@ class FeaturePrelaunchRecovery:
             ) from exc
         cycle.update({
             "current_phase": "feature_preparing",
+            "feature_branch": plan["expected_branch"],
+            "feature_starting_commit": plan["expected_head"],
+            "milestone_branch": plan["milestone_branch"],
+            "milestone_pre_integration_commit": plan["expected_head"],
+            "feature_worktree": str(self.project.repository.resolve()),
+            "last_verified_git_state": engine._git_checkpoint(self.inspector),
             "last_successful_checkpoint": "feature_prelaunch_recovery_applied",
             "failure_classification": None,
             "feature_session_id": None,

@@ -296,6 +296,37 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-016",
+      "title": "Prepared-feature execution-plan binding",
+      "status": "review",
+      "priority": 16,
+      "milestone": "M1",
+      "dependencies": [
+        "M1-001",
+        "M1-010",
+        "M1-015"
+      ],
+      "spec": "docs/features/M1-016-prepared-feature-plan-binding.md",
+      "acceptance_criteria": [
+        "Authenticated completed feature preparation binds execution to the exact feature branch and feature starting commit while the milestone branch remains the integration destination",
+        "Prelaunch recovery finalizes the cycle cache with the actual preserved feature-branch checkpoint and does not switch or mutate the application repository",
+        "Wrong branch, wrong commit, dirty worktree, active transaction, lease, or unfinished Git operation fails closed before context construction or model launch",
+        "Feature-ready state bypasses deterministic preparation only when the sole ready feature and completed preparation terminal snapshot authenticate the exact executable boundary"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-16-prepared-feature-plan-binding",
+      "integration_base_commit": "b19549cff80f416f4698db97d3ea33feb3820101",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

@@ -13,3 +13,4 @@
 | M1-013 | Exhausted retained-feature repair recovery | review | M1 | `docs/features/M1-013-retained-repair-envelope-recovery.md` |
 | M1-014 | Post-integration planning-result recovery | review | M1 | `docs/features/M1-014-post-integration-planning-recovery.md` |
 | M1-015 | Binary-safe feature context and prelaunch recovery | review | M1 | `docs/features/M1-015-binary-safe-feature-context.md` |
+| M1-016 | Prepared-feature execution-plan binding | review | M1 | `docs/features/M1-016-prepared-feature-plan-binding.md` |

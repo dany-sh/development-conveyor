@@ -74,6 +74,7 @@ class ExecutionPlanIdentityTests(unittest.TestCase):
         self.assertEqual("integration_ready", plan.current_state)
         self.assertEqual("F004", plan.feature_id)
         self.assertEqual(F004_COMMIT, plan.accepted_commit)
+        self.assertEqual("codex/m0-foundation", plan.starting_branch)
         self.assertNotEqual(F003_COMMIT, plan.accepted_commit)
         plan.validate_against(authoritative)
 
@@ -102,7 +103,34 @@ class ExecutionPlanIdentityTests(unittest.TestCase):
         self.assertEqual("feature_execution", plan.workflow_type)
         self.assertEqual("F006", plan.feature_id)
         self.assertIsNone(plan.accepted_commit)
+        self.assertEqual("codex/m0-foundation", plan.starting_branch)
         self.assertEqual("6" * 40, plan.starting_commit)
+
+    def test_authenticated_preparation_uses_feature_starting_branch(self):
+        authoritative = projection(
+            current_state="feature_ready",
+            current_feature="F006",
+            selected_next_feature="F006",
+            selected_feature_starting_commit="6" * 40,
+            accepted_feature_commit=None,
+            feature_branch="codex/F006-ready",
+            allowed_next_action="feature_cycle",
+            required_lease="feature_writer",
+            prepared_feature_execution={
+                "preparation_transaction_id": "prepared-F006",
+                "feature_id": "F006",
+                "feature_branch": "codex/F006-ready",
+                "starting_commit": "6" * 40,
+                "milestone_branch": "codex/m0-foundation",
+            },
+        )
+
+        plan = ExecutionPlan.from_projection(authoritative)
+
+        self.assertEqual("feature_ready", plan.current_state)
+        self.assertEqual("codex/F006-ready", plan.starting_branch)
+        self.assertEqual("codex/m0-foundation", plan.milestone_branch)
+        plan.validate_against(authoritative)
 
     def test_active_human_decision_uses_authoritative_gate(self):
         authoritative = projection(

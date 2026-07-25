@@ -546,9 +546,122 @@ class CycleEngine:
             )
         except (QueueError, OSError):
             return rebuilt
-        return bind_projection_to_queue(
+        queue_bound = bind_projection_to_queue(
             rebuilt, queue, str(project.active_milestone or "")
         )
+        return self._bind_authenticated_prepared_feature_execution(
+            project, rebuilt, queue_bound, queue, inspector
+        )
+
+    def _bind_authenticated_prepared_feature_execution(
+        self,
+        project: Project,
+        canonical: dict[str, Any],
+        queue_bound: dict[str, Any],
+        queue: FeatureQueue,
+        inspector: RepositoryInspector,
+    ) -> dict[str, Any]:
+        """Bind a completed deterministic preparation to feature execution.
+
+        The preparation terminal snapshot owns the feature execution branch and
+        starting commit.  The milestone ref remains a separate integration
+        destination even when both refs currently resolve to the same commit.
+        """
+
+        if (
+            canonical.get("active_transaction") is not None
+            or queue_bound.get("allowed_next_action") != "feature_cycle"
+        ):
+            return queue_bound
+        milestone_id = str(project.active_milestone or "")
+        summary = queue.summary(milestone_id)
+        feature_id = queue_bound.get("current_feature") or queue_bound.get(
+            "selected_next_feature"
+        )
+        if (
+            not isinstance(feature_id, str)
+            or summary.get("ready_features") != [feature_id]
+            or summary.get("selected_feature") != feature_id
+        ):
+            return queue_bound
+        feature = queue.feature(feature_id)
+        if not isinstance(feature, dict):
+            return queue_bound
+        expected_branch = canonical_feature_branch(project, feature)
+        preparations = [
+            transaction
+            for transaction in canonical.get("transactions", [])
+            if (
+                isinstance(transaction, dict)
+                and transaction.get("workflow_type")
+                == WorkflowType.FEATURE_PREPARATION.value
+                and transaction.get("feature_id") == feature_id
+                and transaction.get("state") == "completed"
+                and transaction.get("terminal_classification")
+                == "FEATURE_PREPARED"
+            )
+        ]
+        if not preparations:
+            return queue_bound
+        preparation = max(
+            preparations, key=lambda item: int(item.get("last_sequence") or 0)
+        )
+        starting = preparation.get("starting_snapshot") or {}
+        terminal = preparation.get("terminal_snapshot") or {}
+        identity = inspector.identity()
+        queue_path = resolve_queue_path(project.repository, project.queue_location)
+        queue_fingerprint = hashlib.sha256(queue_path.read_bytes()).hexdigest()
+        starting_commit = terminal.get("head")
+        evidence_matches = (
+            starting.get("branch") == project.milestone_branch
+            and starting.get("head") == starting_commit
+            and terminal.get("branch") == expected_branch
+            and isinstance(starting_commit, str)
+            and bool(starting_commit)
+            and terminal.get("clean") is True
+            and not any((terminal.get("git_operations") or {}).values())
+            and starting.get("queue_fingerprint") == queue_fingerprint
+            and terminal.get("queue_fingerprint") == queue_fingerprint
+            and terminal.get("repository_identity") == identity["repository_id"]
+            and terminal.get("repository_path_fingerprint")
+            == identity["path_fingerprint"]
+        )
+        if not evidence_matches:
+            return queue_bound
+        bound = dict(queue_bound)
+        bound.update(
+            {
+                "selected_feature_starting_commit": starting_commit,
+                "feature_branch": expected_branch,
+                "milestone_branch": project.milestone_branch,
+                "prepared_feature_execution": {
+                    "preparation_transaction_id": preparation["transaction_id"],
+                    "feature_id": feature_id,
+                    "feature_branch": expected_branch,
+                    "starting_commit": starting_commit,
+                    "milestone_branch": project.milestone_branch,
+                },
+            }
+        )
+        writer = inspect_repository_writer_lock(
+            inspector.writer_lock_path(
+                self.configuration.conveyor["lock_policy"][
+                    "writer_lock_relative_path"
+                ]
+            ),
+            project.repository,
+        )
+        if (
+            inspector.current_branch == expected_branch
+            and inspector.head == starting_commit
+            and inspector.rev_parse(expected_branch, check=False) == starting_commit
+            and inspector.is_clean
+            and not any(inspector.git_operation_state().values())
+            and not writer.exists
+        ):
+            bound["current_state"] = "feature_preparing"
+        bound["projection_fingerprint"] = projection_fingerprint(bound)
+        return bound
 
     def _execution_plan(
         self, project: Project, projection: dict[str, Any]
@@ -1301,9 +1414,16 @@ class CycleEngine:
             WorkflowType.MILESTONE_GATE,
         }:
             inspector = RepositoryInspector(project.repository)
-            if not executable.milestone_branch or not executable.starting_commit:
-                raise ProjectionError("execution plan lacks an exact milestone starting snapshot")
+            if (
+                not executable.milestone_branch
+                or not executable.starting_branch
+                or not executable.starting_commit
+            ):
+                raise ProjectionError(
+                    "execution plan lacks an exact starting branch and commit"
+                )
             milestone_head = inspector.rev_parse(executable.milestone_branch, check=False)
+            expected_checkout = executable.starting_branch
             if (
                 executable.milestone_branch != project.milestone_branch
                 or milestone_head != executable.starting_commit
@@ -1311,7 +1431,7 @@ class CycleEngine:
                     not allow_nonstarting_checkout
                     and workflow_type != WorkflowType.MILESTONE_INTEGRATION
                     and (
-                        inspector.current_branch != executable.milestone_branch
+                        inspector.current_branch != expected_checkout
                         or inspector.head != executable.starting_commit
                     )
                 )
@@ -1321,6 +1441,23 @@ class CycleEngine:
                 )
             queue = FeatureQueue.from_location(project.repository, project.queue_location)
             if workflow_type == WorkflowType.FEATURE_EXECUTION:
+                writer = inspect_repository_writer_lock(
+                    inspector.writer_lock_path(
+                        self.configuration.conveyor["lock_policy"][
+                            "writer_lock_relative_path"
+                        ]
+                    ),
+                    project.repository,
+                )
+                if (
+                    not inspector.is_clean
+                    or any(inspector.git_operation_state().values())
+                    or writer.exists
+                ):
+                    raise ProjectionError(
+                        "prepared feature execution requires a clean repository "
+                        "without an active Git operation or writer lease"
+                    )
                 selection = queue.select_next(project.active_milestone or "")
                 planned_branch = (
                     canonical_feature_branch(project, selection.feature)
@@ -4258,6 +4395,8 @@ class CycleEngine:
                 expected_execution_plan is not None
                 and expected_execution_plan.workflow_type
                 == WorkflowType.FEATURE_EXECUTION.value
+                and expected_execution_plan.starting_branch
+                == expected_execution_plan.feature_branch
                 and expected_execution_plan.feature_branch
                 == repository.get("branch")
                 and repository.get("head")
@@ -4509,6 +4648,14 @@ class CycleEngine:
                 feature_id=selection.feature_id,
                 run_id=run_id,
                 policy=feature_adapter.policy,
+                expected_starting_branch=(
+                    expected_execution_plan.feature_branch
+                    if expected_execution_plan is not None else None
+                ),
+                expected_starting_head=(
+                    expected_execution_plan.starting_commit
+                    if expected_execution_plan is not None else None
+                ),
             )
             if feature_transaction.feature_id != bound_feature_id:
                 raise TransactionError("kernel feature identity differs from the execution plan")

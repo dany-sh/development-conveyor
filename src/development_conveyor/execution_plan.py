@@ -211,6 +211,7 @@ class ExecutionPlan:
     workflow_type: str
     feature_id: str | None
     accepted_commit: str | None
+    starting_branch: str | None
     starting_commit: str | None
     feature_branch: str | None
     milestone_branch: str | None
@@ -291,8 +292,28 @@ class ExecutionPlan:
             raise ProjectionError("projection required lease disagrees with its workflow")
         transaction_mode = "recovery" if active is not None else "fresh"
         identity = execution_identity(projection, workflow)
+        prepared_feature = projection.get("prepared_feature_execution")
+        prepared_starting_branch = (
+            prepared_feature.get("feature_branch")
+            if (
+                workflow == WorkflowType.FEATURE_EXECUTION
+                and isinstance(prepared_feature, dict)
+            )
+            else None
+        )
         feature_id = identity.feature_id
         accepted_commit = identity.accepted_commit
+        if isinstance(prepared_feature, dict) and (
+            workflow != WorkflowType.FEATURE_EXECUTION
+            or prepared_feature.get("feature_id") != feature_id
+            or prepared_feature.get("feature_branch") != identity.feature_branch
+            or prepared_feature.get("starting_commit") != identity.starting_commit
+            or prepared_feature.get("milestone_branch")
+            != identity.milestone_branch
+        ):
+            raise ProjectionError(
+                "prepared feature boundary disagrees with authoritative projection identity"
+            )
         historical = projection.get("historical_integration_outcomes") or []
         integrated_features = {
             item.get("feature_id")
@@ -325,6 +346,11 @@ class ExecutionPlan:
             workflow_type=workflow.value if isinstance(workflow, WorkflowType) else workflow,
             feature_id=feature_id,
             accepted_commit=accepted_commit,
+            starting_branch=(
+                prepared_starting_branch
+                or identity.milestone_branch
+                or milestone_branch
+            ),
             starting_commit=identity.starting_commit or starting_commit,
             feature_branch=identity.feature_branch or feature_branch,
             milestone_branch=identity.milestone_branch or milestone_branch,
@@ -358,6 +384,15 @@ class ExecutionPlan:
                 raise ProjectionError("execution plan names an absent active transaction")
             expected_workflow = WorkflowType(str(active["workflow_type"]))
         identity = execution_identity(projection, expected_workflow)
+        prepared_feature = projection.get("prepared_feature_execution")
+        expected_starting_branch = (
+            prepared_feature.get("feature_branch")
+            if (
+                expected_workflow == WorkflowType.FEATURE_EXECUTION
+                and isinstance(prepared_feature, dict)
+            )
+            else identity.milestone_branch or self.milestone_branch
+        )
         checks = {
             "project_id": self.project_id == projection.get("project_id"),
             "ledger_sequence": self.ledger_sequence == projection.get("ledger_sequence"),
@@ -370,6 +405,7 @@ class ExecutionPlan:
             ),
             "feature_id": self.feature_id == identity.feature_id,
             "accepted_commit": self.accepted_commit == identity.accepted_commit,
+            "starting_branch": self.starting_branch == expected_starting_branch,
             "session_resume_eligible": self.session_resume_eligible
             == bool(projection.get("session_resume_eligible")),
             "lease_type": self.lease_type == (
