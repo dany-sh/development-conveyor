@@ -58,8 +58,102 @@ class ExecutionIdentity:
     human_gate_authoritative: bool
 
 
+def completed_integration_planning_baseline(
+    projection: dict[str, Any],
+    workflow: WorkflowType | str | None,
+    *,
+    milestone_branch: str | None = None,
+) -> str | None:
+    """Return the terminal milestone HEAD for a cleared post-integration plan."""
+
+    workflow_value = workflow.value if isinstance(workflow, WorkflowType) else workflow
+    if (
+        workflow_value != WorkflowType.QUEUE_RECONCILIATION.value
+        or projection.get("current_state") != "queue_reconciliation"
+        or projection.get("allowed_next_action") != "queue_reconciliation"
+        or projection.get("active_transaction") is not None
+        or projection.get("current_feature") is not None
+        or projection.get("selected_next_feature") is not None
+        or projection.get("accepted_feature_commit") is not None
+        or projection.get("human_gate") is not None
+        or projection.get("required_lease") is not None
+        or projection.get("session_resume_eligible") is not False
+    ):
+        return None
+
+    expected_milestone_branch = projection.get("milestone_branch") or milestone_branch
+    if (
+        not isinstance(expected_milestone_branch, str)
+        or not expected_milestone_branch
+    ):
+        return None
+    outcomes = [
+        item
+        for item in projection.get("historical_integration_outcomes", [])
+        if isinstance(item, dict)
+        and item.get("classification") == "INTEGRATED"
+        and isinstance(item.get("sequence"), int)
+    ]
+    if not outcomes:
+        return None
+    outcome = max(outcomes, key=lambda item: int(item["sequence"]))
+    terminal_head = outcome.get("terminal_head")
+    transaction_id = outcome.get("transaction_id")
+    feature_id = outcome.get("feature_id")
+    if (
+        not isinstance(terminal_head, str)
+        or not terminal_head
+        or not isinstance(transaction_id, str)
+        or not transaction_id
+        or not isinstance(feature_id, str)
+        or not feature_id
+        or not isinstance(outcome.get("accepted_commit"), str)
+        or not outcome.get("accepted_commit")
+        or not isinstance(outcome.get("integrated_commit"), str)
+        or not outcome.get("integrated_commit")
+        or outcome.get("terminal_repository_clean") is not True
+    ):
+        return None
+    transaction = next(
+        (
+            item
+            for item in projection.get("transactions", [])
+            if isinstance(item, dict)
+            and item.get("transaction_id") == transaction_id
+        ),
+        None,
+    )
+    terminal = (
+        transaction.get("terminal_snapshot")
+        if isinstance(transaction, dict)
+        and transaction.get("workflow_type")
+        == WorkflowType.MILESTONE_INTEGRATION.value
+        and transaction.get("state") == "completed"
+        and transaction.get("terminal_classification") == "INTEGRATED"
+        and transaction.get("feature_id") == feature_id
+        and transaction.get("terminal_reference") == terminal_head
+        else None
+    )
+    terminal_operations = (
+        terminal.get("git_operations") if isinstance(terminal, dict) else None
+    )
+    if (
+        not isinstance(terminal, dict)
+        or terminal.get("branch") != expected_milestone_branch
+        or terminal.get("head") != terminal_head
+        or terminal.get("clean") is not True
+        or not isinstance(terminal_operations, dict)
+        or any(terminal_operations.values())
+    ):
+        return None
+    return terminal_head
+
+
 def execution_identity(
-    projection: dict[str, Any], workflow: WorkflowType | str | None
+    projection: dict[str, Any],
+    workflow: WorkflowType | str | None,
+    *,
+    milestone_branch: str | None = None,
 ) -> ExecutionIdentity:
     """Resolve executable identity without allowing historical gates to route work."""
 
@@ -71,6 +165,9 @@ def execution_identity(
         and isinstance(gate, dict)
     )
     gate_identity = gate if human_gate_authoritative else {}
+    post_integration_baseline = completed_integration_planning_baseline(
+        projection, workflow, milestone_branch=milestone_branch
+    )
     return ExecutionIdentity(
         feature_id=(
             gate_identity.get("feature_id")
@@ -86,6 +183,7 @@ def execution_identity(
         starting_commit=(
             gate_identity.get("feature_starting_commit")
             or gate_identity.get("candidate_validated_planning_commit")
+            or post_integration_baseline
             or projection.get("selected_feature_starting_commit")
         ),
         feature_branch=(
@@ -95,6 +193,7 @@ def execution_identity(
         milestone_branch=(
             gate_identity.get("milestone_branch")
             or projection.get("milestone_branch")
+            or milestone_branch
         ),
         human_gate_authoritative=human_gate_authoritative,
     )
@@ -291,7 +390,9 @@ class ExecutionPlan:
         if projected_lease is not None and projected_lease != lease:
             raise ProjectionError("projection required lease disagrees with its workflow")
         transaction_mode = "recovery" if active is not None else "fresh"
-        identity = execution_identity(projection, workflow)
+        identity = execution_identity(
+            projection, workflow, milestone_branch=milestone_branch
+        )
         prepared_feature = projection.get("prepared_feature_execution")
         prepared_starting_branch = (
             prepared_feature.get("feature_branch")
@@ -383,7 +484,9 @@ class ExecutionPlan:
             if active is None:
                 raise ProjectionError("execution plan names an absent active transaction")
             expected_workflow = WorkflowType(str(active["workflow_type"]))
-        identity = execution_identity(projection, expected_workflow)
+        identity = execution_identity(
+            projection, expected_workflow, milestone_branch=self.milestone_branch
+        )
         prepared_feature = projection.get("prepared_feature_execution")
         expected_starting_branch = (
             prepared_feature.get("feature_branch")
@@ -505,7 +608,9 @@ def authoritative_status_fields(
     }
     projection_gate = projection.get("human_gate")
     preserved_gate = projection_gate if isinstance(projection_gate, dict) else {}
-    identity = execution_identity(projection, workflow)
+    identity = execution_identity(
+        projection, workflow, milestone_branch=executable.milestone_branch
+    )
     status_feature = identity.feature_id or executable.feature_id
     status_accepted_commit = identity.accepted_commit or executable.accepted_commit
     status_starting_commit = identity.starting_commit or executable.starting_commit
@@ -615,7 +720,11 @@ def execution_plan_projection_agreement(
     action = projection.get("allowed_next_action")
     expected_sessions = executable.sessions_that_would_launch
     expected_lease = projection.get("required_lease") or executable.lease_type
-    identity = execution_identity(projection, executable.workflow)
+    identity = execution_identity(
+        projection,
+        executable.workflow,
+        milestone_branch=executable.milestone_branch,
+    )
     expected_feature = identity.feature_id or executable.feature_id
     expected_accepted_commit = identity.accepted_commit or executable.accepted_commit
     expected_starting_commit = identity.starting_commit or executable.starting_commit

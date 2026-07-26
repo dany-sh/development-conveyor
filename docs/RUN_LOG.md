@@ -1679,3 +1679,55 @@ This log records model configuration and deterministic deployment evidence. It n
   on `codex/p0-foundation` at `f85f7dad` with an unchanged cache. No
   application tracked file, commit, branch, test, build, preparation,
   execution, reconciliation, or integration changed.
+
+### Model execution — 2026-07-26T09:22:23+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `post_integration_planning_baseline_binding`
+- Safety and autonomy contracts unchanged: `true`
+
+### Post-integration planning baseline binding — 2026-07-26
+
+- Scope: controller-only implementation on
+  `codex/m1-22-post-integration-planning-baseline-binding` from exact parent
+  `6d5210eefce3dad5c957787b4692ba4d0fa33683`; one
+  `gpt-5.6-sol`/medium interactive parent and zero child or named-agent
+  sessions.
+- Root cause: execution identity reused the preserved
+  `selected_feature_starting_commit` after F073 was integrated and cleared,
+  overriding the completed integration terminal snapshot and producing a
+  fresh queue-reconciliation plan at `8a2f7fb` instead of the live milestone
+  HEAD.
+- Repair: a cleared fresh queue-reconciliation plan uses the latest
+  corroborated completed milestone-integration terminal HEAD only when the
+  historical outcome and matching completed transaction prove the same
+  feature, terminal reference, configured milestone branch, clean repository,
+  and absent terminal Git operation. Active selected-feature identity and all
+  malformed-completion fallbacks remain unchanged and fail closed.
+- Focused validation: 86/86 execution-plan, planner-observer, projection,
+  M1-014, M1-021, and post-integration regression tests passed. Python
+  compilation, `validate-config`, JSON-compatible touched-file parsing, and
+  `git diff --check` passed. The complete controller suite and application
+  tests/builds were intentionally excluded.
+- Baseline exclusions: the four previously documented broader failures were
+  not rerun because they are outside this focused surface: two
+  mutable-live-ledger F097 cache fixtures and two legacy CLI expectations.
+- Live read-only result: status reports `queue_reconciliation`, null selected
+  feature and accepted commit, null active transaction, milestone and starting
+  branch `codex/m0-foundation`, starting commit
+  `12bee2fc3b3668091474dc288067cd3aced0ee08`, and proposed action
+  `queue_reconciliation`. Consistency reports `CONSISTENT`,
+  `consistent: true`, no failed invariant, and
+  `planned_milestone_ref: true`.
+- Isolation: status and consistency launched zero models and zero children.
+  The Interview Companion ledger and projection hashes, absent cycle cache,
+  application branch and HEAD, clean worktree, Git-operation state, and absent
+  writer lease remained unchanged. Case Manager remained clean on
+  `codex/p0-foundation` at
+  `f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0` with no writer lease. No
+  application file, commit, branch, build, test, preparation, execution,
+  reconciliation, integration, or durable controller state was changed.

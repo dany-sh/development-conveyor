@@ -17,6 +17,9 @@ from development_conveyor.projection import projection_fingerprint
 F004_COMMIT = "8ae5c94df59119d89d3c2ac6fd7508a47a426ff6"
 F003_COMMIT = "543615bd0cd70e8cd56d70e4a508c076954e6cb9"
 F005_COMMIT = "5" * 40
+F073_START = "8" * 40
+F073_TERMINAL = "1" * 40
+F073_TRANSACTION = "c17a56d1-d261-418f-80ba-c19ecfbf2145"
 
 
 def projection(**overrides):
@@ -60,6 +63,83 @@ def projection(**overrides):
             },
         ],
     }
+    value.update(overrides)
+    value["projection_fingerprint"] = projection_fingerprint(value)
+    return value
+
+
+def post_integration_projection(**overrides):
+    value = projection(
+        current_state="queue_reconciliation",
+        active_transaction=None,
+        current_feature=None,
+        selected_next_feature=None,
+        selected_feature_starting_commit=F073_START,
+        accepted_feature_commit=None,
+        feature_branch=None,
+        milestone_branch="codex/m0-foundation",
+        allowed_next_action="queue_reconciliation",
+        session_resume_eligible=False,
+        required_lease=None,
+        human_gate=None,
+        historical_integration_outcomes=[
+            {
+                "classification": "INTEGRATED",
+                "feature_id": "F072",
+                "accepted_commit": "7" * 40,
+                "integrated_commit": "6" * 40,
+                "sequence": 757,
+                "terminal_head": "9" * 40,
+                "terminal_repository_clean": True,
+                "transaction_id": "f072-integration",
+            },
+            {
+                "classification": "INTEGRATED",
+                "feature_id": "F073",
+                "accepted_commit": "a" * 40,
+                "integrated_commit": "b" * 40,
+                "sequence": 836,
+                "terminal_head": F073_TERMINAL,
+                "terminal_repository_clean": True,
+                "transaction_id": F073_TRANSACTION,
+            },
+        ],
+        transactions=[
+            {
+                "transaction_id": "f072-integration",
+                "workflow_type": "milestone_integration",
+                "feature_id": "F072",
+                "state": "completed",
+                "terminal_classification": "INTEGRATED",
+                "terminal_reference": "9" * 40,
+                "terminal_snapshot": {
+                    "branch": "codex/m0-foundation",
+                    "head": "9" * 40,
+                    "clean": True,
+                    "git_operations": {},
+                },
+            },
+            {
+                "transaction_id": F073_TRANSACTION,
+                "workflow_type": "milestone_integration",
+                "feature_id": "F073",
+                "state": "completed",
+                "terminal_classification": "INTEGRATED",
+                "terminal_reference": F073_TERMINAL,
+                "terminal_snapshot": {
+                    "branch": "codex/m0-foundation",
+                    "head": F073_TERMINAL,
+                    "clean": True,
+                    "git_operations": {
+                        "merge": False,
+                        "cherry_pick": False,
+                        "rebase_apply": False,
+                        "rebase_merge": False,
+                    },
+                },
+            },
+        ],
+    )
     value.update(overrides)
     value["projection_fingerprint"] = projection_fingerprint(value)
     return value
@@ -217,6 +297,113 @@ class ExecutionPlanIdentityTests(unittest.TestCase):
 
         self.assertIsNone(recovery)
         self.assertEqual(before, authoritative)
+
+    def test_completed_integration_uses_terminal_milestone_head_for_fresh_planning(self):
+        authoritative = post_integration_projection()
+
+        plan = ExecutionPlan.from_projection(
+            authoritative, starting_commit="f" * 40
+        )
+
+        self.assertEqual("queue_reconciliation", plan.workflow_type)
+        self.assertEqual("codex/m0-foundation", plan.starting_branch)
+        self.assertEqual(F073_TERMINAL, plan.starting_commit)
+        self.assertIsNone(plan.feature_id)
+        self.assertIsNone(plan.accepted_commit)
+
+    def test_cleared_integrated_feature_ignores_stale_selected_start(self):
+        authoritative = post_integration_projection()
+
+        plan = ExecutionPlan.from_projection(authoritative)
+
+        self.assertEqual(F073_START, authoritative["selected_feature_starting_commit"])
+        self.assertEqual(F073_TERMINAL, plan.starting_commit)
+
+    def test_post_integration_status_and_plan_agree_without_mutation(self):
+        authoritative = post_integration_projection()
+        before = copy.deepcopy(authoritative)
+        plan = ExecutionPlan.from_projection(authoritative)
+
+        status = authoritative_status_fields(
+            authoritative,
+            plan,
+            legacy_plan={},
+            persisted_state="integration_pending",
+            superseded_cycles=[],
+            persisted_projection_fingerprint="stale",
+        )
+        agreed, evidence = execution_plan_projection_agreement(
+            authoritative, status, plan
+        )
+
+        self.assertTrue(agreed, evidence)
+        self.assertEqual(F073_TERMINAL, status["starting_commit"])
+        self.assertEqual(F073_TERMINAL, status["execution_plan"]["starting_commit"])
+        self.assertEqual(before, authoritative)
+
+    def test_mismatched_caller_start_cannot_override_terminal_milestone_head(self):
+        authoritative = post_integration_projection()
+
+        plan = ExecutionPlan.from_projection(
+            authoritative, starting_commit="f" * 40
+        )
+
+        self.assertEqual(F073_TERMINAL, plan.starting_commit)
+        self.assertNotEqual("f" * 40, plan.starting_commit)
+
+    def test_incomplete_integration_completion_fails_closed(self):
+        authoritative = post_integration_projection()
+        authoritative["transactions"][-1]["terminal_snapshot"]["clean"] = False
+        authoritative["projection_fingerprint"] = projection_fingerprint(authoritative)
+
+        plan = ExecutionPlan.from_projection(
+            authoritative, starting_commit="f" * 40
+        )
+
+        self.assertEqual(F073_START, plan.starting_commit)
+        self.assertNotEqual(F073_TERMINAL, plan.starting_commit)
+
+    def test_unfinished_terminal_git_operation_fails_closed(self):
+        authoritative = post_integration_projection()
+        authoritative["transactions"][-1]["terminal_snapshot"]["git_operations"][
+            "merge"
+        ] = True
+        authoritative["projection_fingerprint"] = projection_fingerprint(authoritative)
+
+        plan = ExecutionPlan.from_projection(
+            authoritative, starting_commit="f" * 40
+        )
+
+        self.assertEqual(F073_START, plan.starting_commit)
+
+    def test_active_selected_feature_retains_authenticated_start(self):
+        authoritative = post_integration_projection(
+            current_state="feature_ready",
+            current_feature="F074",
+            selected_next_feature="F074",
+            selected_feature_starting_commit="4" * 40,
+            feature_branch="codex/F074-active",
+            allowed_next_action="feature_cycle",
+            required_lease="feature_writer",
+        )
+
+        plan = ExecutionPlan.from_projection(authoritative)
+
+        self.assertEqual("F074", plan.feature_id)
+        self.assertEqual("4" * 40, plan.starting_commit)
+        self.assertEqual("codex/F074-active", plan.feature_branch)
+
+    def test_historical_f072_and_f073_outcomes_remain_unchanged(self):
+        authoritative = post_integration_projection()
+        historical_before = copy.deepcopy(
+            authoritative["historical_integration_outcomes"]
+        )
+
+        ExecutionPlan.from_projection(authoritative)
+
+        self.assertEqual(
+            historical_before, authoritative["historical_integration_outcomes"]
+        )
 
 
 if __name__ == "__main__":

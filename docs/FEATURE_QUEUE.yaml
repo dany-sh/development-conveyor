@@ -483,6 +483,35 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-022",
+      "title": "Post-integration planning baseline binding",
+      "status": "review",
+      "priority": 22,
+      "milestone": "M1",
+      "dependencies": [
+        "M1-021"
+      ],
+      "spec": "docs/features/M1-022-post-integration-planning-baseline-binding.md",
+      "acceptance_criteria": [
+        "Fresh queue reconciliation after a completed integration uses the corroborated terminal milestone HEAD instead of the cleared feature's historical selected_feature_starting_commit",
+        "The planner observer and consistency verifier agree that the starting branch, milestone ref, repository HEAD, and starting commit identify the same clean terminal milestone state",
+        "Missing or malformed integration completion, mismatched milestone lineage, dirty or operation-active repositories, and active writer leases remain fail closed",
+        "Status and consistency checks are read-only, preserve historical integration evidence, and launch zero models and child sessions"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-22-post-integration-planning-baseline-binding",
+      "integration_base_commit": "6d5210eefce3dad5c957787b4692ba4d0fa33683",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

@@ -1,8 +1,34 @@
 # Current Status
 
-Last updated: 2026-07-25
+Last updated: 2026-07-26
 
 ## Summary
+
+Post-integration planning baseline binding is implemented on
+`codex/m1-22-post-integration-planning-baseline-binding` from exact parent
+`6d5210eefce3dad5c957787b4692ba4d0fa33683`.
+
+A fresh `queue_reconciliation` plan now recognizes only a fully corroborated
+completed integration with cleared feature, accepted-commit, transaction,
+gate, lease, and resume identity. In that state the completed integration's
+terminal milestone HEAD replaces the preserved historical
+`selected_feature_starting_commit`. Active selected features continue to use
+their authenticated feature starting commits, and malformed or incomplete
+integration completion remains fail closed.
+
+For Interview Companion, read-only status now binds both starting and
+milestone branch to `codex/m0-foundation` and starting commit to
+`12bee2fc3b3668091474dc288067cd3aced0ee08`. Read-only consistency returns
+`CONSISTENT`, `planned_milestone_ref: true`, and no failed invariant. The
+ledger, projection cache, absent cycle cache, application HEADs, branches,
+worktrees, Git-operation state, and application writer-lease state remain
+unchanged. Status and consistency launched zero models and zero children.
+
+Eighty-six focused execution-plan, planner-observer, projection,
+post-integration, M1-014, and M1-021 regressions pass. The complete controller
+suite and application builds/tests remain intentionally unexecuted. The four
+previously documented broader baseline failures were not rerun: two
+mutable-live-ledger F097 cache fixtures and two legacy CLI expectations.
 
 Committed planning-result recovery finalization is implemented on
 `codex/m1-21-finalize-committed-planning-recovery` from exact parent
