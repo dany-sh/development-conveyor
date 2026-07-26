@@ -1104,7 +1104,9 @@ class WorkflowKernel:
     def adopt_committed_planning_recovery(
         self, *, original_transaction_id: str, commit: str, expected_parent: str,
         expected_paths: tuple[str, ...], expected_subject: str, plan_fingerprint: str,
-        selected_feature: str | None, next_state: str,
+        selected_feature: str | None, next_state: str, original_run_id: str,
+        original_session_id: str, queue_fingerprint: str,
+        recovery_evidence_fingerprint: str,
     ) -> str:
         """Record fresh terminal evidence for an existing, verified planning commit."""
         transaction = self._require()
@@ -1122,7 +1124,15 @@ class WorkflowKernel:
         self._revalidate_lease()
         transaction.transition(TransactionState.RESULT_PENDING)
         for event_type, payload in (
-            ("DeterministicExecutionStarted", {"plan_fingerprint": plan_fingerprint, "model_session_launched": False, "recovered_transaction_id": original_transaction_id}),
+            ("DeterministicExecutionStarted", {
+                "plan_fingerprint": plan_fingerprint,
+                "model_session_launched": False,
+                "recovered_transaction_id": original_transaction_id,
+                "original_run_id": original_run_id,
+                "original_session_id": original_session_id,
+                "queue_fingerprint": queue_fingerprint,
+                "recovery_evidence_fingerprint": recovery_evidence_fingerprint,
+            }),
             ("DeterministicResultAccepted", {"classification": "RECOVERY_APPLIED", "current_commit": commit, "changed_paths": list(paths), "model_session_launched": False}),
             ("ValidationStarted", {"changed_paths": list(paths), "executor": "committed_planning_finalization"}),
             ("ValidationPassed", {"commands": [], "preserved_existing_commit": commit}),
@@ -1141,6 +1151,11 @@ class WorkflowKernel:
         self.ledger.append(event_type="RecoveryApplied", transaction_id=transaction.transaction_id,
             workflow_type=transaction.workflow_type, payload={"recovered_transaction_id": original_transaction_id,
                 "classification": "queue_reconciliation_committed_finalization_recovery",
+                "original_run_id": original_run_id,
+                "original_session_id": original_session_id,
+                "planning_result_commit": commit,
+                "queue_fingerprint": queue_fingerprint,
+                "recovery_evidence_fingerprint": recovery_evidence_fingerprint,
                 "selected_feature": selected_feature, "model_session_launched": False})
         transaction.next_project_state = next_state
         return commit

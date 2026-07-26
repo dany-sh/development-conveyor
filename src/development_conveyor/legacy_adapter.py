@@ -62,6 +62,8 @@ class LegacyTransitionAdapter:
         next_state: str,
         checkpoint: str,
         mutate: Callable[[], None],
+        terminal_evidence: dict[str, Any] | None = None,
+        projection_facts: dict[str, Any] | None = None,
     ) -> None:
         workflow = workflow_for_state(next_state)
         transaction_id = str(uuid.uuid5(
@@ -159,6 +161,7 @@ class LegacyTransitionAdapter:
                     "head": self.inspector.head,
                     "clean": self.inspector.is_clean,
                 },
+                **(terminal_evidence or {}),
                 "legacy_adapter": True,
             },
         )
@@ -181,6 +184,10 @@ class LegacyTransitionAdapter:
             payload={
                 "current_state": next_state,
                 "current_feature": feature_id,
+                "selected_feature": (
+                    (terminal_evidence or {}).get("selected_feature")
+                ),
+                "projection_facts": projection_facts or {},
                 "legacy_adapter": True,
             },
         )

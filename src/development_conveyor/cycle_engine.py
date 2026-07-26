@@ -52,8 +52,10 @@ from .planning import (
     normalize_legacy_planning_warning_evidence,
     persist_planning_transaction,
     planning_commit_subject,
+    planning_recovery_evidence_fingerprint,
     planning_report_path,
     plan_new_ready_execution_policy_completion,
+    queue_fingerprint,
     stable_fingerprint,
     validate_planning_changes,
     validate_planning_noop,
@@ -985,6 +987,331 @@ class CycleEngine:
         plan["plan_fingerprint"] = fingerprint(plan)
         return plan
 
+    def _already_recovered_committed_planning_result(
+        self,
+        project: Project,
+        *,
+        planning_transaction: dict[str, Any] | None,
+        expected_run_id: str,
+        expected_session_id: str,
+        expected_starting_head: str,
+        expected_diff_fingerprint: str,
+        expected_paths: list[str],
+    ) -> dict[str, Any] | None:
+        """Authenticate an exact completed recovery without rerunning validators."""
+
+        if (
+            not isinstance(planning_transaction, dict)
+            or planning_transaction.get("planning_commit_status") != "committed"
+        ):
+            return None
+        commit = planning_transaction.get("planning_result_commit")
+        selected_feature = planning_transaction.get("selected_feature")
+        recorded_queue_fingerprint = planning_transaction.get("queue_fingerprint")
+        comparison = planning_transaction.get("queue_validation_evidence")
+        normalized_structured = (
+            comparison.get("normalized_structured")
+            if isinstance(comparison, dict) else None
+        )
+        normalized_deterministic = (
+            comparison.get("normalized_deterministic")
+            if isinstance(comparison, dict) else None
+        )
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                commit,
+                selected_feature,
+                recorded_queue_fingerprint,
+            )
+        ) or not all(
+            isinstance(value, dict)
+            for value in (normalized_structured, normalized_deterministic)
+        ):
+            return None
+        report_path = self._report_path(
+            self.configuration.owned_path(
+                self.configuration.conveyor["report_directory"]
+            ),
+            expected_run_id,
+            "queue_reconciliation.json",
+        )
+        try:
+            session_report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        structured_result = session_report.get("structured_result")
+        if not isinstance(structured_result, dict):
+            return None
+        recorded_planning_fingerprint = planning_transaction.get(
+            "source_planning_transaction_fingerprint"
+        )
+        if not isinstance(recorded_planning_fingerprint, str):
+            recorded_planning_fingerprint = fingerprint(planning_transaction)
+        inspector = RepositoryInspector(project.repository)
+        identity = inspector.identity()
+        state_root = self.root / "state/projects" / project.project_id
+        ledger = EvidenceLedger(
+            state_root / "evidence-ledger.jsonl",
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        events = ledger.read()
+        original_candidates: list[str] = []
+        starts: dict[str, dict[str, Any]] = {}
+        sessions: dict[str, list[str]] = {}
+        commits: dict[str, list[str]] = {}
+        for event in events:
+            transaction_id = str(event.get("transaction_id") or "")
+            if (
+                event.get("event_type") == "TransactionStarted"
+                and event.get("workflow_type")
+                == WorkflowType.QUEUE_RECONCILIATION.value
+            ):
+                starts[transaction_id] = event.get("payload") or {}
+            elif event.get("event_type") == "SessionLaunched":
+                session = (event.get("payload") or {}).get("session_id")
+                if isinstance(session, str):
+                    sessions.setdefault(transaction_id, []).append(session)
+            elif event.get("event_type") == "CommitFinalized":
+                finalized = (event.get("payload") or {}).get("commit")
+                if isinstance(finalized, str):
+                    commits.setdefault(transaction_id, []).append(finalized)
+        for transaction_id, start in starts.items():
+            if (
+                start.get("run_id") == expected_run_id
+                and sessions.get(transaction_id) == [expected_session_id]
+                and commits.get(transaction_id) == [commit]
+            ):
+                original_candidates.append(transaction_id)
+        recorded_original_transaction = planning_transaction.get(
+            "original_transaction_id"
+        )
+        if isinstance(recorded_original_transaction, str):
+            legacy_original = (
+                "legacy-planning-" + fingerprint(session_report)[:32]
+            )
+            if structured_result.get("transaction_id") not in {
+                recorded_original_transaction,
+                None,
+            } or (
+                structured_result.get("transaction_id") is None
+                and recorded_original_transaction != legacy_original
+            ):
+                return None
+            original_transaction_id = recorded_original_transaction
+        elif len(original_candidates) == 1:
+            original_transaction_id = original_candidates[0]
+        else:
+            return None
+        expected_evidence_fingerprint = planning_recovery_evidence_fingerprint(
+            original_transaction_id=original_transaction_id,
+            original_run_id=expected_run_id,
+            original_session_id=expected_session_id,
+            planning_commit=commit,
+            queue_fingerprint_value=recorded_queue_fingerprint,
+            selected_feature=selected_feature,
+            planning_transaction_fingerprint=recorded_planning_fingerprint,
+            normalized_terminal_fingerprint=fingerprint(structured_result),
+            normalized_queue_evidence={
+                "structured": normalized_structured,
+                "deterministic": normalized_deterministic,
+            },
+        )
+        legacy_matches = [
+            event
+            for event in events
+            if event.get("event_type") == "TransactionCompleted"
+            and (event.get("payload") or {}).get("legacy_adapter") is True
+            and (event.get("payload") or {}).get("original_transaction_id")
+            == original_transaction_id
+            and (event.get("payload") or {}).get("original_run_id")
+            == expected_run_id
+            and (event.get("payload") or {}).get("original_session_id")
+            == expected_session_id
+            and (event.get("payload") or {}).get("planning_result_commit")
+            == commit
+            and (event.get("payload") or {}).get("queue_fingerprint")
+            == recorded_queue_fingerprint
+            and (event.get("payload") or {}).get("selected_feature")
+            == selected_feature
+            and (event.get("payload") or {}).get(
+                "recovery_evidence_fingerprint"
+            )
+            == expected_evidence_fingerprint
+        ]
+        recovery_events: dict[str, list[dict[str, Any]]] = {}
+        related_recoveries: set[str] = set()
+        for event in events:
+            if event.get("workflow_type") != WorkflowType.RECOVERY.value:
+                continue
+            transaction_id = str(event.get("transaction_id") or "")
+            recovery_events.setdefault(transaction_id, []).append(event)
+            payload = event.get("payload") or {}
+            if (
+                payload.get("recovered_transaction_id")
+                == original_transaction_id
+            ):
+                related_recoveries.add(transaction_id)
+        matches: list[tuple[str, list[dict[str, Any]]]] = []
+        for transaction_id in related_recoveries:
+            transaction = recovery_events.get(transaction_id, [])
+            start = next(
+                (
+                    event.get("payload") or {}
+                    for event in transaction
+                    if event.get("event_type") == "TransactionStarted"
+                ),
+                {},
+            )
+            applied = next(
+                (
+                    event.get("payload") or {}
+                    for event in transaction
+                    if event.get("event_type") == "RecoveryApplied"
+                    and (event.get("payload") or {}).get("classification")
+                    == "queue_reconciliation_committed_finalization_recovery"
+                ),
+                {},
+            )
+            completed = next(
+                (
+                    event.get("payload") or {}
+                    for event in transaction
+                    if event.get("event_type") == "TransactionCompleted"
+                ),
+                {},
+            )
+            checks = {
+                "start_run": start.get("original_run_id") == expected_run_id,
+                "start_session": start.get("original_session_id")
+                == expected_session_id,
+                "start_transaction": start.get("recovered_transaction_id")
+                == original_transaction_id,
+                "start_commit": start.get("planning_result_commit") == commit,
+                "start_queue": start.get("queue_fingerprint")
+                == recorded_queue_fingerprint,
+                "start_evidence": start.get("recovery_evidence_fingerprint")
+                == expected_evidence_fingerprint,
+                "applied_run": applied.get("original_run_id") == expected_run_id,
+                "applied_session": applied.get("original_session_id")
+                == expected_session_id,
+                "applied_commit": applied.get("planning_result_commit") == commit,
+                "applied_queue": applied.get("queue_fingerprint")
+                == recorded_queue_fingerprint,
+                "applied_feature": applied.get("selected_feature")
+                == selected_feature,
+                "applied_evidence": applied.get("recovery_evidence_fingerprint")
+                == expected_evidence_fingerprint,
+                "completed_commit": completed.get("planning_result_commit")
+                == commit,
+                "completed_queue": completed.get("queue_fingerprint")
+                == recorded_queue_fingerprint,
+                "completed_feature": completed.get("selected_feature")
+                == selected_feature,
+                "completed_evidence": completed.get(
+                    "recovery_evidence_fingerprint"
+                )
+                == expected_evidence_fingerprint,
+                "terminal_events": [
+                    event.get("event_type") for event in transaction[-3:]
+                ]
+                == ["TransactionCompleted", "LeaseReleased", "ProjectionUpdated"],
+            }
+            if all(checks.values()):
+                matches.append((transaction_id, transaction))
+            elif applied or completed:
+                failed = ", ".join(
+                    name for name, passed in checks.items() if not passed
+                )
+                raise RecoveryError(
+                    "recorded planning recovery evidence disagrees: " + failed
+                )
+        if len(legacy_matches) > 1 or len(matches) > 1:
+            raise RecoveryError(
+                "more than one completed planning recovery matches the evidence"
+            )
+        if legacy_matches and matches:
+            raise RecoveryError(
+                "legacy and transactional planning recoveries both claim completion"
+            )
+        if not legacy_matches and not matches:
+            return None
+        projection = ProjectionEngine(
+            ledger, state_root / "projection-cache.json"
+        ).rebuild(persist_cache=False)
+        checks = {
+            "run_id": planning_transaction.get("run_id") == expected_run_id,
+            "session_id": planning_transaction.get("session_id")
+            == expected_session_id,
+            "starting_head": planning_transaction.get("planning_start_commit")
+            == expected_starting_head,
+            "diff_fingerprint": planning_transaction.get("diff_fingerprint")
+            == expected_diff_fingerprint,
+            "changed_paths": planning_transaction.get("changed_paths")
+            == expected_paths,
+            "queue_fingerprint": queue_fingerprint(project)
+            == recorded_queue_fingerprint,
+            "repository_head": inspector.head == commit,
+            "repository_branch": inspector.current_branch
+            == project.milestone_branch,
+            "repository_clean": inspector.is_clean,
+            "no_git_operation": not any(
+                inspector.git_operation_state().values()
+            ),
+            "projection_state": projection.get("current_state")
+            == "feature_ready",
+            "projection_current_feature": projection.get("current_feature")
+            == selected_feature,
+            "projection_selected_feature": projection.get(
+                "selected_next_feature"
+            )
+            == selected_feature,
+            "projection_starting_commit": projection.get(
+                "selected_feature_starting_commit"
+            )
+            == commit,
+            "projection_active_transaction": projection.get(
+                "active_transaction"
+            )
+            is None,
+            "projection_human_gate": projection.get("human_gate") is None,
+        }
+        if not all(checks.values()):
+            failed = ", ".join(
+                name for name, passed in checks.items() if not passed
+            )
+            raise RecoveryError(
+                "completed planning recovery is not durably projected: " + failed
+            )
+        recovery_transaction_id = (
+            str(legacy_matches[0]["transaction_id"])
+            if legacy_matches
+            else matches[0][0]
+        )
+        return {
+            "project_id": project.project_id,
+            "outcome": "planning_transaction_already_recovered",
+            "applied": False,
+            "idempotent": True,
+            "recovery_transaction_id": recovery_transaction_id,
+            "original_transaction_id": original_transaction_id,
+            "planning_result_commit": commit,
+            "planning_transaction": planning_transaction,
+            "current_state": "feature_ready",
+            "selected_feature": selected_feature,
+            "queue_fingerprint": recorded_queue_fingerprint,
+            "recovery_evidence_fingerprint": expected_evidence_fingerprint,
+            "checks": checks,
+            "validations_performed": [],
+            "model_sessions_launched": [],
+            "child_sessions_launched": [],
+            "feature_factory_would_launch": False,
+            "milestone_integrator_would_launch": False,
+            "application_source_written": False,
+        }
+
     def _feature_prelaunch_recovery_plan(
         self, project: Project, projection: dict[str, Any]
     ) -> dict[str, Any] | None:
@@ -1652,6 +1979,38 @@ class CycleEngine:
                 repository=project.repository,
                 project_id=project.project_id,
             )
+            planning_evidence = (
+                (state_evidence or {}).get("planning_transaction")
+                if isinstance(state_evidence, dict)
+                else None
+            )
+            legacy_terminal_evidence = (
+                {
+                    "original_transaction_id": planning_evidence.get(
+                        "original_transaction_id"
+                    ),
+                    "original_run_id": planning_evidence.get("run_id"),
+                    "original_session_id": planning_evidence.get("session_id"),
+                    "planning_result_commit": planning_evidence.get(
+                        "planning_result_commit"
+                    ),
+                    "queue_fingerprint": planning_evidence.get(
+                        "queue_fingerprint"
+                    ),
+                    "selected_feature": planning_evidence.get(
+                        "selected_feature"
+                    ),
+                    "selected_feature_starting_commit": planning_evidence.get(
+                        "selected_feature_starting_commit"
+                    ),
+                    "recovery_evidence_fingerprint": planning_evidence.get(
+                        "recovery_evidence_fingerprint"
+                    ),
+                }
+                if checkpoint == "planning_recovery_committed"
+                and isinstance(planning_evidence, dict)
+                else None
+            )
             adapter.transition(
                 run_id=run_id,
                 feature_id=feature,
@@ -1660,6 +2019,18 @@ class CycleEngine:
                 next_state=transition.current,
                 checkpoint=checkpoint,
                 mutate=lambda: self.project_store.write(self.project_state_path(project), document),
+                terminal_evidence=legacy_terminal_evidence,
+                projection_facts=(
+                    {
+                        "selected_feature_starting_commit": (
+                            planning_evidence.get(
+                                "selected_feature_starting_commit"
+                            )
+                        )
+                    }
+                    if legacy_terminal_evidence is not None
+                    else None
+                ),
             )
         self.events.append(run_event(
             run_id=run_id,
@@ -6391,6 +6762,18 @@ class CycleEngine:
         projection = self._authoritative_projection(project)
         if not isinstance(projection, dict) or projection.get("current_state") != "validation_failed":
             return None
+        planning_recovery = self._planning_finalization_recovery_plan(
+            self.effective_project(project),
+            projection,
+        )
+        if (
+            isinstance(planning_recovery, dict)
+            and isinstance(planning_recovery.get("existing_commit"), str)
+            and isinstance(
+                planning_recovery.get("post_integration_descendant"), dict
+            )
+        ):
+            return None
         identity = RepositoryInspector(project.repository).identity()
         state_root = self.root / "state/projects" / project.project_id
         ledger = EvidenceLedger(
@@ -7384,7 +7767,11 @@ class CycleEngine:
         adapter = RecoveryAdapter(
             allowed_paths=expected_paths,
             allow_untracked=False,
-            commit_subject=planning_commit_subject(effective, selected_feature),
+            commit_subject=(
+                str(expected_plan["commit_subject"])
+                if committed_recovery
+                else planning_commit_subject(effective, selected_feature)
+            ),
             next_state=next_state,
             require_clean_start=committed_recovery,
         )
@@ -7452,6 +7839,11 @@ class CycleEngine:
                     "normalized_terminal_fingerprint": expected_plan[
                         "normalized_terminal_fingerprint"
                     ],
+                    "planning_result_commit": existing_commit,
+                    "queue_fingerprint": expected_plan.get("queue_fingerprint"),
+                    "recovery_evidence_fingerprint": expected_plan.get(
+                        "recovery_evidence_fingerprint"
+                    ),
                     "historical_child_session_attempts": expected_plan.get(
                         "historical_child_session_attempts", []
                     ),
@@ -7519,9 +7911,15 @@ class CycleEngine:
                 commit = kernel.adopt_committed_planning_recovery(
                     original_transaction_id=expected_plan["original_transaction_id"], commit=existing_commit,
                     expected_parent=expected_plan["starting_commit"], expected_paths=expected_paths,
-                    expected_subject=planning_commit_subject(effective, selected_feature),
+                    expected_subject=str(expected_plan["commit_subject"]),
                     plan_fingerprint=expected_plan["plan_fingerprint"],
                     selected_feature=selected_feature, next_state=next_state,
+                    original_run_id=expected_plan["original_run_id"],
+                    original_session_id=expected_plan["original_session_id"],
+                    queue_fingerprint=expected_plan["queue_fingerprint"],
+                    recovery_evidence_fingerprint=expected_plan[
+                        "recovery_evidence_fingerprint"
+                    ],
                 )
             else:
                 planning_transaction = load_planning_transaction(
@@ -7673,7 +8071,16 @@ class CycleEngine:
                     "planning_status": "passed",
                     "selected_feature": selected_feature,
                     "planning_result_commit": commit,
+                    "selected_feature_starting_commit": (
+                        commit if selected_feature else None
+                    ),
                     "recovered_transaction_id": expected_plan["original_transaction_id"],
+                    "original_run_id": expected_plan["original_run_id"],
+                    "original_session_id": expected_plan["original_session_id"],
+                    "queue_fingerprint": expected_plan.get("queue_fingerprint"),
+                    "recovery_evidence_fingerprint": expected_plan.get(
+                        "recovery_evidence_fingerprint"
+                    ),
                     "model_session_launched": False,
                     "historical_child_session_attempts": expected_plan.get(
                         "historical_child_session_attempts", []
@@ -7851,9 +8258,18 @@ class CycleEngine:
             / project.project_id
             / "evidence-ledger.jsonl"
         )
-        if ledger_path.exists() and not (
-            existing and existing.get("planning_commit_status") == "committed"
-        ):
+        if ledger_path.exists():
+            already_recovered = self._already_recovered_committed_planning_result(
+                effective,
+                planning_transaction=existing,
+                expected_run_id=run_id,
+                expected_session_id=expected_session_id,
+                expected_starting_head=expected_starting_head,
+                expected_diff_fingerprint=expected_diff_fingerprint,
+                expected_paths=expected_paths,
+            )
+            if already_recovered is not None:
+                return already_recovered
             projection = self._authoritative_projection(project)
             if projection is None:
                 raise RecoveryError("transactional planning recovery projection is unavailable")
@@ -8126,6 +8542,54 @@ class CycleEngine:
                     "recovery_expected_session_id": expected_session_id,
                     "next_state": "feature_ready" if committed.get("selected_feature") else "paused",
                 })
+                original_transaction_id = (
+                    (report.get("structured_result") or {}).get(
+                        "transaction_id"
+                    )
+                    if isinstance(report.get("structured_result"), dict)
+                    else None
+                )
+                if not isinstance(original_transaction_id, str):
+                    original_transaction_id = (
+                        "legacy-planning-" + fingerprint(report)[:32]
+                    )
+                comparison = committed.get("queue_validation_evidence") or {}
+                committed["original_transaction_id"] = (
+                    original_transaction_id
+                )
+                committed[
+                    "source_planning_transaction_fingerprint"
+                ] = fingerprint(committed)
+                committed["recovery_evidence_fingerprint"] = (
+                    planning_recovery_evidence_fingerprint(
+                        original_transaction_id=original_transaction_id,
+                        original_run_id=run_id,
+                        original_session_id=expected_session_id,
+                        planning_commit=str(
+                            committed["planning_result_commit"]
+                        ),
+                        queue_fingerprint_value=str(
+                            committed["queue_fingerprint"]
+                        ),
+                        selected_feature=committed.get(
+                            "selected_feature"
+                        ),
+                        planning_transaction_fingerprint=committed[
+                            "source_planning_transaction_fingerprint"
+                        ],
+                        normalized_terminal_fingerprint=fingerprint(
+                            report["structured_result"]
+                        ),
+                        normalized_queue_evidence={
+                            "structured": comparison.get(
+                                "normalized_structured"
+                            ),
+                            "deterministic": comparison.get(
+                                "normalized_deterministic"
+                            ),
+                        },
+                    )
+                )
                 persist_planning_transaction(transaction_path, committed)
                 document = self._project_document(
                     effective, run_id, identity["path_fingerprint"]

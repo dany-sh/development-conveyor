@@ -80,6 +80,20 @@ class WarningEvidenceTests(unittest.TestCase):
                 ),
             )
 
+    def test_explicit_warning_list_mismatch_fails(self):
+        with self.assertRaisesRegex(RecoveryError, "explicit_warnings"):
+            compare_queue_validation_evidence(
+                counts(
+                    warning_count=2,
+                    warnings=["M1 warning", "M2 warning"],
+                    blocking_warnings=[],
+                ),
+                counts(
+                    warnings=["M1 warning", "different M2 warning"],
+                    blocking_warnings=[],
+                ),
+            )
+
     def test_malformed_warning_string_fails_before_mutation(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository, _ = synthetic_repository(Path(temporary))

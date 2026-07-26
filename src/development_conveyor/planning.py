@@ -1400,15 +1400,123 @@ def compare_queue_validation_evidence(
     }
 
 
+def planning_recovery_evidence_fingerprint(
+    *,
+    original_transaction_id: str,
+    original_run_id: str,
+    original_session_id: str,
+    planning_commit: str,
+    queue_fingerprint_value: str,
+    selected_feature: str | None,
+    planning_transaction_fingerprint: str,
+    normalized_terminal_fingerprint: str,
+    normalized_queue_evidence: dict[str, Any],
+) -> str:
+    """Bind one committed planning recovery to its complete immutable evidence."""
+
+    return fingerprint({
+        "original_transaction_id": original_transaction_id,
+        "original_run_id": original_run_id,
+        "original_session_id": original_session_id,
+        "planning_commit": planning_commit,
+        "queue_fingerprint": queue_fingerprint_value,
+        "selected_feature": selected_feature,
+        "planning_transaction_fingerprint": planning_transaction_fingerprint,
+        "normalized_terminal_fingerprint": normalized_terminal_fingerprint,
+        "normalized_queue_evidence": normalized_queue_evidence,
+    })
+
+
+def _completed_integration_parent_evidence(
+    *,
+    ledger_events: list[dict[str, Any]],
+    projection: dict[str, Any],
+    planning_start_sequence: int,
+    planning_parent: str,
+) -> dict[str, Any] | None:
+    """Authenticate the latest integration when planning directly follows one."""
+
+    prior = [
+        item
+        for item in projection.get("transactions") or []
+        if item.get("workflow_type") == "milestone_integration"
+        and int(item.get("last_sequence") or 0) < planning_start_sequence
+    ]
+    if not prior:
+        return None
+    latest = max(prior, key=lambda item: int(item.get("last_sequence") or 0))
+    if (
+        latest.get("state") != "completed"
+        or latest.get("terminal_classification") != "INTEGRATED"
+    ):
+        raise RecoveryError(
+            "committed planning result follows an unfinished milestone integration"
+        )
+    transaction_id = latest.get("transaction_id")
+    events = [
+        event
+        for event in ledger_events
+        if event.get("transaction_id") == transaction_id
+    ]
+    terminal_types = [event.get("event_type") for event in events[-3:]]
+    completed = events[-3].get("payload") if len(events) >= 3 else {}
+    projected = events[-1].get("payload") if events else {}
+    terminal_snapshot = latest.get("terminal_snapshot") or {}
+    checks = {
+        "terminal_events": terminal_types
+        == ["TransactionCompleted", "LeaseReleased", "ProjectionUpdated"],
+        "classification": isinstance(completed, dict)
+        and completed.get("classification") == "INTEGRATED",
+        "terminal_head": terminal_snapshot.get("head") == planning_parent,
+        "terminal_branch": terminal_snapshot.get("branch") is not None,
+        "terminal_clean": terminal_snapshot.get("clean") is True,
+        "terminal_git_operation": not any(
+            bool(value)
+            for value in (terminal_snapshot.get("git_operations") or {}).values()
+        ),
+        "projected_ready": isinstance(projected, dict)
+        and projected.get("current_state") == "feature_ready",
+        "lineage": bool(events)
+        and int(events[-1].get("sequence") or 0) < planning_start_sequence,
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise RecoveryError(
+            "completed integration parent evidence disagrees: " + ", ".join(failed)
+        )
+    return {
+        "transaction_id": transaction_id,
+        "feature_id": latest.get("feature_id"),
+        "terminal_milestone_head": planning_parent,
+        "checks": checks,
+    }
+
+
 def _inspect_committed_planning_finalization_recovery(
-    project: Project, inspector: RepositoryInspector, *, transaction_events: list[dict[str, Any]],
-    projection: dict[str, Any], original_transaction_id: str, planning_transaction: dict[str, Any],
+    project: Project, inspector: RepositoryInspector, *, ledger_events: list[dict[str, Any]],
+    transaction_events: list[dict[str, Any]], projection: dict[str, Any],
+    original_transaction_id: str, planning_transaction: dict[str, Any],
     session_report: dict[str, Any], writer_lease_exists: bool,
 ) -> dict[str, Any]:
     """Recognize a committed reconciliation blocked only before terminal semantics."""
-    start, session_event, finalized, blocked, projected = (
-        transaction_events[0], transaction_events[4], transaction_events[9], transaction_events[10], transaction_events[12]
+
+    start = transaction_events[0]
+    session_event = next(
+        event
+        for event in transaction_events
+        if event.get("event_type") == "SessionLaunched"
     )
+    finalized = next(
+        event
+        for event in transaction_events
+        if event.get("event_type") == "CommitFinalized"
+    )
+    blocked = next(
+        event
+        for event in transaction_events
+        if event.get("event_type") == "TransactionBlocked"
+    )
+    projected = transaction_events[-1]
     start_payload = start.get("payload") or {}
     final_payload = finalized.get("payload") or {}
     blocked_payload = blocked.get("payload") or {}
@@ -1427,39 +1535,93 @@ def _inspect_committed_planning_finalization_recovery(
         raise RecoveryError("committed planning session lacks its typed result")
     paths = sorted(final_payload.get("changed_paths") or [])
     expected_paths = sorted(planning_transaction.get("changed_paths") or [])
+    queue = FeatureQueue.from_location(project.repository, project.queue_location)
+    selection = _selected_feature_evidence(
+        project, queue, report_evidence["classification"]
+    )
+    selected_feature = selection.get("selected_feature")
+    current_queue_fingerprint = queue_fingerprint(project)
+    expected_subjects = {
+        planning_commit_subject(project, None),
+        planning_commit_subject(project, selected_feature),
+    }
     latest = next((item for item in reversed(projection.get("transactions") or [])
         if item.get("transaction_id") == original_transaction_id), {})
+    post_integration_parent = _completed_integration_parent_evidence(
+        ledger_events=ledger_events,
+        projection=projection,
+        planning_start_sequence=int(start.get("sequence") or 0),
+        planning_parent=starting_head,
+    )
     checks = {
         "latest_transaction_is_original": latest.get("transaction_id") == original_transaction_id,
-        "terminal_planning_semantic_block": (latest.get("workflow_type") == "queue_reconciliation" and latest.get("state") == "terminal_failure"),
+        "terminal_planning_semantic_block": (
+            latest.get("workflow_type") == "queue_reconciliation"
+            and latest.get("state") == "terminal_failure"
+            and latest.get("terminal_classification")
+            == "PLANNING_SEMANTIC_CONFLICT"
+            and blocked_payload.get("classification")
+            == "PLANNING_SEMANTIC_CONFLICT"
+            and blocked_payload.get("terminal_state") == "terminal_failure"
+            and blocked_payload.get("next_state") == "validation_failed"
+        ),
         "branch": inspector.current_branch == starting_branch == project.milestone_branch,
         "head": inspector.head == existing_commit,
         "parent": inspector.rev_parse(f"{existing_commit}^", check=False) == starting_head == final_payload.get("parent"),
-        "subject": inspector.commit_subject(existing_commit) == "factory: reconcile M0 queue" == final_payload.get("commit_subject"),
+        "subject": (
+            inspector.commit_subject(existing_commit)
+            == final_payload.get("commit_subject")
+            and final_payload.get("commit_subject") in expected_subjects
+        ),
         "changed_paths": paths == expected_paths == sorted(envelope.get("changed_paths") or []) == inspector.changed_paths(existing_commit),
-        "exact_allowed_path_count": len(paths) == 7,
         "planning_paths_only": bool(paths) and all(allowed_planning_path(path) for path in paths),
         "repository_clean": inspector.is_clean,
         "writer_lease_absent": writer_lease_exists is False,
         "terminal_snapshot": snapshot.get("branch") == starting_branch and snapshot.get("head") == existing_commit,
         "report_identity": (session_report.get("result_classification") == "RECONCILED_READY_WORK" and envelope.get("starting_commit") == starting_head),
-        "planning_transaction_identity": (planning_transaction.get("run_id") == run_id and planning_transaction.get("session_id") == session_id and planning_transaction.get("planning_result_commit") == existing_commit),
+        "planning_transaction_identity": (
+            planning_transaction.get("run_id") == run_id
+            and planning_transaction.get("session_id") == session_id
+            and planning_transaction.get("planning_result_commit") == existing_commit
+            and planning_transaction.get("selected_feature") == selected_feature
+            and planning_transaction.get("queue_fingerprint")
+            == current_queue_fingerprint
+        ),
+        "commit_fingerprint": (
+            final_payload.get("diff_fingerprint")
+            == planning_transaction.get("diff_fingerprint")
+            == inspector.patch_fingerprint(existing_commit)
+        ),
+        "no_git_operation": not any(inspector.git_operation_state().values()),
         "terminal_projection": (projected.get("payload") or {}).get("current_state") == "validation_failed",
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
         raise RecoveryError("committed planning finalization topology disagrees: " + ", ".join(failed))
-    queue = FeatureQueue.from_location(project.repository, project.queue_location)
     newly_policy_bound = _require_new_ready_execution_policies(
         project, inspector, starting_head, queue
     )
-    selection = _selected_feature_evidence(project, queue, report_evidence["classification"])
     inventory = _inventory_validation(project)
     comparison = compare_queue_validation_evidence(
         (report_evidence.get("structured_result") or {}).get("queue_validation") or {}, inventory
     )
-    if selection["selected_feature"] != "F004":
+    if selected_feature is None or selection["ready_features"] != [selected_feature]:
         raise RecoveryError("committed planning recovery did not select the sole ready feature")
+    normalized_terminal_fingerprint = fingerprint(session_report["structured_result"])
+    evidence_fingerprint = planning_recovery_evidence_fingerprint(
+        original_transaction_id=original_transaction_id,
+        original_run_id=run_id,
+        original_session_id=session_id,
+        planning_commit=existing_commit,
+        queue_fingerprint_value=current_queue_fingerprint,
+        selected_feature=selected_feature,
+        planning_transaction_fingerprint=fingerprint(planning_transaction),
+        normalized_terminal_fingerprint=normalized_terminal_fingerprint,
+        normalized_queue_evidence={
+            "structured": comparison["normalized_structured"],
+            "deterministic": comparison["normalized_deterministic"],
+        },
+    )
     return {
         "schema_version": 1, "current_state": "validation_failed",
         "workflow_type": "queue reconciliation committed-finalization recovery",
@@ -1467,14 +1629,26 @@ def _inspect_committed_planning_finalization_recovery(
         "original_run_id": run_id, "original_session_id": session_id,
         "starting_branch": starting_branch, "starting_commit": starting_head,
         "existing_commit": existing_commit, "existing_planning_changes": {"count": len(paths), "paths": paths},
-        "result_classification": report_evidence["terminal_classification"], "selected_feature": "F004",
+        "commit_subject": final_payload["commit_subject"],
+        "mutation_fingerprint": final_payload["diff_fingerprint"],
+        "queue_fingerprint": current_queue_fingerprint,
+        "recovery_evidence_fingerprint": evidence_fingerprint,
+        "normalized_terminal_fingerprint": normalized_terminal_fingerprint,
+        "result_classification": report_evidence["terminal_classification"],
+        "selected_feature": selected_feature,
         "ready_features": selection["ready_features"], "checks": checks,
+        "expected_final_state": "feature_ready",
+        "expected_final_current_feature": selected_feature,
+        "expected_final_selected_next_feature": selected_feature,
+        "selected_feature_starting_commit": existing_commit,
+        "post_integration_descendant": post_integration_parent,
         "newly_readied_execution_policies": newly_policy_bound,
         "queue_validation_evidence": comparison, "inventory_validation": inventory,
         "model_sessions_that_would_launch": [], "child_sessions_that_would_launch": [],
         "execution": {"models_planned": 0}, "deterministic_only": True,
         "application_mutation_expected": False,
         "expected_mutation": "ledger terminal recovery evidence and local cycle-cache rebinding only",
+        "planning_commits_that_would_be_created": 0,
         "feature_factory_would_launch": False, "milestone_integrator_would_launch": False,
     }
 
@@ -1506,9 +1680,20 @@ def inspect_planning_finalization_recovery(
         "SessionResultAccepted", "ChangesDetected", "ValidationStarted", "ValidationPassed", "CommitFinalized",
         "TransactionBlocked", "LeaseReleased", "ProjectionUpdated",
     ]
-    if event_types == committed_event_types:
+    checkpointed_committed_event_types = [
+        "TransactionStarted", "LeaseAcquired", "SnapshotCaptured",
+        "CheckpointRecorded", "SessionLaunched", "CheckpointRecorded",
+        "SessionResultAccepted", "ChangesDetected", "ValidationStarted",
+        "ValidationPassed", "CommitFinalized", "TransactionBlocked",
+        "LeaseReleased", "ProjectionUpdated",
+    ]
+    if tuple(event_types) in {
+        tuple(committed_event_types),
+        tuple(checkpointed_committed_event_types),
+    }:
         return _inspect_committed_planning_finalization_recovery(
-            project, inspector, transaction_events=transaction_events, projection=projection,
+            project, inspector, ledger_events=ledger_events,
+            transaction_events=transaction_events, projection=projection,
             original_transaction_id=original_transaction_id, planning_transaction=planning_transaction,
             session_report=session_report, writer_lease_exists=writer_lease_exists,
         )

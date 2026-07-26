@@ -996,7 +996,9 @@ class PlanningTransactionTests(unittest.TestCase):
             )
             first = engine.recover_planning_transaction(**arguments)
             second = engine.recover_planning_transaction(**arguments)
-            self.assertEqual(second["outcome"], "planning_transaction_already_finalized")
+            self.assertEqual(
+                second["outcome"], "planning_transaction_already_recovered"
+            )
             self.assertEqual(
                 first["planning_transaction"]["planning_result_commit"],
                 second["planning_transaction"]["planning_result_commit"],

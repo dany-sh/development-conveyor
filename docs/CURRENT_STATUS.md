@@ -4,6 +4,54 @@ Last updated: 2026-07-25
 
 ## Summary
 
+Committed planning-result recovery finalization is implemented on
+`codex/m1-21-finalize-committed-planning-recovery` from exact parent
+`2c6cdd368d2f4f4991c565f4de1840f9520e4069`.
+
+Queue semantic comparison now uses the shared canonical warning evidence:
+matching explicit warnings, counts, blocking status, validity, active
+milestone, ready features, and inventory counts pass even when only the
+structured result has descriptive `warnings_scope`. Explicit-list, count,
+blocking, validity, selection, milestone, and inventory disagreements still
+fail closed.
+
+Committed planning recovery no longer treats the Git commit alone as durable
+finalization. It authenticates the exact original transaction, run, session,
+commit, queue fingerprint, selected feature, recovery-evidence fingerprint,
+repository state, and completed parent integration. Successful apply appends
+one deterministic recovery transaction, projects `feature_ready` with F073
+current and starting at `8a2f7fb93bb7ec6f0eaf160e971aac517542802f`,
+and leaves no active transaction, lease, or human gate. The completed F072
+integration at sequences 757-759 is recognized as the valid parent of the
+direct-child planning commit rather than an interrupted integration.
+
+The exact live dry-run authenticated all eight planning paths, reused commit
+`8a2f7fb93bb7ec6f0eaf160e971aac517542802f`, and predicted one deterministic
+transition to `feature_ready`/F073 with zero application writes, commits,
+models, or children. Live apply appended sequences 774-786 once under recovery
+transaction `fd922458-662c-4111-b57e-81140ac78267`; a second exact apply
+returned `planning_transaction_already_recovered`, performed no validations,
+and left all runtime hashes and the 786-event ledger unchanged.
+`verify-consistency` now returns `CONSISTENT` with no failed invariant.
+
+One hundred eighty-six focused controller tests pass: 180 planning,
+post-integration, projection, routing, policy, and recovery regressions plus
+six exact checkpoint and Autopilot cases. Python compilation,
+`validate-config`, CLI required-mode rejection, and `git diff --check` pass.
+The complete controller suite and all application builds/tests remain
+intentionally unexecuted. The four previously documented broader baseline
+failures remain excluded: two mutable-live-ledger F097 cache fixtures and two
+legacy CLI expectations.
+
+Interview Companion remains clean on `codex/m0-foundation` at
+`8a2f7fb93bb7ec6f0eaf160e971aac517542802f`; only its ignored
+controller-owned compatibility cache was refreshed by the authorized recovery.
+Case Manager remains clean on `codex/p0-foundation` at
+`f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0` with byte-identical controller
+cache. Neither application repository received a tracked file change, commit,
+branch change, build, test, preparation, execution, reconciliation, or
+integration.
+
 Checkpoint-aware retained feature-result recovery is implemented on
 `codex/m1-20-checkpoint-aware-feature-result-recovery` from exact parent
 `693ef372ab5f8a875934c086d1a9ef091b532570`.

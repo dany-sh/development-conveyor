@@ -1619,3 +1619,63 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `checkpoint_aware_feature_result_recovery`
 - Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-26T08:35:32+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `committed_planning_recovery_finalization`
+- Safety and autonomy contracts unchanged: `true`
+
+### Committed planning-result recovery finalization — 2026-07-26
+
+- Scope: controller-only implementation on
+  `codex/m1-21-finalize-committed-planning-recovery` from exact parent
+  `2c6cdd368d2f4f4991c565f4de1840f9520e4069`; one
+  `gpt-5.6-sol`/medium parent and zero child or named-agent sessions.
+- Warning semantics: ordinary reconciliation and planning recovery share
+  canonical explicit-warning normalization. Descriptive `warnings_scope` may
+  be present on only one side; explicit-list, count, blocking, validity,
+  milestone, ready-feature, and inventory mismatches remain rejected.
+- Recovery semantics: an existing planning commit is insufficient for
+  already-finalized classification. Exact original run, session, transaction,
+  commit, queue fingerprint, selected feature, recovery-evidence fingerprint,
+  ledger, projection, repository, and completed parent integration are
+  authenticated. Successful recovery reuses the commit and appends one
+  deterministic transaction without application source, commit, model, or
+  child activity.
+- Focused validation: 180 planning, post-integration, projection, routing,
+  policy, and recovery tests passed, followed by six exact M1-020 checkpoint
+  and Autopilot cases. Python compilation, `validate-config`, CLI help and
+  mutually exclusive required-mode rejection, JSON-compatible queue/config
+  parsing, profile-aware content audit, and `git diff --check` passed. The
+  complete controller suite and application tests/builds were not run.
+- Baseline exclusions: the four broader failures documented at M1-020 were not
+  rerun because they are outside this focused surface: two mutable-live-ledger
+  F097 cache fixtures and two legacy CLI expectations.
+- Live dry-run: original run
+  `ce95c6b2-8d5c-4d4c-ae54-fb4fb6fdd437`, session
+  `019f9d55-3a57-7a32-89ef-87d23418a06d`, transaction
+  `04c22c36-3954-4e5a-b3d2-af7822eeffb4`, parent `9ee860f`, existing planning
+  commit `8a2f7fb`, all eight paths, and fingerprint
+  `92c65b2ed3741a61c1c01b062eb4ace3546bd389092f793232135a24d34245f1`
+  authenticated. It predicted one deterministic transition to
+  `feature_ready`/F073, zero application writes and commits, and zero model or
+  child sessions.
+- Live apply: recovery transaction
+  `fd922458-662c-4111-b57e-81140ac78267` appended sequences 774-786 once,
+  projected F073 at starting commit
+  `8a2f7fb93bb7ec6f0eaf160e971aac517542802f`, and left no active transaction,
+  lease, or gate. A second exact apply returned
+  `planning_transaction_already_recovered`, performed no validation, appended
+  no event, and left every checked runtime hash unchanged.
+- Consistency and isolation: `verify-consistency` returned `CONSISTENT` with
+  zero failed invariants. Interview Companion remained clean on
+  `codex/m0-foundation` at `8a2f7fb`; the authorized controller recovery
+  refreshed only its ignored compatibility cache. Case Manager remained clean
+  on `codex/p0-foundation` at `f85f7dad` with an unchanged cache. No
+  application tracked file, commit, branch, test, build, preparation,
+  execution, reconciliation, or integration changed.

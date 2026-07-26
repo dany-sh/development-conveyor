@@ -139,6 +139,13 @@ def compare_warning_evidence(
         != normalized_deterministic["blocking_warnings"]
     ):
         disagreements.append("blocking_warnings")
+    structured_warnings = normalized_structured["explicit_warnings"]
+    deterministic_warnings = normalized_deterministic["explicit_warnings"]
+    if (
+        structured_warnings is not None
+        and structured_warnings != deterministic_warnings
+    ):
+        disagreements.append("explicit_warnings")
     return {
         "structured": normalized_structured,
         "deterministic": normalized_deterministic,

@@ -453,6 +453,36 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-021",
+      "title": "Committed planning-result recovery finalization",
+      "status": "review",
+      "priority": 21,
+      "milestone": "M1",
+      "dependencies": [
+        "M1-014",
+        "M1-020"
+      ],
+      "spec": "docs/features/M1-021-committed-planning-recovery.md",
+      "acceptance_criteria": [
+        "Queue semantic validation compares canonical explicit warnings and treats warnings_scope as descriptive metadata while preserving fail-closed warning, count, blocking, validity, milestone, ready-feature, and inventory checks",
+        "Committed planning recovery requires exact ledger, projection, Git, queue, selection, and evidence identity and records one deterministic recovery transaction without application files, commits, models, or children",
+        "A second exact apply appends no events, performs no validation, and returns planning_transaction_already_recovered",
+        "A completed integration followed by its authenticated direct-child planning commit is consistent while malformed or incomplete integration lineage remains rejected"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-21-finalize-committed-planning-recovery",
+      "integration_base_commit": "2c6cdd368d2f4f4991c565f4de1840f9520e4069",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

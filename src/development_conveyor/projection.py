@@ -108,6 +108,7 @@ class ProjectionEngine:
         current_state = "discover"
         current_feature = None
         selected_next_feature = None
+        selected_feature_starting_commit = None
         accepted_feature_commit = None
         integration_status = None
         planning_status = None
@@ -223,6 +224,10 @@ class ProjectionEngine:
                 current_state = payload.get("next_state", current_state)
                 current_feature = payload.get("feature_id", current_feature)
                 selected_next_feature = payload.get("selected_feature", selected_next_feature)
+                selected_feature_starting_commit = payload.get(
+                    "selected_feature_starting_commit",
+                    selected_feature_starting_commit,
+                )
                 accepted_feature_commit = payload.get("accepted_feature_commit", accepted_feature_commit)
                 if transaction.get("feature_id") and payload.get("accepted_feature_commit"):
                     feature_commits[transaction["feature_id"]] = payload["accepted_feature_commit"]
@@ -341,6 +346,7 @@ class ProjectionEngine:
             "active_transaction": active_transaction,
             "current_feature": current_feature,
             "selected_next_feature": selected_next_feature,
+            "selected_feature_starting_commit": selected_feature_starting_commit,
             "accepted_feature_commit": current_accepted_commit,
             "integration_status": integration_status,
             "planning_status": planning_status,
