@@ -10,10 +10,13 @@ from development_conveyor.cost_policy import (
     select_model, ValidationEvidenceCache, validation_identity, verification_plan,
 )
 from development_conveyor.execution_profiles import (
+    markdown_execution_policy,
+    render_markdown_execution_policy,
     resolve_execution_profile,
+    resolve_feature_execution_policy,
     validate_feature_execution_policy,
 )
-from development_conveyor.errors import QueueError, SessionError
+from development_conveyor.errors import ConfigurationError, QueueError, SessionError
 from development_conveyor.sessions import (
     SessionLauncher,
     SessionRequest,
@@ -351,6 +354,82 @@ class CostPolicyTests(unittest.TestCase):
         )
         with self.assertRaises(QueueError):
             validate_feature_execution_policy({**policy, "parent_sessions": 0})
+
+    def test_missing_feature_policy_uses_canonical_application_fallback(self):
+        resolved = resolve_feature_execution_policy(
+            feature={"id": "F072"},
+            project_id="interview-companion",
+            specification_policy=None,
+            configuration=None,
+        )
+        self.assertEqual(
+            resolved["execution_policy"],
+            {
+                "profile": "generic_or_architectural",
+                "parent_sessions": 1,
+                "child_sessions": 0,
+            },
+        )
+        self.assertEqual(
+            (
+                resolved["resolved_execution_profile"]["model"],
+                resolved["resolved_execution_profile"]["reasoning"],
+                resolved["policy_source"],
+            ),
+            ("gpt-5.6-sol", "medium", "workflow_fallback"),
+        )
+        self.assertFalse(resolved["explicit_policy_preserved"])
+
+    def test_feature_policy_markdown_round_trip_and_explicit_preservation(self):
+        policy = {
+            "profile": "multi_module_precise",
+            "parent_sessions": 1,
+            "child_sessions": 0,
+            "escalation": {
+                "trigger": "material_architecture_or_authority_ambiguity",
+                "profile": "generic_or_architectural",
+            },
+        }
+        rendered = render_markdown_execution_policy(policy)
+        parsed = markdown_execution_policy("F072", rendered, required=True)
+        self.assertEqual(parsed, policy)
+        resolved = resolve_feature_execution_policy(
+            feature={"id": "F072", "execution_policy": policy},
+            project_id="interview-companion",
+            specification_policy=parsed,
+            configuration=None,
+        )
+        self.assertEqual(resolved["execution_policy"], policy)
+        self.assertEqual(
+            resolved["policy_source"],
+            "selected_feature_profile",
+        )
+        self.assertTrue(resolved["explicit_policy_preserved"])
+
+    def test_feature_policy_disagreement_and_invalid_markdown_fail_closed(self):
+        queue_policy = {
+            "profile": "bounded_precise",
+            "parent_sessions": 1,
+            "child_sessions": 0,
+        }
+        specification_policy = {
+            "profile": "generic_or_architectural",
+            "parent_sessions": 1,
+            "child_sessions": 0,
+        }
+        with self.assertRaisesRegex(ConfigurationError, "disagree"):
+            resolve_feature_execution_policy(
+                feature={"id": "F072", "execution_policy": queue_policy},
+                project_id="interview-companion",
+                specification_policy=specification_policy,
+                configuration=None,
+            )
+        with self.assertRaises(QueueError):
+            markdown_execution_policy(
+                "F072",
+                "```yaml\nexecution_policy:\n  profile: unsupported\n```\n",
+                required=True,
+            )
 
     def test_resolution_precedence_and_recorded_escalation(self):
         feature = {

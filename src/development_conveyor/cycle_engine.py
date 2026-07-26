@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 import re
+import socket
 import stat
 import subprocess
 import uuid
@@ -32,6 +34,7 @@ from .locks import (
     RepositoryWriterLease,
     inspect_repository_writer_lock,
     make_lock_record,
+    read_lock,
 )
 from .planning import (
     ALLOWED_PLANNING_PREFIXES,
@@ -42,6 +45,7 @@ from .planning import (
     capture_planning_start,
     compare_queue_validation_evidence,
     finalize_planning_commit,
+    apply_new_ready_execution_policy_completion,
     inspect_planning_finalization_recovery,
     load_planning_transaction,
     normalize_corroborated_queue_reconciliation_report,
@@ -49,6 +53,7 @@ from .planning import (
     persist_planning_transaction,
     planning_commit_subject,
     planning_report_path,
+    plan_new_ready_execution_policy_completion,
     stable_fingerprint,
     validate_planning_changes,
     validate_planning_noop,
@@ -791,6 +796,8 @@ class CycleEngine:
         self,
         project: Project,
         projection: dict[str, Any],
+        *,
+        allowed_reservation_run_id: str | None = None,
     ) -> dict[str, Any] | None:
         if (
             projection.get("active_transaction") is not None
@@ -853,6 +860,33 @@ class CycleEngine:
             raise RecoveryError("persisted planning transaction points to a different session report")
         inspector = RepositoryInspector(project.repository)
         identity = inspector.identity()
+        reservation_status = self._launch_lock(project, inspector).status(
+            allowed_reservation_run_id
+        )
+        controller_reservation_safe = (
+            not reservation_status.exists
+            or reservation_status.owned_by_run
+        )
+        ownership_path = (
+            self.configuration.owned_path(
+                self.configuration.conveyor["state_directory"]
+            )
+            / "autopilot"
+            / project.project_id
+            / "ownership.json"
+        )
+        ownership = read_lock(ownership_path)
+        autopilot_ownership_safe = ownership is None or (
+            ownership.get("project_id") == project.project_id
+            and ownership.get("repository")
+            == str(project.repository.resolve())
+            and ownership.get("repository_identity")
+            == identity["repository_id"]
+            and ownership.get("repository_path_fingerprint")
+            == identity["path_fingerprint"]
+            and ownership.get("host") == socket.gethostname()
+            and ownership.get("process_id") == os.getpid()
+        )
         latest_snapshot = latest.get("starting_snapshot") or {}
         latest_sessions = list(latest.get("session_ids") or [])
         session_id = planning_transaction.get("session_id")
@@ -931,6 +965,10 @@ class CycleEngine:
             writer_lease_exists=inspector.writer_lock_path(
                 self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
             ).exists(),
+            profile_configuration=self.configuration.execution_profiles or None,
+            controller_reservation_safe=controller_reservation_safe,
+            autopilot_ownership_safe=autopilot_ownership_safe,
+            live_session_absent=projection.get("active_transaction") is None,
         )
         plan.update({
             "original_ledger_sequence": ledger.verify().sequence,
@@ -5470,7 +5508,126 @@ class CycleEngine:
 
         try:
             report = json.loads(Path(str(result.report_path)).read_text(encoding="utf-8"))
+            execution_policy_completion: dict[str, Any] = {
+                "required": False,
+                "normalization_paths": [],
+            }
+            execution_policy_compatibility = None
             if inspector.tracked_changed_paths() or inspector.untracked_file_hashes():
+                planned_policy_completion = (
+                    plan_new_ready_execution_policy_completion(
+                        project,
+                        inspector,
+                        starting_head=planning_start["planning_start_commit"],
+                        profile_configuration=(
+                            self.configuration.execution_profiles or None
+                        ),
+                    )
+                    if classification == "reconciled_ready_work"
+                    else {
+                        "required": False,
+                        "newly_ready_features": [],
+                        "normalization_paths": [],
+                        "replacements": {},
+                    }
+                )
+                resolved_policy = (
+                    planned_policy_completion.get(
+                        "resolved_execution_profile"
+                    )
+                    or (
+                        (
+                            planned_policy_completion.get(
+                                "validated_policies"
+                            )
+                            or [{}]
+                        )[0].get("resolved_execution_profile")
+                    )
+                    or {}
+                )
+                if planned_policy_completion.get("newly_ready_features"):
+                    execution_policy_compatibility = (
+                        self._compatibility_snapshot(
+                            project,
+                            "feature_cycle",
+                            execution_profile={
+                                "selected_model": resolved_policy.get("model"),
+                                "selected_reasoning_effort": resolved_policy.get(
+                                    "reasoning"
+                                ),
+                                "profile_resolution_source": (
+                                    planned_policy_completion.get(
+                                        "policy_source"
+                                    )
+                                    or (
+                                        (
+                                            planned_policy_completion.get(
+                                                "validated_policies"
+                                            )
+                                            or [{}]
+                                        )[0].get("policy_source")
+                                    )
+                                ),
+                            },
+                        )
+                    )
+                    if (
+                        execution_policy_compatibility is not None
+                        and execution_policy_compatibility.get("compatible")
+                        is not True
+                    ):
+                        raise RecoveryError(
+                            "newly ready feature execution policy failed "
+                            "Codex compatibility validation"
+                        )
+                if planned_policy_completion.get("required") is True:
+                    allowed_normalization_paths = sorted(
+                        set(inspector.tracked_changed_paths())
+                        | set(inspector.untracked_file_hashes())
+                        | set(
+                            planned_policy_completion.get(
+                                "normalization_paths", []
+                            )
+                        )
+                    )
+                    execution_policy_completion = (
+                        apply_new_ready_execution_policy_completion(
+                            project,
+                            inspector,
+                            starting_head=planning_start[
+                                "planning_start_commit"
+                            ],
+                            profile_configuration=(
+                                self.configuration.execution_profiles or None
+                            ),
+                            expected_plan=planned_policy_completion,
+                            authorized_retained_paths=allowed_normalization_paths,
+                            recorded_missing_policy_failure=False,
+                        )
+                    )
+                    kernel.authorize_controller_execution_policy_normalization(
+                        source_paths=tuple(sorted(
+                            (result.transaction_envelope or {}).get(
+                                "changed_paths", []
+                            )
+                        )),
+                        normalization_paths=tuple(
+                            execution_policy_completion.get(
+                                "normalization_paths", []
+                            )
+                        ),
+                        expected_diff_fingerprint=str(
+                            execution_policy_completion[
+                                "predicted_final_diff_fingerprint"
+                            ]
+                        ),
+                    )
+                else:
+                    execution_policy_completion = {
+                        key: value
+                        for key, value in planned_policy_completion.items()
+                        if key != "replacements"
+                    }
                 validation = validate_planning_changes(
                     project,
                     inspector,
@@ -5479,6 +5636,12 @@ class CycleEngine:
                     starting_head=planning_start["planning_start_commit"],
                     expected_session_id=result.session_id,
                 )
+                validation.update({
+                    "execution_policy_completion": execution_policy_completion,
+                    "execution_policy_compatibility": (
+                        execution_policy_compatibility
+                    ),
+                })
             else:
                 validation = validate_planning_noop(
                     project,
@@ -7202,6 +7365,11 @@ class CycleEngine:
             == selected_feature
         )
         expected_paths = tuple(expected_plan["existing_planning_changes"]["paths"])
+        policy_completion_plan = expected_plan.get(
+            "execution_policy_completion"
+        ) or {"required": False}
+        policy_compatibility = None
+        policy_completion = {"required": False, "normalization_paths": []}
         existing_commit = expected_plan.get("existing_commit")
         committed_recovery = isinstance(existing_commit, str)
         adapter = RecoveryAdapter(
@@ -7223,10 +7391,36 @@ class CycleEngine:
             if refreshed_projection is None:
                 raise RecoveryError("planning recovery projection disappeared under reservation")
             refreshed = self._planning_finalization_recovery_plan(
-                effective, refreshed_projection
+                effective,
+                refreshed_projection,
+                allowed_reservation_run_id=recovery_run_id,
             )
             if refreshed is None or refreshed.get("plan_fingerprint") != expected_plan.get("plan_fingerprint"):
                 raise RecoveryError("planning recovery evidence changed under reservation")
+            if policy_completion_plan.get("required") is True:
+                resolved_profile = policy_completion_plan.get(
+                    "resolved_execution_profile"
+                ) or {}
+                policy_compatibility = self._compatibility_snapshot(
+                    effective,
+                    "feature_cycle",
+                    execution_profile={
+                        "selected_model": resolved_profile.get("model"),
+                        "selected_reasoning_effort": resolved_profile.get(
+                            "reasoning"
+                        ),
+                        "profile_resolution_source": policy_completion_plan.get(
+                            "policy_source"
+                        ),
+                    },
+                )
+                if (
+                    not isinstance(policy_compatibility, dict)
+                    or policy_compatibility.get("compatible") is not True
+                ):
+                    raise RecoveryError(
+                        "resolved execution policy failed Codex compatibility validation"
+                    )
             transaction = kernel.begin(
                 workflow_type=WorkflowType.RECOVERY,
                 milestone=project.active_milestone,
@@ -7252,6 +7446,8 @@ class CycleEngine:
                     "historical_child_session_attempts": expected_plan.get(
                         "historical_child_session_attempts", []
                     ),
+                    "execution_policy_completion": policy_completion_plan,
+                    "execution_policy_compatibility": policy_compatibility,
                     "supersedes_failed_recovery": (
                         (expected_plan.get("failed_recovery_supersession") or {}).get(
                             "transaction_id"
@@ -7270,6 +7466,8 @@ class CycleEngine:
                 "changed_paths": list(expected_paths),
                 "diff_fingerprint": expected_plan.get("mutation_fingerprint") or expected_plan.get("existing_commit"),
                 "selected_feature": selected_feature,
+                "execution_policy_completion": policy_completion_plan,
+                "execution_policy_compatibility": policy_compatibility,
                 "model_session_launched": False,
                 "historical_child_session_attempts": expected_plan.get(
                     "historical_child_session_attempts", []
@@ -7380,20 +7578,37 @@ class CycleEngine:
                 }
                 if isinstance(session_report.get("parsed_structured_result"), dict):
                     session_report["parsed_structured_result"] = normalized_envelope
+                policy_completion = (
+                    apply_new_ready_execution_policy_completion(
+                        effective,
+                        inspector,
+                        starting_head=expected_plan["starting_commit"],
+                        profile_configuration=(
+                            self.configuration.execution_profiles or None
+                        ),
+                        expected_plan=policy_completion_plan,
+                        authorized_retained_paths=list(expected_paths),
+                    )
+                    if policy_completion_plan.get("required") is True
+                    else {"required": False, "normalization_paths": []}
+                )
+                final_diff_fingerprint = (
+                    policy_completion.get("predicted_final_diff_fingerprint")
+                    or expected_plan["mutation_fingerprint"]
+                )
                 validation = validate_planning_changes(
                     effective, inspector, session_report, run_id=expected_plan["original_run_id"],
-                    starting_head=expected_plan["starting_commit"], expected_diff_fingerprint=expected_plan["mutation_fingerprint"],
+                    starting_head=expected_plan["starting_commit"], expected_diff_fingerprint=final_diff_fingerprint,
                     expected_changed_paths=list(expected_paths), expected_session_id=expected_plan["original_session_id"],
                     expected_transaction_id=expected_plan["original_transaction_id"],
-                    recoverable_missing_execution_policy_feature=expected_plan.get(
-                        "recoverable_missing_execution_policy_feature"
-                    ),
                 )
                 inventory = validation.get("inventory_validation") or {}
                 validation_warnings = list(inventory.get("nonfatal_warnings") or [])
                 commit = kernel.finalize_deterministic_planning_recovery(
                     original_transaction_id=expected_plan["original_transaction_id"], changed_paths=expected_paths,
-                    expected_diff_fingerprint=expected_plan["mutation_fingerprint"], plan_fingerprint=expected_plan["plan_fingerprint"],
+                    expected_diff_fingerprint=final_diff_fingerprint,
+                    source_diff_fingerprint=expected_plan["mutation_fingerprint"],
+                    plan_fingerprint=expected_plan["plan_fingerprint"],
                     validation_evidence={"commands": [{"validator": inventory.get("validator"), "exit_code": inventory.get("exit_code")}, {"validator": "git diff --check", "exit_code": 0}], "warnings": validation_warnings},
                     selected_feature=selected_feature, next_state=next_state,
                 )
@@ -7431,6 +7646,15 @@ class CycleEngine:
                 "model_sessions_launched": [],
                 "child_sessions_launched": [],
                 "nonfatal_warnings": validation_warnings,
+                "execution_policy_completion": policy_completion_plan,
+                "execution_policy_compatibility": policy_compatibility,
+                "authenticated_original_diff_fingerprint": expected_plan[
+                    "mutation_fingerprint"
+                ],
+                "final_diff_fingerprint": (
+                    expected_plan.get("predicted_final_diff_fingerprint")
+                    or expected_plan["mutation_fingerprint"]
+                ),
                 "next_state": next_state,
                 "committed_at": utc_now(),
             }
@@ -7446,6 +7670,15 @@ class CycleEngine:
                         "historical_child_session_attempts", []
                     ),
                     "nonfatal_warnings": validation_warnings,
+                    "execution_policy_completion": policy_completion_plan,
+                    "execution_policy_compatibility": policy_compatibility,
+                    "authenticated_original_diff_fingerprint": expected_plan[
+                        "mutation_fingerprint"
+                    ],
+                    "final_diff_fingerprint": (
+                        expected_plan.get("predicted_final_diff_fingerprint")
+                        or expected_plan["mutation_fingerprint"]
+                    ),
                     "human_merge_gate": None,
                 },
             )
@@ -7470,6 +7703,15 @@ class CycleEngine:
                 "changed_paths": list(expected_paths),
                 "inventory_validation": inventory,
                 "nonfatal_warnings": validation_warnings,
+                "execution_policy_completion": policy_completion_plan,
+                "execution_policy_compatibility": policy_compatibility,
+                "authenticated_original_diff_fingerprint": expected_plan[
+                    "mutation_fingerprint"
+                ],
+                "final_diff_fingerprint": (
+                    expected_plan.get("predicted_final_diff_fingerprint")
+                    or expected_plan["mutation_fingerprint"]
+                ),
                 "model_sessions_launched": [],
                 "child_sessions_launched": [],
                 "historical_child_session_attempts": expected_plan.get(

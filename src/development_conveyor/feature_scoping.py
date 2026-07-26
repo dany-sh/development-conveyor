@@ -19,7 +19,10 @@ from .cycle_cache import (
     write_terminal_cycle_cache,
 )
 from .errors import ConveyorError, QueueError, RecoveryError, SessionError
-from .execution_profiles import validate_feature_execution_policy
+from .execution_profiles import (
+    markdown_execution_policy,
+    validate_feature_execution_policy,
+)
 from .kernel import QueueReconciliationAdapter, RecoveryAdapter, WorkflowKernel
 from .ledger import EvidenceLedger
 from .locks import DurableLock, make_lock_record
@@ -62,9 +65,6 @@ _HEADING = re.compile(
     r"[ \t]*(?:[—–:-]+)[ \t]*(?P<title>[^\r\n]*?[^ \t\r\n])[ \t]*\r?$",
     re.MULTILINE,
 )
-_YAML_FENCE = re.compile(
-    r"(?ms)^```(?:yaml|yml)[ \t]*\r?\n(?P<body>.*?)^```[ \t]*\r?$"
-)
 _DEPENDENCY_LINE = re.compile(
     r"(?im)^\s*(?:[-*]\s*)?(?:dependencies|depends[_ -]?on)\s*:\s*(?P<ids>.*)$"
 )
@@ -105,51 +105,16 @@ def _brief_sections(text: str) -> dict[str, tuple[str, str]]:
 
 
 def _brief_policy(feature_id: str, body: str) -> dict[str, Any]:
-    blocks: list[tuple[list[str], int, int]] = []
-    for fence in _YAML_FENCE.finditer(body):
-        lines = fence.group("body").splitlines()
-        for index, line in enumerate(lines):
-            match = re.fullmatch(r"(?P<indent> *)execution_policy:[ \t]*", line)
-            if match is not None:
-                blocks.append((lines, index, len(match.group("indent"))))
-    if len(blocks) != 1:
+    try:
+        policy = markdown_execution_policy(feature_id, body, required=True)
+    except QueueError as exc:
+        raise QueueError(
+            str(exc).replace("feature contract", "brief")
+        ) from exc
+    if policy is None:  # pragma: no cover - required=True is exhaustive.
         raise QueueError(
             f"brief must contain exactly one fenced-YAML execution_policy block for {feature_id}"
         )
-
-    lines, start, base_indent = blocks[0]
-    policy: dict[str, Any] = {}
-    escalation: dict[str, Any] | None = None
-    for line in lines[start + 1:]:
-        if not line.strip():
-            continue
-        indent = len(line) - len(line.lstrip(" "))
-        if indent <= base_indent:
-            break
-        if "\t" in line[:indent] or indent not in {base_indent + 2, base_indent + 4}:
-            raise QueueError(f"brief contains malformed execution_policy YAML for {feature_id}")
-        key_value = re.fullmatch(r" *([a-z_]+):[ \t]*(.*?)[ \t]*", line)
-        if key_value is None:
-            raise QueueError(f"brief contains malformed execution_policy YAML for {feature_id}")
-        key, value = key_value.groups()
-        if indent == base_indent + 2:
-            if key == "escalation" and value == "":
-                escalation = {}
-                policy["escalation"] = escalation
-            elif key in {"profile", "parent_sessions", "child_sessions"}:
-                if key in policy:
-                    raise QueueError(f"brief contains duplicate execution_policy keys for {feature_id}")
-                policy[key] = int(value) if key.endswith("_sessions") and value.isdigit() else value
-            else:
-                raise QueueError(f"brief contains unsupported execution_policy YAML for {feature_id}")
-        elif escalation is None or key not in {"trigger", "profile"}:
-            raise QueueError(f"brief contains malformed execution_policy escalation for {feature_id}")
-        else:
-            if key in escalation:
-                raise QueueError(f"brief contains duplicate execution_policy escalation keys for {feature_id}")
-            escalation[key] = value
-
-    validate_feature_execution_policy(policy, path=f"brief.{feature_id}.execution_policy")
     return policy
 
 

@@ -359,6 +359,37 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-018",
+      "title": "Deterministic execution-policy finalization",
+      "status": "review",
+      "priority": 18,
+      "milestone": "M1",
+      "dependencies": [
+        "M1-002",
+        "M1-014",
+        "M1-017"
+      ],
+      "spec": "docs/features/M1-018-deterministic-execution-policy-finalization.md",
+      "acceptance_criteria": [
+        "Exact missing-policy recovery authenticates one newly ready feature and its retained planning evidence before deterministic queue/spec normalization",
+        "Dry-run predicts the final binary diff without application writes, commands, leases, transactions, models, or children",
+        "Apply rechecks feature compatibility, runs deterministic validation, and creates at most one direct-child planning commit before projecting feature_ready",
+        "Ordinary reconciliation materializes the same canonical policy before finalization and preserves strict session-to-controller mutation evidence"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "ambiguous_or_authoritative",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-18-deterministic-execution-policy-finalization",
+      "integration_base_commit": "3540447bffe01b43d5084a6b925c09e952723926",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

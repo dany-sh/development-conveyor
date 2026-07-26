@@ -7,6 +7,7 @@ evidence only; feature wording is never a routing signal.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,6 +49,19 @@ class FeatureExecutionPolicy:
     child_sessions: int
     escalation_trigger: str | None = None
     escalation_profile: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "profile": self.profile,
+            "parent_sessions": self.parent_sessions,
+            "child_sessions": self.child_sessions,
+        }
+        if self.escalation_trigger is not None and self.escalation_profile is not None:
+            value["escalation"] = {
+                "trigger": self.escalation_trigger,
+                "profile": self.escalation_profile,
+            }
+        return value
 
 
 @dataclass(frozen=True)
@@ -289,3 +303,208 @@ def resolve_execution_profile(
         escalated=escalated,
         escalation_evidence_id=evidence_id,
     )
+
+
+_YAML_FENCE = re.compile(
+    r"(?ms)^```(?:yaml|yml)[ \t]*\r?\n(?P<body>.*?)^```[ \t]*\r?$"
+)
+
+
+def markdown_execution_policy(
+    feature_id: str,
+    text: str,
+    *,
+    required: bool,
+) -> dict[str, Any] | None:
+    """Read one bounded fenced-YAML execution policy from a feature contract."""
+
+    blocks: list[tuple[list[str], int, int]] = []
+    for fence in _YAML_FENCE.finditer(text):
+        lines = fence.group("body").splitlines()
+        for index, line in enumerate(lines):
+            match = re.fullmatch(r"(?P<indent> *)execution_policy:[ \t]*", line)
+            if match is not None:
+                blocks.append((lines, index, len(match.group("indent"))))
+    if not blocks and not required:
+        return None
+    if len(blocks) != 1:
+        raise QueueError(
+            f"feature contract must contain exactly one fenced-YAML "
+            f"execution_policy block for {feature_id}"
+        )
+
+    lines, start, base_indent = blocks[0]
+    policy: dict[str, Any] = {}
+    escalation: dict[str, Any] | None = None
+    for line in lines[start + 1:]:
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent <= base_indent:
+            break
+        if "\t" in line[:indent] or indent not in {base_indent + 2, base_indent + 4}:
+            raise QueueError(
+                f"feature contract contains malformed execution_policy YAML "
+                f"for {feature_id}"
+            )
+        key_value = re.fullmatch(r" *([a-z_]+):[ \t]*(.*?)[ \t]*", line)
+        if key_value is None:
+            raise QueueError(
+                f"feature contract contains malformed execution_policy YAML "
+                f"for {feature_id}"
+            )
+        key, value = key_value.groups()
+        if indent == base_indent + 2:
+            if key == "escalation" and value == "":
+                if "escalation" in policy:
+                    raise QueueError(
+                        f"feature contract contains duplicate execution_policy "
+                        f"keys for {feature_id}"
+                    )
+                escalation = {}
+                policy["escalation"] = escalation
+            elif key in {"profile", "parent_sessions", "child_sessions"}:
+                if key in policy:
+                    raise QueueError(
+                        f"feature contract contains duplicate execution_policy "
+                        f"keys for {feature_id}"
+                    )
+                policy[key] = (
+                    int(value)
+                    if key.endswith("_sessions") and value.isdigit()
+                    else value
+                )
+            else:
+                raise QueueError(
+                    f"feature contract contains unsupported execution_policy "
+                    f"YAML for {feature_id}"
+                )
+        elif escalation is None or key not in {"trigger", "profile"}:
+            raise QueueError(
+                f"feature contract contains malformed execution_policy "
+                f"escalation for {feature_id}"
+            )
+        else:
+            if key in escalation:
+                raise QueueError(
+                    f"feature contract contains duplicate execution_policy "
+                    f"escalation keys for {feature_id}"
+                )
+            escalation[key] = value
+
+    validate_feature_execution_policy(
+        policy,
+        path=f"feature {feature_id}.spec.execution_policy",
+    )
+    return policy
+
+
+def render_markdown_execution_policy(value: dict[str, Any]) -> str:
+    """Render the canonical feature-contract execution-policy section."""
+
+    policy = validate_feature_execution_policy(value)
+    lines = [
+        "## Execution policy",
+        "",
+        "```yaml",
+        "execution_policy:",
+        f"  profile: {policy.profile}",
+        f"  parent_sessions: {policy.parent_sessions}",
+        f"  child_sessions: {policy.child_sessions}",
+    ]
+    if policy.escalation_trigger is not None and policy.escalation_profile is not None:
+        lines.extend([
+            "  escalation:",
+            f"    trigger: {policy.escalation_trigger}",
+            f"    profile: {policy.escalation_profile}",
+        ])
+    lines.extend(["```", ""])
+    return "\n".join(lines)
+
+
+def resolve_feature_execution_policy(
+    *,
+    feature: dict[str, Any],
+    project_id: str,
+    specification_policy: dict[str, Any] | None,
+    configuration: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve one feature policy through the normal application-feature route.
+
+    Explicit valid queue/spec metadata is preserved. When both are absent, the
+    same canonical workflow fallback used by a future feature dry-run supplies
+    the required executable policy.
+    """
+
+    feature_id = feature.get("id")
+    if not isinstance(feature_id, str) or not feature_id:
+        raise ConfigurationError("feature execution-policy resolution requires a feature ID")
+    queue_policy = feature.get("execution_policy")
+    if queue_policy is not None:
+        queue_policy = validate_feature_execution_policy(
+            queue_policy,
+            path=f"feature {feature_id}.execution_policy",
+        ).to_dict()
+    if specification_policy is not None:
+        specification_policy = validate_feature_execution_policy(
+            specification_policy,
+            path=f"feature {feature_id}.spec.execution_policy",
+        ).to_dict()
+    if (
+        queue_policy is not None
+        and specification_policy is not None
+        and queue_policy != specification_policy
+    ):
+        raise ConfigurationError(
+            f"queue and feature specification execution policies disagree for {feature_id}"
+        )
+
+    explicit_policy = queue_policy or specification_policy
+    candidate = dict(feature)
+    if explicit_policy is not None:
+        candidate["execution_policy"] = explicit_policy
+    resolved = resolve_execution_profile(
+        workflow="application_feature",
+        deterministic=False,
+        feature=candidate,
+        project_id=project_id,
+        configuration=configuration,
+    )
+    if (
+        resolved.profile is None
+        or resolved.model is None
+        or resolved.reasoning is None
+        or resolved.parent_sessions < 1
+        or resolved.child_sessions < 0
+        or resolved.resolution_source
+        not in {
+            "selected_feature_profile",
+            "reconciled_feature_profile",
+            "workflow_fallback",
+        }
+    ):
+        raise ConfigurationError(
+            f"feature {feature_id} does not resolve to one unambiguous executable policy"
+        )
+
+    execution_policy = (
+        explicit_policy
+        or FeatureExecutionPolicy(
+            profile=resolved.profile,
+            parent_sessions=resolved.parent_sessions,
+            child_sessions=resolved.child_sessions,
+            escalation_trigger=resolved.escalation_trigger,
+            escalation_profile=resolved.escalation_profile,
+        ).to_dict()
+    )
+    validate_feature_execution_policy(
+        execution_policy,
+        path=f"feature {feature_id}.execution_policy",
+    )
+    return {
+        "feature_id": feature_id,
+        "execution_policy": execution_policy,
+        "resolved_execution_profile": resolved.to_dict(),
+        "policy_source": resolved.resolution_source,
+        "explicit_policy_preserved": explicit_policy is not None,
+    }

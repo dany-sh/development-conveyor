@@ -1398,3 +1398,69 @@ This log records model configuration and deterministic deployment evidence. It n
   transaction, lease, Git operation, model, child, apply, ordinary resume,
   Autopilot restart, gate resolution, reconciliation, integration, push,
   merge, tag, publication, deployment, or release ran.
+
+### Model execution — 2026-07-26T04:02:17+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `deterministic_execution_policy_finalization`
+- Safety and autonomy contracts unchanged: `true`
+
+### Deterministic execution-policy finalization — 2026-07-25
+
+- Scope and execution: controller-only implementation on
+  `codex/m1-18-deterministic-execution-policy-finalization` from direct parent
+  `3540447bffe01b43d5084a6b925c09e952723926`; one
+  `gpt-5.6-sol`/high parent session and zero child or named-agent sessions.
+- Exact raising authority: `planning._require_new_ready_execution_policies`
+  raised `newly readied feature F072 lacks required execution_policy`.
+  `execution_profiles.validate_feature_execution_policy` owns the bounded
+  schema, and `resolve_execution_profile` with workflow
+  `application_feature` remains the canonical model/profile resolver.
+- Resolved policy: queue and feature specification are the two authoritative
+  representations. With neither explicit policy present, F072 resolves through
+  `workflow_fallback` to `generic_or_architectural`,
+  `gpt-5.6-sol`/medium, one parent, and zero children. Valid explicit policy is
+  preserved; invalid, contradictory, ambiguous, or multiple missing-policy
+  candidates fail closed.
+- Recovery: the original seven-path result, terminal report, run, transaction,
+  session, branch, HEAD, queue/dependency evidence, original fingerprint,
+  untracked state, writer lease, controller reservation, Autopilot ownership,
+  live transaction, and Git-operation state are authenticated before any
+  normalization. Dry-run predicts bytes and the final binary diff through an
+  isolated temporary Git index without writing the application.
+- Forward path: ordinary reconciliation normalizes queue/spec policy before
+  finalization. The kernel records a durable binding between the session's
+  original changed paths, controller normalization paths, and final
+  fingerprint before accepting final planning validation.
+- Focused validation: 203 execution-policy, planning, Autopilot,
+  projection/consistency, cache-binding, binary-context, prepared-feature, and
+  retained-result tests passed. Python compilation, `validate-config`,
+  JSON-compatible queue/config parsing, CLI help and required-mode rejection,
+  and `git diff --check` passed. The complete suite and application
+  tests/builds were not run.
+- Live consistency and status: the dirty worktree is authenticated by exact
+  deterministic planning recovery and status proposes
+  `planning_finalization`, not resume, with F072 selected, current feature
+  null, and zero sessions/models. The overall consistency classification is
+  `RECOVERABLE_INCONSISTENCY` only because the cycle cache remains at ledger
+  sequence 685 while the canonical ledger is sequence 693; apply would refresh
+  it.
+- Live dry-run: original retained fingerprint
+  `0bc3c1a1dfef738200c5cbc2ff457d26061ecf3cda4a11abb24f13d3e4cc4c9d`
+  and all seven paths authenticated. Normalization is limited to
+  `docs/FEATURE_QUEUE.yaml` and
+  `docs/features/F072-job-application-detail-workspace.md`; predicted final
+  fingerprint is
+  `0bdb9a52a52227d9e9e8eb1eeb2e53b37d4f16236f12b3ad32694a333b552c8e`.
+  Final state would be `feature_ready` with F072 selected and no current
+  feature.
+- Isolation: before/after hashes for application status, binary diff,
+  untracked paths, application cycle cache, controller project state, original
+  reports, and Autopilot ownership state were identical. No application write,
+  command, transaction, lease, model, child, apply, ordinary resume, Autopilot
+  restart, reconciliation rerun, integration, push, merge, tag, publication,
+  deployment, or release ran.

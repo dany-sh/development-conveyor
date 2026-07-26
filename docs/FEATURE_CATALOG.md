@@ -15,3 +15,4 @@
 | M1-015 | Binary-safe feature context and prelaunch recovery | review | M1 | `docs/features/M1-015-binary-safe-feature-context.md` |
 | M1-016 | Prepared-feature execution-plan binding | review | M1 | `docs/features/M1-016-prepared-feature-plan-binding.md` |
 | M1-017 | Retained feature terminal-state transition | review | M1 | `docs/features/M1-017-retained-feature-terminal-transition.md` |
+| M1-018 | Deterministic execution-policy finalization | review | M1 | `docs/features/M1-018-deterministic-execution-policy-finalization.md` |

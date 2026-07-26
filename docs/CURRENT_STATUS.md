@@ -4,6 +4,56 @@ Last updated: 2026-07-25
 
 ## Summary
 
+Deterministic execution-policy finalization is implemented on
+`codex/m1-18-deterministic-execution-policy-finalization` from exact parent
+`3540447bffe01b43d5084a6b925c09e952723926`.
+
+The existing missing-policy planning failure now has a fail-closed,
+zero-session recovery path. It authenticates the terminal reconciliation,
+recorded passing queue validation, repository/run/transaction/session
+identities, exact branch and HEAD, retained path set and original binary diff,
+sole ready selection, integrated dependencies, and absence of conflicting
+writer, reservation, Autopilot, transaction, Git-operation, or untracked
+state. It preserves explicit valid policy and otherwise uses the normal
+`application_feature` resolver. F072 resolves to
+`generic_or_architectural`, `gpt-5.6-sol`/medium, one parent, zero children,
+source `workflow_fallback`.
+
+Dry-run predicts canonical queue and feature-specification normalization and
+the exact final binary diff through an isolated temporary Git index, without
+writing the application. Apply remains intentionally unexecuted live; it
+would recheck feature compatibility, atomically normalize only the two
+already-retained metadata paths, rerun deterministic planning validation, and
+create at most one direct-child planning commit before projecting
+`feature_ready` with no current feature and F072 selected.
+
+Ordinary future reconciliation materializes the same canonical policy before
+finalization. The workflow kernel binds that controller normalization to the
+session's original changed paths, normalization paths, and final fingerprint,
+so this omission cannot recur without weakening mutation evidence.
+
+The exact live dry-run authenticated all seven retained paths, original
+fingerprint
+`0bc3c1a1dfef738200c5cbc2ff457d26061ecf3cda4a11abb24f13d3e4cc4c9d`,
+empty untracked set, F070 integrated dependency, F072 singleton selection,
+and every ownership boundary. It predicts normalization only in
+`docs/FEATURE_QUEUE.yaml` and
+`docs/features/F072-job-application-detail-workspace.md`, with final
+fingerprint
+`0bdb9a52a52227d9e9e8eb1eeb2e53b37d4f16236f12b3ad32694a333b552c8e`.
+Status proposes `planning_finalization`, not resume, with zero sessions and
+models. Consistency authenticates the seven-file worktree and recovery plan;
+its only remaining failed invariant is the intentionally stale cycle cache,
+which apply would refresh.
+
+Two hundred three focused controller tests pass across execution policy,
+normal and retained planning finalization, Autopilot, projection/consistency,
+cache binding, binary context, prepared-feature execution binding, and
+retained-result recovery. Python compilation, configuration and
+JSON-compatible queue validation, CLI help and required-mode rejection, and
+`git diff --check` pass. The complete controller suite and all application
+tests/builds remain intentionally unexecuted.
+
 Retained feature terminal-state transition and deterministic F070 recovery are
 implemented on `codex/m1-17-retained-feature-terminal-transition` from exact
 parent `2ab5d29fb1439a663fad9668b02301b924cf39a2`.

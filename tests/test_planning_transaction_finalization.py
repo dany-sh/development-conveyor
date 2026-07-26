@@ -832,11 +832,64 @@ class PlanningTransactionTests(unittest.TestCase):
             state = engine._project_document(project, RUN_ID, RepositoryInspector(repository).identity()["path_fingerprint"])
             result = engine._execute_queue_reconciliation(project, "one_feature", RUN_ID, state)
             commit = result["planning_result_commit"]
-            self.assertEqual(RepositoryInspector(repository).changed_paths(commit), ["docs/FEATURE_QUEUE.yaml"])
+            self.assertEqual(
+                RepositoryInspector(repository).changed_paths(commit),
+                ["docs/FEATURE_QUEUE.yaml", "docs/features/F001.md"],
+            )
+            self.assertIn(
+                "## Execution policy",
+                (repository / "docs/features/F001.md").read_text(encoding="utf-8"),
+            )
             # Kernel planning commits describe the exact phase mutation; feature
             # selection remains projection evidence rather than commit-message authority.
             self.assertEqual(RepositoryInspector(repository).commit_subject(commit), "factory: reconcile M0 queue")
             self.assertTrue(RepositoryInspector(repository).is_clean)
+
+    def test_02a_normal_planning_validates_materialized_feature_compatibility(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, project = self._engine_fixture(root)
+            engine = CycleEngine(
+                controller_configuration(root, project),
+                MutatingLauncher(self._ready_queue),
+            )
+            state = engine._project_document(
+                project,
+                RUN_ID,
+                RepositoryInspector(repository).identity()["path_fingerprint"],
+            )
+            compatibility_result = {
+                "compatible": True,
+                "effective_model": "gpt-5.6-terra",
+                "effective_reasoning": "medium",
+                "policy_source": "selected_feature_profile",
+            }
+            with patch.object(
+                engine,
+                "_compatibility_snapshot",
+                return_value=compatibility_result,
+            ) as compatibility:
+                result = engine._execute_queue_reconciliation(
+                    project,
+                    "one_feature",
+                    RUN_ID,
+                    state,
+                )
+            compatibility.assert_called_once_with(
+                project,
+                "feature_cycle",
+                execution_profile={
+                    "selected_model": "gpt-5.6-terra",
+                    "selected_reasoning_effort": "medium",
+                    "profile_resolution_source": "selected_feature_profile",
+                },
+            )
+            self.assertEqual(
+                result["planning_transaction"][
+                    "execution_policy_compatibility"
+                ],
+                compatibility_result,
+            )
 
     def test_03_unauthorized_production_change_rejects_finalization_and_preserves_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -72,6 +72,7 @@ class WorkflowKernel:
         self.validated_diff_fingerprint: str | None = None
         self.prepared_integration_paths: tuple[str, ...] | None = None
         self.prepared_integration_accepted_commit: str | None = None
+        self.controller_normalization: dict[str, Any] | None = None
         self._preacquired_lease_record: Any | None = None
 
     def restore(self, transaction_id: str) -> PhaseTransaction:
@@ -158,6 +159,26 @@ class WorkflowKernel:
         changes = next((event for event in events if event["event_type"] == "ChangesDetected"), None)
         if transaction.workflow_type == WorkflowType.MILESTONE_INTEGRATION and changes is not None:
             self.prepared_integration_paths = tuple(changes["payload"].get("changed_paths") or ())
+        normalization = next((
+            event
+            for event in events
+            if event["event_type"] == "CheckpointRecorded"
+            and event["payload"].get("checkpoint")
+            == "controller_execution_policy_normalization"
+        ), None)
+        if normalization is not None:
+            payload = normalization["payload"]
+            self.controller_normalization = {
+                key: payload[key]
+                for key in (
+                    "source_paths",
+                    "normalization_paths",
+                    "final_paths",
+                    "final_diff_fingerprint",
+                    "model_session_launched",
+                )
+                if key in payload
+            }
         integration_target = next((
             event for event in events
             if event["event_type"] == "CheckpointRecorded"
@@ -611,6 +632,19 @@ class WorkflowKernel:
         transaction.allowed_mutation_policy.validate(envelope.changed_paths)
         observed_paths = self._changed_paths()
         self._validate_mutation_paths(observed_paths)
+        if self.controller_normalization is not None:
+            source_paths = tuple(
+                self.controller_normalization.get("source_paths") or ()
+            )
+            if (
+                transaction.workflow_type != WorkflowType.QUEUE_RECONCILIATION
+                or tuple(envelope.changed_paths) != source_paths
+                or tuple(self.controller_normalization.get("final_paths") or ())
+                != observed_paths
+            ):
+                raise TransactionError(
+                    "session result disagrees with authenticated controller normalization"
+                )
         observed_diff_fingerprint = (
             self.inspector.content_diff_fingerprint(observed_paths)
             if observed_paths == tuple(envelope.changed_paths) else None
@@ -632,6 +666,52 @@ class WorkflowKernel:
             },
         )
         self.interrupt("after_session_result", transaction)
+
+    def authorize_controller_execution_policy_normalization(
+        self,
+        *,
+        source_paths: tuple[str, ...],
+        normalization_paths: tuple[str, ...],
+        expected_diff_fingerprint: str,
+    ) -> None:
+        """Bind one deterministic queue/spec normalization to its session diff."""
+
+        transaction = self._require()
+        if (
+            transaction.workflow_type != WorkflowType.QUEUE_RECONCILIATION
+            or self.envelope is not None
+            or self.controller_normalization is not None
+        ):
+            raise TransactionError(
+                "controller execution-policy normalization is not available"
+            )
+        self._revalidate_lease()
+        source = tuple(sorted(set(source_paths)))
+        normalization = tuple(sorted(set(normalization_paths)))
+        observed = self._changed_paths()
+        if (
+            not normalization
+            or tuple(sorted(set(source) | set(normalization))) != observed
+            or self.inspector.planning_diff_fingerprint()
+            != expected_diff_fingerprint
+        ):
+            raise TransactionError(
+                "controller execution-policy normalization does not match "
+                "the authenticated final planning diff"
+            )
+        transaction.allowed_mutation_policy.validate(observed)
+        evidence = {
+            "source_paths": list(source),
+            "normalization_paths": list(normalization),
+            "final_paths": list(observed),
+            "final_diff_fingerprint": expected_diff_fingerprint,
+            "model_session_launched": False,
+        }
+        self.controller_normalization = evidence
+        self.checkpoint(
+            "controller_execution_policy_normalization",
+            evidence,
+        )
 
     def accept_deterministic_integration_result(
         self, plan: dict[str, Any], result: dict[str, Any]
@@ -785,6 +865,7 @@ class WorkflowKernel:
         original_transaction_id: str,
         changed_paths: tuple[str, ...],
         expected_diff_fingerprint: str,
+        source_diff_fingerprint: str | None = None,
         plan_fingerprint: str,
         validation_evidence: dict[str, Any],
         selected_feature: str | None,
@@ -815,8 +896,9 @@ class WorkflowKernel:
             raise TransactionError("planning recovery refuses untracked application content")
         if self.inspector.planning_diff_fingerprint() != expected_diff_fingerprint:
             raise TransactionError("planning recovery diff differs from the reserved baseline")
+        source_fingerprint = source_diff_fingerprint or expected_diff_fingerprint
         if (
-            transaction.starting_tracked_diff_fingerprint != expected_diff_fingerprint
+            transaction.starting_tracked_diff_fingerprint != source_fingerprint
             or transaction.starting_untracked_fingerprint
             != capture_repository_snapshot(self.project).untracked_fingerprint
         ):
@@ -855,6 +937,7 @@ class WorkflowKernel:
                 "changed_paths": list(observed_paths),
                 "diff_fingerprint": expected_diff_fingerprint,
                 "adopted_existing_planning_diff": True,
+                "source_diff_fingerprint": source_fingerprint,
             },
         )
         self.ledger.append(
@@ -901,7 +984,8 @@ class WorkflowKernel:
                 "parent": transaction.starting_head,
                 "changed_paths": list(observed_paths),
                 "diff_fingerprint": self.inspector.patch_fingerprint(commit),
-                "source_diff_fingerprint": expected_diff_fingerprint,
+                "source_diff_fingerprint": source_fingerprint,
+                "finalized_diff_fingerprint": expected_diff_fingerprint,
                 "commit_subject": subject,
                 "recovered_transaction_id": original_transaction_id,
                 "model_session_launched": False,
@@ -1544,6 +1628,15 @@ class WorkflowKernel:
         self._validate_untracked_policy()
         transaction.allowed_mutation_policy.validate(paths)
         allowed_envelope_paths = {paths}
+        if (
+            transaction.workflow_type == WorkflowType.QUEUE_RECONCILIATION
+            and self.controller_normalization is not None
+            and tuple(self.controller_normalization.get("final_paths") or ())
+            == paths
+        ):
+            allowed_envelope_paths.add(
+                tuple(self.controller_normalization.get("source_paths") or ())
+            )
         if (
             transaction.workflow_type == WorkflowType.MILESTONE_INTEGRATION
             and self.prepared_integration_paths == paths

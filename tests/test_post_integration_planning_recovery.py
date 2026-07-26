@@ -12,7 +12,11 @@ from development_conveyor.cycle_engine import CycleEngine
 from development_conveyor.errors import RecoveryError, SchemaValidationError
 from development_conveyor.kernel import QueueReconciliationAdapter, WorkflowKernel
 from development_conveyor.ledger import EvidenceLedger
-from development_conveyor.planning import planning_report_path
+from development_conveyor.locks import make_lock_record
+from development_conveyor.planning import (
+    plan_new_ready_execution_policy_completion,
+    planning_report_path,
+)
 from development_conveyor.projection import ProjectionEngine
 from development_conveyor.repository import RepositoryInspector
 from development_conveyor.workflow_lease import WorkflowWriterLease
@@ -31,6 +35,15 @@ EIGHT_PATHS = [
     "docs/features/F010-diagnostics-and-latency-instrumentation.md",
     "docs/features/F068-job-application-data-model.md",
     "docs/features/F070-applications-table.md",
+]
+SEVEN_PATHS = [
+    "docs/CURRENT_STATUS.md",
+    "docs/FEATURE_CATALOG.md",
+    "docs/FEATURE_QUEUE.yaml",
+    "docs/ROADMAP.md",
+    "docs/RUN_LOG.md",
+    "docs/features/F070-applications-table.md",
+    "docs/features/F072-job-application-detail-workspace.md",
 ]
 
 
@@ -76,7 +89,14 @@ def role_failure_events() -> list[dict]:
 
 
 class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
-    def _fixture(self, root: Path):
+    def _fixture(
+        self,
+        root: Path,
+        *,
+        completed_feature: str = "F068",
+        selected_feature: str = "F070",
+        paths: list[str] = EIGHT_PATHS,
+    ):
         repository, project = synthetic_repository(
             root,
             feature_status="proposed",
@@ -97,22 +117,32 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
                 "status": "active",
                 "base_commit": integrated,
                 "integration_branch": "codex/m0-foundation",
-                "integrated_features": ["F068"],
+                "integrated_features": [completed_feature],
                 "last_validated_commit": integrated,
                 "human_gate": True,
             }],
             "features": [
                 {
-                    "id": "F068",
-                    "title": "Job Application Data Model",
+                    "id": completed_feature,
+                    "title": (
+                        "Job Application Data Model"
+                        if completed_feature == "F068"
+                        else "Applications Table"
+                    ),
                     "status": "integrated",
                     "priority": 68,
                     "milestone": "M0",
                     "dependencies": [],
-                    "spec": "docs/features/F068-job-application-data-model.md",
-                    "acceptance_criteria": ["F068 remains integrated exactly once."],
+                    "spec": (
+                        "docs/features/F068-job-application-data-model.md"
+                        if completed_feature == "F068"
+                        else "docs/features/F070-applications-table.md"
+                    ),
+                    "acceptance_criteria": [
+                        f"{completed_feature} remains integrated exactly once."
+                    ],
                     "requires_human_decision": False,
-                    "branch": "codex/F068-job-application-data-model",
+                    "branch": f"codex/{completed_feature.lower()}-accepted",
                     "integration_base_commit": integrated,
                     "accepted_commit": integrated,
                     "integrated_commit": integrated,
@@ -120,14 +150,24 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
                     "integration_fix_commits": [],
                 },
                 {
-                    "id": "F070",
-                    "title": "Applications Table",
+                    "id": selected_feature,
+                    "title": (
+                        "Applications Table"
+                        if selected_feature == "F070"
+                        else "Applications Table Interactions and Detail View"
+                    ),
                     "status": "proposed",
                     "priority": 70,
                     "milestone": "M0",
-                    "dependencies": ["F068"],
-                    "spec": "docs/features/F070-applications-table.md",
-                    "acceptance_criteria": ["F070 provides a sortable applications table."],
+                    "dependencies": [completed_feature],
+                    "spec": (
+                        "docs/features/F070-applications-table.md"
+                        if selected_feature == "F070"
+                        else "docs/features/F072-job-application-detail-workspace.md"
+                    ),
+                    "acceptance_criteria": [
+                        f"{selected_feature} provides bounded application behavior."
+                    ],
                     "requires_human_decision": False,
                     "branch": None,
                     "integration_base_commit": None,
@@ -139,13 +179,16 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
             ],
         }
         write_json(repository / "docs/FEATURE_QUEUE.yaml", queue)
-        for relative in EIGHT_PATHS:
+        for relative in paths:
             target = repository / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             if relative == "docs/FEATURE_QUEUE.yaml":
                 continue
             target.write_text(
-                "# Planning baseline\n\nF068 integrated. F070 proposed.\n",
+                (
+                    "# Planning baseline\n\n"
+                    f"{completed_feature} integrated. {selected_feature} proposed.\n"
+                ),
                 encoding="utf-8",
             )
         git(repository, "add", "docs", ".factory/locks/.gitignore")
@@ -170,8 +213,10 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
             lease=WorkflowWriterLease(repository / ".factory/locks/writer.json"),
         )
         adapter = QueueReconciliationAdapter(
-            allowed_paths=EIGHT_PATHS,
-            commit_subject="factory: reconcile M0 queue and ready F070",
+            allowed_paths=paths,
+            commit_subject=(
+                f"factory: reconcile M0 queue and ready {selected_feature}"
+            ),
             next_state="feature_ready",
         )
         kernel.begin(
@@ -192,11 +237,15 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
 
         queue["features"][1]["status"] = "ready"
         write_json(repository / "docs/FEATURE_QUEUE.yaml", queue)
-        for relative in EIGHT_PATHS:
+        for relative in paths:
             if relative == "docs/FEATURE_QUEUE.yaml":
                 continue
             (repository / relative).write_text(
-                "# Reconciled planning\n\nF068 integrated. F070 ready.\n"
+                (
+                    "# Reconciled planning\n\n"
+                    f"{completed_feature} integrated. {selected_feature} ready.\n"
+                )
+                +
                 "product-architect launch unavailable before inspection.\n"
                 "feature-inventory-lead launch unavailable before inspection.\n",
                 encoding="utf-8",
@@ -225,12 +274,17 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
                     "feature_count": 2,
                     "global_feature_count": 2,
                     "global_milestone_count": 1,
-                    "ready_features": ["F070"],
+                    "ready_features": [selected_feature],
                     "active_features": [],
+                    "selected_feature": selected_feature,
+                    "dependencies_complete": True,
                     "warning_count": 0,
                     "blocking_warnings": [],
                 },
-                "summary": "F068 synchronized; F070 marked ready.",
+                "summary": (
+                    f"{completed_feature} synchronized; "
+                    f"{selected_feature} marked ready."
+                ),
                 "retryable": False,
                 "human_decision": None,
             },
@@ -256,7 +310,7 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
                         "feature_count": 2,
                         "milestone_count": 1,
                         "active": [],
-                        "ready": ["F070"],
+                        "ready": [selected_feature],
                         "project_usage": "personal_private",
                     }),
                     "exit_code": 0,
@@ -302,6 +356,13 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
             ),
             "session_id": SESSION_ID,
         }
+        if selected_feature == "F072":
+            envelope["evidence"]["queue_validation"].pop(
+                "selected_feature", None
+            )
+            envelope["evidence"]["queue_validation"].pop(
+                "dependencies_complete", None
+            )
         write_json(report_path, report)
         transaction_path = planning_report_path(engine.root / "reports", RUN_ID)
         transaction = {
@@ -322,7 +383,10 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
             "result_classification": "RECONCILED_READY_WORK",
             "failure_classification": "PLANNING_VALIDATION_FAILED",
             "reconciliation_report": str(report_path),
-            "error": "newly readied feature F070 lacks required execution_policy",
+            "error": (
+                f"newly readied feature {selected_feature} "
+                "lacks required execution_policy"
+            ),
         }
         write_json(transaction_path, transaction)
         kernel.block(
@@ -344,7 +408,7 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
             "feature_count": 2,
             "global_feature_count": 2,
             "global_milestone_count": 1,
-            "ready": ["F070"],
+            "ready": [selected_feature],
             "active": [],
             "validator": "synthetic inventory validator",
         }
@@ -358,6 +422,9 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
             "inventory": inventory,
             "report_path": report_path,
             "transaction_path": transaction_path,
+            "paths": paths,
+            "completed_feature": completed_feature,
+            "selected_feature": selected_feature,
         }
 
     @staticmethod
@@ -366,7 +433,7 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
             "run_id": RUN_ID,
             "expected_starting_head": fixture["head"],
             "expected_diff_fingerprint": fixture["diff"],
-            "expected_changed_paths": EIGHT_PATHS,
+            "expected_changed_paths": fixture["paths"],
             "expected_session_id": SESSION_ID,
         }
 
@@ -467,6 +534,153 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
             self.assertFalse(
                 any(event["event_type"] == "SessionLaunched" for event in recovery_events)
             )
+
+    def test_f072_missing_policy_dry_run_predicts_exact_normalization_without_writes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self._fixture(
+                Path(temporary),
+                completed_feature="F070",
+                selected_feature="F072",
+                paths=SEVEN_PATHS,
+            )
+            repository = fixture["repository"]
+            status_before = git(repository, "status", "--porcelain=v1", "--branch")
+            queue_before = (
+                repository / "docs/FEATURE_QUEUE.yaml"
+            ).read_bytes()
+            spec_path = (
+                repository
+                / "docs/features/F072-job-application-detail-workspace.md"
+            )
+            spec_before = spec_path.read_bytes()
+
+            result = self._dry_run(fixture)
+            plan = result["planning_finalization_recovery"]
+            completion = plan["execution_policy_completion"]
+
+            self.assertEqual(plan["selected_feature"], "F072")
+            self.assertEqual(plan["ready_features"], ["F072"])
+            self.assertEqual(
+                plan["recovered_failure_classification"],
+                "deterministic_execution_policy_completion",
+            )
+            self.assertEqual(plan["existing_planning_changes"]["paths"], SEVEN_PATHS)
+            self.assertTrue(completion["required"])
+            self.assertEqual(
+                completion["execution_policy"],
+                {
+                    "profile": "generic_or_architectural",
+                    "parent_sessions": 1,
+                    "child_sessions": 0,
+                },
+            )
+            self.assertEqual(
+                completion["normalization_paths"],
+                [
+                    "docs/FEATURE_QUEUE.yaml",
+                    "docs/features/F072-job-application-detail-workspace.md",
+                ],
+            )
+            self.assertEqual(
+                (
+                    completion["resolved_execution_profile"]["model"],
+                    completion["resolved_execution_profile"]["reasoning"],
+                    completion["resolved_execution_profile"]["parent_sessions"],
+                    completion["resolved_execution_profile"]["child_sessions"],
+                    completion["policy_source"],
+                ),
+                ("gpt-5.6-sol", "medium", 1, 0, "workflow_fallback"),
+            )
+            self.assertNotEqual(
+                plan["authenticated_original_diff_fingerprint"],
+                plan["predicted_final_diff_fingerprint"],
+            )
+            self.assertEqual(result["model_sessions_that_would_launch"], [])
+            self.assertEqual(result["child_sessions_that_would_launch"], [])
+            self.assertEqual(
+                git(repository, "status", "--porcelain=v1", "--branch"),
+                status_before,
+            )
+            self.assertEqual(
+                (repository / "docs/FEATURE_QUEUE.yaml").read_bytes(),
+                queue_before,
+            )
+            self.assertEqual(spec_path.read_bytes(), spec_before)
+
+    def test_f072_missing_policy_apply_normalizes_and_commits_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self._fixture(
+                Path(temporary),
+                completed_feature="F070",
+                selected_feature="F072",
+                paths=SEVEN_PATHS,
+            )
+            repository = fixture["repository"]
+            app_before = (repository / "app.txt").read_bytes()
+            with (
+                patch(
+                    "development_conveyor.planning._inventory_validation",
+                    return_value=fixture["inventory"],
+                ),
+                patch.object(
+                    fixture["engine"],
+                    "_compatibility_snapshot",
+                    return_value={
+                        "compatible": True,
+                        "effective_model": "gpt-5.6-sol",
+                        "effective_reasoning": "medium",
+                        "policy_source": "workflow_fallback",
+                    },
+                ) as compatibility,
+            ):
+                result = fixture["engine"].recover_planning_transaction(
+                    fixture["project"],
+                    **self._arguments(fixture),
+                    dry_run=False,
+                )
+
+            commit = result["planning_result_commit"]
+            self.assertEqual(
+                git(repository, "rev-parse", f"{commit}^"),
+                fixture["head"],
+            )
+            self.assertEqual(
+                git(repository, "rev-list", "--count", f"{fixture['head']}..{commit}"),
+                "1",
+            )
+            self.assertEqual(
+                RepositoryInspector(repository).changed_paths(commit),
+                SEVEN_PATHS,
+            )
+            queue = json.loads(
+                (repository / "docs/FEATURE_QUEUE.yaml").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                queue["features"][1]["execution_policy"],
+                {
+                    "profile": "generic_or_architectural",
+                    "parent_sessions": 1,
+                    "child_sessions": 0,
+                },
+            )
+            specification = (
+                repository
+                / "docs/features/F072-job-application-detail-workspace.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn("## Execution policy", specification)
+            self.assertIn("profile: generic_or_architectural", specification)
+            self.assertEqual((repository / "app.txt").read_bytes(), app_before)
+            self.assertEqual(result["current_state"], "feature_ready")
+            self.assertEqual(result["selected_feature"], "F072")
+            self.assertEqual(result["model_sessions_launched"], [])
+            self.assertEqual(result["child_sessions_launched"], [])
+            projection = ProjectionEngine(
+                fixture["ledger"],
+                fixture["ledger"].path.parent / "projection-cache.json",
+            ).rebuild(persist_cache=False)
+            self.assertIsNone(projection["current_feature"])
+            self.assertEqual(projection["selected_next_feature"], "F072")
+            compatibility.assert_called_once()
 
     def test_invalid_parent_or_role_failure_evidence_is_rejected(self):
         mutations = {
@@ -589,6 +803,118 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
             ), self.assertRaisesRegex(RecoveryError, "diff_fingerprint"):
                 fixture["engine"].recover_planning_transaction(
                     fixture["project"], **arguments, dry_run=True
+                )
+
+    def test_f072_live_ownership_boundaries_fail_closed(self):
+        cases = ("writer_lease", "controller_reservation", "autopilot_owner")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                fixture = self._fixture(
+                    Path(temporary),
+                    completed_feature="F070",
+                    selected_feature="F072",
+                    paths=SEVEN_PATHS,
+                )
+                repository = fixture["repository"]
+                reservation = None
+                if case == "writer_lease":
+                    write_json(
+                        repository / ".factory/locks/writer.json",
+                        {"foreign": True},
+                    )
+                elif case == "controller_reservation":
+                    inspector = RepositoryInspector(repository)
+                    reservation = fixture["engine"]._launch_lock(
+                        fixture["project"], inspector
+                    )
+                    reservation.acquire(make_lock_record(
+                        project_id=fixture["project"].project_id,
+                        repository_identity=inspector.identity()["repository_id"],
+                        run_id="foreign-run",
+                        current_feature="F072",
+                        current_phase="foreign",
+                    ))
+                else:
+                    state_root = fixture["engine"].configuration.owned_path(
+                        fixture["engine"].configuration.conveyor[
+                            "state_directory"
+                        ]
+                    )
+                    write_json(
+                        state_root
+                        / "autopilot"
+                        / fixture["project"].project_id
+                        / "ownership.json",
+                        {
+                            "project_id": fixture["project"].project_id,
+                            "process_id": -1,
+                        },
+                    )
+                try:
+                    with self.assertRaises(RecoveryError):
+                        self._dry_run(fixture)
+                finally:
+                    if reservation is not None:
+                        reservation.release("foreign-run")
+
+    def test_policy_completion_rejects_no_ready_and_multiple_missing_candidates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, project = synthetic_repository(
+                root,
+                feature_status="proposed",
+                controller_project_id="interview-companion",
+            )
+            inspector = RepositoryInspector(repository)
+            starting_head = inspector.head
+            with self.assertRaisesRegex(RecoveryError, "matching newly ready"):
+                plan_new_ready_execution_policy_completion(
+                    project,
+                    inspector,
+                    starting_head=starting_head,
+                    profile_configuration=None,
+                    required_missing_feature="F001",
+                )
+
+            queue_path = repository / project.queue_location
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            queue["features"].append({
+                "id": "F002",
+                "title": "Second candidate",
+                "status": "proposed",
+                "priority": 2,
+                "milestone": "M0",
+                "dependencies": [],
+                "spec": "docs/features/F002.md",
+                "acceptance_criteria": ["Synthetic candidate."],
+                "requires_human_decision": False,
+                "branch": None,
+                "integration_base_commit": None,
+                "accepted_commit": None,
+                "integrated_commit": None,
+                "integration_status": "pending",
+                "integration_fix_commits": [],
+            })
+            write_json(queue_path, queue)
+            (repository / "docs/features/F002.md").write_text(
+                "# F002\n",
+                encoding="utf-8",
+            )
+            git(repository, "add", "docs")
+            git(repository, "commit", "-m", "add second proposed feature")
+            starting_head = git(repository, "rev-parse", "HEAD")
+            queue["features"][0]["status"] = "ready"
+            queue["features"][1]["status"] = "ready"
+            write_json(queue_path, queue)
+            with self.assertRaisesRegex(
+                RecoveryError,
+                "multiple newly ready features require execution-policy judgment",
+            ):
+                plan_new_ready_execution_policy_completion(
+                    project,
+                    RepositoryInspector(repository),
+                    starting_head=starting_head,
+                    profile_configuration=None,
                 )
 
     @staticmethod

@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
+import tempfile
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
 from .contracts import extract_terminal_envelope, fingerprint
-from .errors import QueueError, RecoveryError
-from .execution_profiles import validate_feature_execution_policy
-from .logging import atomic_write_json, utc_now
-from .queue import FeatureQueue
+from .errors import ConfigurationError, QueueError, RecoveryError
+from .execution_profiles import (
+    markdown_execution_policy,
+    render_markdown_execution_policy,
+    resolve_feature_execution_policy,
+    validate_feature_execution_policy,
+)
+from .logging import atomic_write_bytes, atomic_write_json, utc_now
+from .queue import FeatureQueue, load_queue
 from .registry import Project
 from .repository import RepositoryInspector
 from .sessions import parse_reconciliation_result
@@ -187,6 +194,325 @@ def queue_fingerprint(project: Project) -> str:
 
 def allowed_planning_path(path: str) -> bool:
     return path in ALLOWED_PLANNING_FILES or path.startswith(ALLOWED_PLANNING_PREFIXES)
+
+
+def _json_bytes(value: dict[str, Any]) -> bytes:
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _planning_diff_fingerprint_with_replacements(
+    inspector: RepositoryInspector,
+    replacements: dict[str, bytes],
+) -> str:
+    """Predict the exact Git binary diff without writing the application repository."""
+
+    changed_paths = sorted(
+        set(inspector.tracked_changed_paths())
+        | set(inspector.untracked_file_hashes())
+        | set(replacements)
+    )
+    if not changed_paths:
+        return hashlib.sha256(b"").hexdigest()
+    with tempfile.TemporaryDirectory(prefix="conveyor-policy-diff-") as temporary:
+        root = Path(temporary)
+        index = root / "index"
+        objects = root / "objects"
+        objects.mkdir()
+        environment = {
+            **os.environ,
+            "GIT_INDEX_FILE": str(index),
+            "GIT_OBJECT_DIRECTORY": str(objects),
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(
+                inspector.common_git_dir / "objects"
+            ),
+        }
+
+        def run(
+            argv: list[str],
+            *,
+            input_bytes: bytes | None = None,
+        ) -> subprocess.CompletedProcess[bytes]:
+            result = subprocess.run(
+                ["git", *argv],
+                cwd=inspector.root,
+                env=environment,
+                input=input_bytes,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RecoveryError(
+                    "cannot predict normalized planning diff: "
+                    + result.stderr.decode("utf-8", errors="replace").strip()
+                )
+            return result
+
+        run(["read-tree", "HEAD"])
+        run(["add", "--all", "--", *changed_paths])
+        for relative, content in sorted(replacements.items()):
+            stage = run(["ls-files", "-s", "--", relative]).stdout.decode(
+                "utf-8", errors="strict"
+            ).strip()
+            if not stage:
+                raise RecoveryError(
+                    f"normalized planning path cannot be staged: {relative}"
+                )
+            mode = stage.split(maxsplit=1)[0]
+            blob = run(["hash-object", "-w", "--stdin"], input_bytes=content).stdout.decode(
+                "ascii"
+            ).strip()
+            run(["update-index", "--cacheinfo", f"{mode},{blob},{relative}"])
+        tree = run(["write-tree"]).stdout.decode("ascii").strip()
+        patch = run(["diff", "--binary", "--no-ext-diff", "HEAD", tree, "--"]).stdout
+        return hashlib.sha256(patch).hexdigest()
+
+
+def _feature_specification_policy(
+    project: Project,
+    feature: dict[str, Any],
+) -> tuple[str, str, dict[str, Any] | None]:
+    feature_id = str(feature.get("id") or "")
+    relative = feature.get("spec")
+    if not isinstance(relative, str) or not relative:
+        raise RecoveryError(
+            f"newly ready feature {feature_id} lacks an authoritative specification path"
+        )
+    path = project.repository / relative
+    if not path.is_file():
+        raise RecoveryError(
+            f"newly ready feature {feature_id} specification is missing: {relative}"
+        )
+    try:
+        text = path.read_text(encoding="utf-8")
+        policy = markdown_execution_policy(feature_id, text, required=False)
+    except (OSError, UnicodeError, QueueError) as exc:
+        raise RecoveryError(
+            f"newly ready feature {feature_id} specification policy is invalid"
+        ) from exc
+    return relative, text, policy
+
+
+def plan_new_ready_execution_policy_completion(
+    project: Project,
+    inspector: RepositoryInspector,
+    *,
+    starting_head: str,
+    profile_configuration: dict[str, Any] | None,
+    required_missing_feature: str | None = None,
+    authorized_retained_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Resolve and predict canonical policy completion for newly ready work."""
+
+    baseline_text = inspector.file_at_commit(starting_head, project.queue_location)
+    try:
+        baseline = FeatureQueue(json.loads(baseline_text or ""))
+        document = load_queue(project.repository / project.queue_location)
+        queue = FeatureQueue(
+            document,
+            project.repository / project.queue_location,
+            project.repository,
+        )
+    except (json.JSONDecodeError, QueueError, ValueError) as exc:
+        raise RecoveryError("execution-policy completion lacks authoritative queue evidence") from exc
+
+    newly_ready = [
+        feature
+        for feature in queue.features
+        if feature.get("status") == "ready"
+        and (baseline.feature(str(feature.get("id") or "")) or {}).get("status")
+        != "ready"
+    ]
+    if required_missing_feature is not None and (
+        len(newly_ready) != 1
+        or newly_ready[0].get("id") != required_missing_feature
+    ):
+        raise RecoveryError(
+            "deterministic execution-policy completion requires exactly one "
+            "matching newly ready feature"
+        )
+    if not newly_ready:
+        if required_missing_feature is not None:
+            raise RecoveryError(
+                "deterministic execution-policy completion has no newly ready feature"
+            )
+        return {
+            "required": False,
+            "newly_ready_features": [],
+            "normalization_paths": [],
+            "replacements": {},
+        }
+
+    candidates: list[dict[str, Any]] = []
+    for feature in newly_ready:
+        feature_id = str(feature["id"])
+        spec_relative, spec_text, spec_policy = _feature_specification_policy(
+            project, feature
+        )
+        try:
+            resolution = resolve_feature_execution_policy(
+                feature=feature,
+                project_id=project.project_id,
+                specification_policy=spec_policy,
+                configuration=profile_configuration,
+            )
+        except (ConfigurationError, QueueError) as exc:
+            raise RecoveryError(
+                f"newly ready feature {feature_id} execution policy is invalid or ambiguous"
+            ) from exc
+        missing_queue = "execution_policy" not in feature
+        missing_spec = spec_policy is None
+        candidates.append({
+            **resolution,
+            "specification_path": spec_relative,
+            "specification_text": spec_text,
+            "missing_queue_policy": missing_queue,
+            "missing_specification_policy": missing_spec,
+        })
+
+    missing = [
+        candidate
+        for candidate in candidates
+        if candidate["missing_queue_policy"]
+        or candidate["missing_specification_policy"]
+    ]
+    if required_missing_feature is not None and (
+        len(missing) != 1
+        or missing[0]["feature_id"] != required_missing_feature
+        or missing[0]["missing_queue_policy"] is not True
+    ):
+        raise RecoveryError(
+            "recorded missing execution_policy failure does not match the "
+            "authoritative newly ready feature"
+        )
+    if len(missing) > 1:
+        raise RecoveryError(
+            "multiple newly ready features require execution-policy judgment"
+        )
+    if not missing:
+        return {
+            "required": False,
+            "newly_ready_features": sorted(
+                candidate["feature_id"] for candidate in candidates
+            ),
+            "validated_policies": [
+                {
+                    key: candidate[key]
+                    for key in (
+                        "feature_id",
+                        "execution_policy",
+                        "resolved_execution_profile",
+                        "policy_source",
+                        "explicit_policy_preserved",
+                    )
+                }
+                for candidate in candidates
+            ],
+            "normalization_paths": [],
+            "replacements": {},
+        }
+
+    candidate = missing[0]
+    feature_id = candidate["feature_id"]
+    policy = candidate["execution_policy"]
+    normalization_paths: list[str] = []
+    replacements: dict[str, bytes] = {}
+    if candidate["missing_queue_policy"]:
+        raw_feature = next(
+            item
+            for item in document["features"]
+            if item.get("id") == feature_id
+        )
+        raw_feature["execution_policy"] = policy
+        normalization_paths.append(project.queue_location)
+        replacements[project.queue_location] = _json_bytes(document)
+    if candidate["missing_specification_policy"]:
+        spec_relative = candidate["specification_path"]
+        spec_text = candidate["specification_text"]
+        normalized = spec_text.rstrip() + "\n\n" + render_markdown_execution_policy(policy)
+        normalization_paths.append(spec_relative)
+        replacements[spec_relative] = normalized.encode("utf-8")
+
+    normalization_paths = sorted(set(normalization_paths))
+    if authorized_retained_paths is not None:
+        unauthorized = sorted(
+            set(normalization_paths) - set(authorized_retained_paths)
+        )
+        if unauthorized:
+            raise RecoveryError(
+                "execution-policy normalization would introduce an "
+                "unauthenticated retained path: "
+                + ", ".join(unauthorized)
+            )
+    predicted = _planning_diff_fingerprint_with_replacements(
+        inspector,
+        replacements,
+    )
+    return {
+        "required": True,
+        "feature_id": feature_id,
+        "newly_ready_features": sorted(
+            item["feature_id"] for item in candidates
+        ),
+        "execution_policy": policy,
+        "resolved_execution_profile": candidate["resolved_execution_profile"],
+        "policy_source": candidate["policy_source"],
+        "explicit_policy_preserved": candidate["explicit_policy_preserved"],
+        "normalization_paths": normalization_paths,
+        "predicted_final_diff_fingerprint": predicted,
+        "replacements": replacements,
+    }
+
+
+def apply_new_ready_execution_policy_completion(
+    project: Project,
+    inspector: RepositoryInspector,
+    *,
+    starting_head: str,
+    profile_configuration: dict[str, Any] | None,
+    expected_plan: dict[str, Any],
+    authorized_retained_paths: list[str],
+    recorded_missing_policy_failure: bool = True,
+) -> dict[str, Any]:
+    """Revalidate and atomically apply one already-predicted policy completion."""
+
+    feature_id = expected_plan.get("feature_id")
+    if not isinstance(feature_id, str) or not feature_id:
+        raise RecoveryError("execution-policy completion plan lacks a feature identity")
+    refreshed = plan_new_ready_execution_policy_completion(
+        project,
+        inspector,
+        starting_head=starting_head,
+        profile_configuration=profile_configuration,
+        required_missing_feature=(
+            feature_id if recorded_missing_policy_failure else None
+        ),
+        authorized_retained_paths=authorized_retained_paths,
+    )
+    comparable = (
+        "feature_id",
+        "execution_policy",
+        "resolved_execution_profile",
+        "policy_source",
+        "explicit_policy_preserved",
+        "normalization_paths",
+        "predicted_final_diff_fingerprint",
+    )
+    if any(refreshed.get(key) != expected_plan.get(key) for key in comparable):
+        raise RecoveryError(
+            "execution-policy completion changed after recovery authentication"
+        )
+    replacements = refreshed.pop("replacements")
+    for relative in refreshed["normalization_paths"]:
+        atomic_write_bytes(project.repository / relative, replacements[relative])
+    if (
+        inspector.planning_diff_fingerprint()
+        != refreshed["predicted_final_diff_fingerprint"]
+    ):
+        raise RecoveryError(
+            "execution-policy normalization produced an unexpected final fingerprint"
+        )
+    return refreshed
 
 
 def worktree_fingerprint(inspector: RepositoryInspector) -> str:
@@ -623,6 +949,41 @@ def _recoverable_planning_validation_failure(transaction: dict[str, Any]) -> dic
     message = transaction.get("error")
     prefix = "deterministic inventory validation failed: "
     semantic_prefix = "queue validation evidence disagrees semantically: "
+    policy_prefix = "newly readied feature "
+    policy_suffix = " lacks required execution_policy"
+    if (
+        isinstance(message, str)
+        and message.startswith(policy_prefix)
+        and message.endswith(policy_suffix)
+    ):
+        feature_id = message[
+            len(policy_prefix):len(message) - len(policy_suffix)
+        ]
+        if (
+            not feature_id
+            or feature_id.strip() != feature_id
+            or any(character.isspace() for character in feature_id)
+        ):
+            raise RecoveryError(
+                "blocked planning execution-policy failure identity is malformed"
+            )
+        if (
+            transaction.get("failure_classification")
+            != "PLANNING_VALIDATION_FAILED"
+            or transaction.get("result_classification")
+            != "RECONCILED_READY_WORK"
+        ):
+            raise RecoveryError(
+                "blocked planning execution-policy failure classification is contradictory"
+            )
+        return {
+            "classification": "deterministic_execution_policy_completion",
+            "exit_code": 0,
+            "errors": [],
+            "warnings": [],
+            "historical_disagreements": [],
+            "missing_execution_policy_feature": feature_id,
+        }
     if isinstance(message, str) and message.startswith(prefix):
         try:
             failure = json.loads(message.removeprefix(prefix))
@@ -1128,6 +1489,10 @@ def inspect_planning_finalization_recovery(
     planning_transaction: dict[str, Any],
     session_report: dict[str, Any],
     writer_lease_exists: bool,
+    profile_configuration: dict[str, Any] | None = None,
+    controller_reservation_safe: bool = True,
+    autopilot_ownership_safe: bool = True,
+    live_session_absent: bool = True,
 ) -> dict[str, Any]:
     """Prove a terminal warning-only planning diff can be finalized without a model."""
 
@@ -1337,6 +1702,9 @@ def inspect_planning_finalization_recovery(
             not isinstance(normalization, dict) or compatible_terminal_recovered
         ),
         "writer_lease_absent": writer_lease_exists is False,
+        "controller_reservation_absent_or_owned": controller_reservation_safe,
+        "autopilot_ownership_absent_or_current_process": autopilot_ownership_safe,
+        "live_session_absent": live_session_absent,
         "recoverable_validation_failure": bool(recoverable_failure["classification"]),
     }
     failed = [name for name, passed in checks.items() if not passed]
@@ -1358,21 +1726,48 @@ def inspect_planning_finalization_recovery(
         raise RecoveryError(
             "pre-inspection role failure recovery does not select the exact ready feature"
         )
-    newly_policy_bound = _require_new_ready_execution_policies(
-        project,
-        inspector,
-        starting_head,
-        queue,
-        recoverable_missing_policy_feature=missing_policy_feature,
+    policy_completion = (
+        plan_new_ready_execution_policy_completion(
+            project,
+            inspector,
+            starting_head=starting_head,
+            profile_configuration=profile_configuration,
+            required_missing_feature=missing_policy_feature,
+            authorized_retained_paths=current_paths,
+        )
+        if missing_policy_feature is not None
+        else {
+            "required": False,
+            "normalization_paths": [],
+            "replacements": {},
+        }
     )
+    if policy_completion.get("required") is True:
+        newly_policy_bound = [str(policy_completion["feature_id"])]
+    else:
+        newly_policy_bound = _require_new_ready_execution_policies(
+            project,
+            inspector,
+            starting_head,
+            queue,
+            recoverable_missing_policy_feature=missing_policy_feature,
+        )
     result_queue = (report_evidence.get("structured_result") or {}).get("queue_validation") or {}
+    if missing_policy_feature is not None and (
+        result_queue.get("ok", result_queue.get("valid")) is not True
+        or result_queue.get("errors", []) != []
+        or result_queue.get("blocking_warnings", []) != []
+    ):
+        raise RecoveryError(
+            "missing execution-policy recovery requires passing structured queue validation"
+        )
     recorded_validations = (
         _recorded_post_integration_validation_evidence(
             session_report,
             project,
             queue,
         )
-        if post_integration_role_failure is not None
+        if missing_policy_feature is not None
         else None
     )
     inventory = (
@@ -1422,6 +1817,10 @@ def inspect_planning_finalization_recovery(
                 post_integration_role_failure is not None
                 and "selected_feature" not in result_queue
             )
+            and not (
+                missing_policy_feature is not None
+                and "selected_feature" not in result_queue
+            )
         )
         or list(reported_ready or []) != selection["ready_features"]
         or (
@@ -1437,6 +1836,10 @@ def inspect_planning_finalization_recovery(
             )
             and not (
                 post_integration_role_failure is not None
+                and "dependencies_complete" not in result_queue
+            )
+            and not (
+                missing_policy_feature is not None
                 and "dependencies_complete" not in result_queue
             )
         )
@@ -1510,6 +1913,25 @@ def inspect_planning_finalization_recovery(
         "dependencies": selection["dependencies"],
         "dependency_evidence": dependency_evidence,
         "newly_readied_execution_policies": newly_policy_bound,
+        "execution_policy_completion": {
+            key: value
+            for key, value in policy_completion.items()
+            if key != "replacements"
+        },
+        "resolved_execution_policy": policy_completion.get(
+            "execution_policy"
+        ),
+        "resolved_execution_profile": policy_completion.get(
+            "resolved_execution_profile"
+        ),
+        "policy_resolution_source": policy_completion.get("policy_source"),
+        "policy_normalization_paths": policy_completion.get(
+            "normalization_paths", []
+        ),
+        "authenticated_original_diff_fingerprint": mutation_fingerprint,
+        "predicted_final_diff_fingerprint": policy_completion.get(
+            "predicted_final_diff_fingerprint", mutation_fingerprint
+        ),
         "completed_features_not_selected": sorted(
             item.get("id")
             for item in queue.features_for_milestone(project.active_milestone or "")
@@ -1550,7 +1972,12 @@ def inspect_planning_finalization_recovery(
         "execution": {"models_planned": 0},
         "deterministic_only": True,
         "application_mutation_expected": True,
-        "expected_mutation": "commit existing validated planning metadata",
+        "expected_mutation": (
+            "deterministically complete execution policy in authenticated "
+            "retained planning metadata, then create one planning commit"
+            if policy_completion.get("required") is True
+            else "commit existing validated planning metadata"
+        ),
         "feature_factory_would_launch": False,
         "milestone_integrator_would_launch": False,
         "planning_content_regeneration_would_run": False,
