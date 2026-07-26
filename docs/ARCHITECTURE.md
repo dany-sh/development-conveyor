@@ -36,6 +36,17 @@ feature session start only after the launcher exposes an authenticated session
 identity. A zero-session context failure remains a recoverable
 `feature_preparing` topology rather than an implementation failure.
 
+For a launched feature session, the kernel ledger and its rebuilt projection
+own execution progression. Authenticated `SessionLaunched` must project the
+active feature transaction as `result_pending` in `feature_running` before the
+cycle cache and compatibility document advance. Terminal output is then
+consumed from that same transaction. A pre-dispatch compatibility value or
+cached cycle phase cannot supply the terminal transition source. Invalid
+structured output blocks the transaction once, binds one append-only human
+gate, returns one retained-result outcome, and leaves the worktree intact;
+Autopilot records that outcome once and stops unless the freshly rebuilt
+projection selects its registered deterministic recovery.
+
 One controller-owned ownership record under
 `state/autopilot/<project>/ownership.json` binds project, repository identity
 and path fingerprint, host, PID, process-start evidence, heartbeat, and last
@@ -87,7 +98,21 @@ failure remain invalid.
 
 Cache-binding recovery provenance is transient. The recovery result, append-only evidence, and controller reports retain the applicable source and run identities, while the rewritten compatibility cycle cache contains only the common canonical schema. Deterministic rebinding may load the one historical top-level `cache_binding_recovery` object only when it contains exactly non-empty `source_transaction` and `recovery_run_id` strings; normalization validates the remaining document against the common schema and never rewrites that legacy field.
 
-Terminal feature-result recovery is a distinct zero-model transaction. The protected F003 contract remains unchanged. Later retained feature results use a general fail-closed contract that proves the exact original event topology, report and terminal-marker identity, repository, run, transaction, session, branch, HEAD, clean starting snapshot, retained tracked/untracked fingerprints and paths, untracked file hashes, current gate and projection, queue and approved-decision state, absent lease/reservation/active transaction, and absence of any prior recovery or manual feature commit. The sole workflow alias is `feature_cycle` to `feature_execution`, and it is accepted only after every surrounding feature-execution identity matches; arbitrary workflow conflicts still fail. Focused host tests are derived from retained changed test paths and matching source-test pairs, followed by the configured build and diff gates. Apply revalidates under the controller reservation and a fresh typed `feature_writer` lease, runs every host validation before committing, preserves implementation content, transitions acceptance metadata, creates exactly one direct-child candidate/accepted feature commit, durably records supersession of the structured-output-invalid transaction, resolves only its bound gate, and refreshes the ledger projection plus controller and repository compatibility caches. Validation failure creates no commit, preserves the retained diff and original gate, records explicit failure evidence, and releases the lease. Recovery never launches a model, performs milestone integration, or begins queue reconciliation.
+Terminal feature-result recovery is a distinct zero-model transaction. The protected F003 contract remains unchanged. Later retained feature results use a general fail-closed contract that proves the exact original event topology, report and terminal-marker identity, repository, run, transaction, session, branch, HEAD, clean starting snapshot, retained tracked/untracked fingerprints and paths, untracked file hashes, current gate and projection, queue and approved-decision state, absent lease/reservation/active transaction, and absence of any prior recovery or manual feature commit. The sole workflow alias is `feature_cycle` to `feature_execution`, and it is accepted only after every surrounding feature-execution identity matches; arbitrary workflow conflicts still fail.
+
+An `in_progress` queue entry is recoverable only when its current diff is owned
+by the exact retained execution transaction. For the recorded F070 topology,
+recovery additionally proves one completed deterministic preparation,
+continuous lineage through the exact zero-session prelaunch recovery and its
+failed predecessor, the later authenticated execution, queue-fingerprint
+change owned by that execution, exact invalid terminal report and gate, and
+absence of any untracked path, live session, Autopilot ownership, lease,
+reservation, transaction, or Git operation. The preparation need not be the
+latest transaction or share the execution run; every link and terminal
+snapshot must still match exactly. Other `in_progress` features remain
+ineligible.
+
+Focused host tests are derived from retained changed test paths and matching source-test pairs, followed by the configured build and diff gates. Apply revalidates under the controller reservation and a fresh typed `feature_writer` lease, runs every host validation before committing, preserves implementation content, transitions acceptance metadata, creates exactly one direct-child candidate/accepted feature commit, durably records supersession of the structured-output-invalid transaction, resolves only its bound gate, and refreshes the ledger projection plus controller and repository compatibility caches. Validation failure creates no commit, preserves the retained diff and original gate, records explicit failure evidence, and releases the lease. Recovery never launches a model, performs milestone integration, or begins queue reconciliation.
 
 Retained-feature validation repair is the explicit model-backed successor to
 that deterministic route, not an extension of deterministic validation.

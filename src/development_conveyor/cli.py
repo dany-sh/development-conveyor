@@ -138,12 +138,28 @@ def _parser() -> argparse.ArgumentParser:
         help="validate and finalize one exact terminal feature-session implementation without a model",
     )
     recover_feature_result.add_argument("--project", required=True)
-    recover_feature_result.add_argument("--feature", required=True)
-    recover_feature_result.add_argument("--original-transaction-id", required=True)
-    recover_feature_result.add_argument("--original-run-id", required=True)
-    recover_feature_result.add_argument("--original-session-id", required=True)
-    recover_feature_result.add_argument("--expected-branch", required=True)
-    recover_feature_result.add_argument("--expected-head", required=True)
+    recover_feature_result.add_argument("--feature")
+    recover_feature_result.add_argument("--original-transaction-id")
+    recover_feature_result.add_argument(
+        "--original-run-id", "--run-id", dest="original_run_id", required=True
+    )
+    recover_feature_result.add_argument(
+        "--original-session-id",
+        "--session-id",
+        dest="original_session_id",
+        required=True,
+    )
+    recover_feature_result.add_argument("--expected-branch")
+    recover_feature_result.add_argument(
+        "--expected-head", "--starting-head", dest="expected_head", required=True
+    )
+    recover_feature_result.add_argument("--diff-fingerprint")
+    recover_feature_result.add_argument(
+        "--expected-path",
+        action="append",
+        default=[],
+        help="exact retained changed path; repeat once per expected file",
+    )
     mode = recover_feature_result.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
@@ -558,13 +574,15 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
             configuration=configuration.conveyor,
             project=registry.get(args.project),
         )
-        plan = recovery.inspect(
+        plan = recovery.inspect_recorded(
             feature_id=args.feature,
             original_transaction_id=args.original_transaction_id,
             original_run_id=args.original_run_id,
             original_session_id=args.original_session_id,
             expected_branch=args.expected_branch,
             expected_head=args.expected_head,
+            expected_diff_fingerprint=args.diff_fingerprint,
+            expected_paths=tuple(args.expected_path),
         )
         return recovery.apply(plan) if args.apply else {
             **plan,

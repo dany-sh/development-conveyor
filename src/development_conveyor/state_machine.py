@@ -8,7 +8,7 @@ from .errors import InvalidTransition
 
 PORTFOLIO_STATES = (
     "discover", "bootstrap_required", "baseline_required", "queue_reconciliation",
-    "feature_ready", "feature_running", "feature_review", "feature_accepted",
+    "feature_ready", "feature_preparing", "feature_running", "feature_review", "feature_accepted",
     "integration_pending", "integration_ready", "integrating", "integration_validation",
     "integration_blocked", "feature_integrated",
     "milestone_gate", "milestone_ready_for_merge", "human_merge_approval",
@@ -29,7 +29,8 @@ PORTFOLIO_TRANSITIONS = {
     "bootstrap_required": {"discover", "baseline_required", "queue_reconciliation", "human_decision_required", "conveyor_error", "paused", "disabled"},
     "baseline_required": {"queue_reconciliation", "repository_dirty", "human_decision_required", "conveyor_error", "paused", "disabled"},
     "queue_reconciliation": {"feature_ready", "integration_pending", "integration_ready", "milestone_gate", "validation_failed", "architecture_decision_required", "human_decision_required", "conveyor_error", "paused", "disabled"},
-    "feature_ready": {"queue_reconciliation", "feature_running", "repository_dirty", "human_decision_required", "conveyor_error", "paused", "disabled"},
+    "feature_ready": {"queue_reconciliation", "feature_preparing", "feature_running", "repository_dirty", "human_decision_required", "conveyor_error", "paused", "disabled"},
+    "feature_preparing": {"feature_running", "feature_ready", "repository_dirty", "validation_failed", "human_decision_required", "conveyor_error", "paused", "disabled"},
     "feature_running": {"queue_reconciliation", "feature_review", "feature_accepted", "integration_pending", "integration_blocked", "feature_ready", "milestone_gate", "repository_dirty", "validation_failed", "architecture_decision_required", "destructive_change_required", "human_decision_required", "conveyor_error", "paused"},
     "feature_review": {"feature_running", "feature_accepted", "validation_failed", "architecture_decision_required", "destructive_change_required", "human_decision_required", "conveyor_error", "paused"},
     "feature_accepted": {"queue_reconciliation", "integration_pending", "integration_ready", "feature_ready", "milestone_gate", "validation_failed", "human_decision_required", "conveyor_error", "paused"},
@@ -43,7 +44,7 @@ PORTFOLIO_TRANSITIONS = {
     "milestone_ready_for_merge": {"queue_reconciliation", "human_merge_approval", "human_decision_required", "paused"},
     "human_merge_approval": {"next_milestone", "human_decision_required", "paused"},
     "next_milestone": {"queue_reconciliation", "feature_ready", "human_decision_required", "paused", "disabled"},
-    "human_decision_required": {"discover", "queue_reconciliation", "feature_ready", "feature_running", "integration_ready", "integrating", "milestone_gate", "paused", "disabled"},
+    "human_decision_required": {"discover", "queue_reconciliation", "feature_ready", "feature_preparing", "feature_running", "integration_ready", "integrating", "milestone_gate", "paused", "disabled"},
     "repository_dirty": {"discover", "queue_reconciliation", "feature_ready", "human_decision_required", "paused", "disabled"},
     "validation_failed": {"queue_reconciliation", "feature_ready", "feature_running", "milestone_gate", "human_decision_required", "paused", "disabled"},
     "architecture_decision_required": {"queue_reconciliation", "feature_ready", "human_decision_required", "paused", "disabled"},

@@ -44,6 +44,7 @@ AUTOPILOT_EVENTS = frozenset({
     "FEATURE_CONTEXT_STARTED",
     "FEATURE_CONTEXT_READY",
     "FEATURE_SESSION_STARTED",
+    "FEATURE_RESULT_RETAINED",
     "FEATURE_ACCEPTED",
     "FEATURE_INTEGRATED",
     "FEATURE_BLOCKED",
@@ -948,6 +949,33 @@ class Autopilot:
                     }
                 elapsed = time.monotonic() - started
                 self._record_result(plan, result, elapsed=elapsed)
+                retained = result.get("retained_result")
+                retained_gate = result.get("human_gate")
+                if (
+                    isinstance(retained, dict)
+                    and isinstance(retained_gate, dict)
+                    and retained.get("result_classification")
+                    == "structured_output_invalid"
+                ):
+                    self._emit(
+                        "FEATURE_RESULT_RETAINED",
+                        plan={
+                            **plan,
+                            "current_state": "human_decision_required",
+                        },
+                        transaction=(
+                            retained.get("transaction_id")
+                            if isinstance(
+                                retained.get("transaction_id"), str
+                            )
+                            else None
+                        ),
+                        diagnostic=(
+                            "authenticated terminal feature result retained; "
+                            "structured output invalid; gate="
+                            + str(retained_gate.get("gate_id") or "unavailable")
+                        ),
+                    )
 
                 recovery_failed = result.get(
                     "recoverable_technical_failure"

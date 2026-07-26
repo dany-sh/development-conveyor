@@ -4687,6 +4687,78 @@ class CycleEngine:
                 raise SessionError("session request feature differs from the execution plan")
             def authenticated_feature_session(session_id: str) -> None:
                 feature_kernel.session_launched(session_id)
+                running_projection = feature_kernel.projection.rebuild(
+                    persist_cache=True
+                )
+                active_transaction_id = running_projection.get(
+                    "active_transaction"
+                )
+                active_transaction = next(
+                    (
+                        item
+                        for item in running_projection.get("transactions") or []
+                        if item.get("transaction_id") == active_transaction_id
+                    ),
+                    None,
+                )
+                running_checks = {
+                    "current_state": running_projection.get("current_state")
+                    == "feature_running",
+                    "current_feature": running_projection.get("current_feature")
+                    == selection.feature_id,
+                    "active_transaction": active_transaction_id
+                    == feature_transaction.transaction_id
+                    and isinstance(active_transaction, dict),
+                    "transaction_state": isinstance(active_transaction, dict)
+                    and active_transaction.get("state") == "result_pending",
+                    "session": isinstance(active_transaction, dict)
+                    and active_transaction.get("session_ids")
+                    and active_transaction["session_ids"][-1] == session_id,
+                }
+                if not all(running_checks.values()):
+                    failed = ", ".join(
+                        key for key, passed in running_checks.items() if not passed
+                    )
+                    raise ProjectionError(
+                        "authenticated feature session did not project running "
+                        f"state: {failed}"
+                    )
+                if state["current_phase"] == "feature_selected":
+                    self._advance_cycle(
+                        cycle_path,
+                        state,
+                        "branch_preparing",
+                        inspector,
+                        "authenticated_prepared_feature_branch",
+                        kernel=feature_kernel,
+                    )
+                self._advance_cycle(
+                    cycle_path,
+                    state,
+                    "feature_in_progress",
+                    inspector,
+                    "authenticated_feature_session_launched",
+                    kernel=feature_kernel,
+                )
+                self._transition_project(
+                    project,
+                    project_state,
+                    "feature_running",
+                    run_id=run_id,
+                    checkpoint="authenticated_feature_session_launched",
+                    feature=selection.feature_id,
+                    kernel_owned=True,
+                    kernel_projection={
+                        "transaction_id": feature_transaction.transaction_id,
+                        "ledger_sequence": running_projection["ledger_sequence"],
+                        "ledger_fingerprint": running_projection[
+                            "ledger_fingerprint"
+                        ],
+                        "projection_fingerprint": running_projection[
+                            "projection_fingerprint"
+                        ],
+                    },
+                )
                 self._observe_lifecycle("feature_session_started", {
                     "project_id": project.project_id,
                     "feature_id": selection.feature_id,
@@ -4730,6 +4802,11 @@ class CycleEngine:
                     classification="HUMAN_DECISION_REQUIRED",
                     next_state="human_decision_required", human_gate=gate,
                 )
+                terminal_gate = terminal_projection.get("human_gate")
+                if not isinstance(terminal_gate, dict):
+                    raise TransactionError(
+                        "terminal feature result did not project its bound gate"
+                    )
                 self._materialize_terminal_cycle_cache(
                     cycle_path,
                     state,
@@ -4740,12 +4817,52 @@ class CycleEngine:
                 self._transition_project(
                     project, project_state, "human_decision_required", run_id=run_id,
                     checkpoint="session_terminal_failure", feature=selection.feature_id,
-                    stop_reason=message, human_gate=gate, kernel_owned=True,
+                    stop_reason=message, human_gate=terminal_gate, kernel_owned=True,
                     kernel_projection={
                         "transaction_id": feature_transaction.transaction_id,
                         **terminal_projection,
                     },
                 )
+                terminal_snapshot = next(
+                    (
+                        item.get("terminal_snapshot")
+                        for item in reversed(
+                            terminal_projection.get("transactions") or []
+                        )
+                        if item.get("transaction_id")
+                        == feature_transaction.transaction_id
+                    ),
+                    None,
+                )
+                result_classification = (
+                    result.failure_classification
+                    or result.result_classification
+                )
+                if (
+                    result.terminal_marker_found
+                    and result_classification == "structured_output_invalid"
+                ):
+                    return {
+                        "outcome": "human_decision_required",
+                        "next_state": "human_decision_required",
+                        "classification": "HUMAN_DECISION_REQUIRED",
+                        "feature": selection.feature_id,
+                        "human_gate": terminal_gate,
+                        "retained_result": {
+                            "transaction_id": feature_transaction.transaction_id,
+                            "run_id": run_id,
+                            "session_id": result.session_id,
+                            "terminal_marker_found": True,
+                            "result_classification": result_classification,
+                            "terminal_snapshot": terminal_snapshot,
+                            "report_path": str(result.report_path),
+                        },
+                        "parent_sessions_launched": 1,
+                        "child_sessions_launched": 0,
+                        "application_commit_created": False,
+                        "implementation_preserved": True,
+                        "kernel_projection": terminal_projection,
+                    }
                 raise SessionError(message)
             feature_envelope = SessionResultEnvelope.from_dict(result.transaction_envelope)
             feature_blocked = self._route_kernel_result(feature_kernel, feature_adapter, feature_envelope)

@@ -1323,3 +1323,78 @@ This log records model configuration and deterministic deployment evidence. It n
 - Excluded by instruction: application tests/builds or mutation, recovery
   apply, ordinary resume, Autopilot restart, the complete controller suite,
   push, merge, tag, publication, deployment, and release.
+
+### Model execution — 2026-07-26T02:35:23+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `retained_feature_terminal_transition`
+- Safety and autonomy contracts unchanged: `true`
+
+### Retained feature terminal-state transition and F070 recovery — 2026-07-25
+
+- Scope and execution: controller-only implementation on
+  `codex/m1-17-retained-feature-terminal-transition` from direct parent
+  `2ab5d29fb1439a663fad9668b02301b924cf39a2`; one direct parent
+  `gpt-5.6-sol`/high session and zero child or named-agent sessions.
+- Failure trace: `StateMachine.transition` raised
+  `InvalidTransition: unknown current state: feature_preparing` through
+  `CycleEngine._transition_project`. `run_project` populated the compatibility
+  project document before dispatch, and the `SessionLaunched` callback
+  previously updated only the kernel. The stale compatibility value therefore
+  survived even though the authenticated transaction already projected
+  `feature_running`.
+- Transition correction: authenticated `SessionLaunched` now rebuilds the
+  kernel projection and proves current feature, active transaction,
+  `result_pending` state, and exact session before advancing cycle and
+  compatibility state to running. Invalid structured terminal output blocks
+  the transaction once, binds its projected human gate, returns one retained
+  result, emits `FEATURE_RESULT_RETAINED`, and stops cleanly. Other session
+  failures retain the existing exception/retry-exhaustion contract.
+- Recovery correction: F070 `in_progress` recovery now authenticates completed
+  preparation `0637f3ba-d7a6-4dfb-afee-d68f3d637249`, the exact zero-session
+  prelaunch recovery `92ac7b0f-964f-47a6-83be-85b7f9c0f5fe` and failed
+  predecessor, execution transaction
+  `80fa16eb-ffd7-4acb-9433-77b4b201fb5c`, exact session and gate, queue
+  fingerprint ownership, branch/HEAD, terminal report, paths, fingerprints,
+  and absence of live ownership or Git operation. Invalid output remains
+  unaccepted until every host validator passes.
+- Status and consistency: status proposes the deterministic
+  `feature_result_recovery` route ahead of generic human-gate resolution.
+  Consistency treats the exact authenticated retained diff as owned recovery
+  evidence; the live result is `CONSISTENT` with no failed invariant and
+  `application_repository_written: false`.
+- Live dry-run: run `f67eab9e-9766-4c8d-ae95-53332aa3f7a4`, session
+  `019f9861-4ce9-79b3-9b5a-96e84d30a50f`, gate
+  `gate-9669520e53b48b832572caa5e2526e7e`, branch
+  `codex/F070-applications-table`, HEAD
+  `b22f89af7a03af1b26b768b640b680daa900dba9`, exact 20 tracked paths,
+  empty untracked set, and retained fingerprint
+  `37308e99f8977aedb88b94502009372198564f72508ea4674b47a13a77b192e1`
+  all authenticated. The plan launches zero models and children, runs no
+  application command, creates at most one commit only after validation,
+  supersedes the bound gate append-only, and stops at `integration_pending`
+  without queue reconciliation or integration.
+- Authoritative apply validators: `swift test --filter DomainModelTests`,
+  `swift test --filter PersistentDomainStoreTests`,
+  `swift test --filter WorkspaceRoutingTests`, `swift build`, and
+  `git diff --check`. Apply was not run.
+- Focused validation: 94 distinct retained-result, prelaunch, Autopilot,
+  projection/consistency, execution-plan, state-machine, binary-context, and
+  retry-exhaustion tests passed. F068 and F097 retained-result regressions are
+  included. The two already documented mutable-live-ledger F097
+  post-transition cache tests remain excluded. Python compilation,
+  `validate-config`, JSON-compatible queue parsing, CLI help and required-mode
+  rejection, and `git diff --check` passed; the complete controller suite and
+  all application tests/builds were intentionally excluded.
+- Isolation: Interview Companion remained on
+  `codex/F070-applications-table` at exact HEAD `b22f89af`, with the same 20
+  tracked dirty paths, no untracked paths, and the same retained fingerprint.
+  Ledger, projection, feature report, Autopilot report, and application
+  cycle-cache SHA-256 values remained byte-identical. No application write,
+  transaction, lease, Git operation, model, child, apply, ordinary resume,
+  Autopilot restart, gate resolution, reconciliation, integration, push,
+  merge, tag, publication, deployment, or release ran.

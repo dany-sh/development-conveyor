@@ -311,6 +311,8 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
     ORIGINAL_RUN = "8b4d5f27-7466-4430-9d12-51256a6e9f88"
     ORIGINAL_SESSION = "019f9628-e836-79f3-bb95-20ca8fa610ec"
     PREPARATION_TRANSACTION = "ec4e9bc3-d8f1-4462-860c-bdb1b455cc04"
+    PRELAUNCH_TRANSACTION = "92ac7b0f-964f-47a6-83be-85b7f9c0f5fe"
+    FAILED_PRELAUNCH_TRANSACTION = "7880273c-d584-45c2-89e9-291622568c2e"
 
     def _fixture(
         self,
@@ -318,6 +320,8 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
         *,
         prepared: bool = False,
         preparation_projection_feature: str | None = None,
+        preparation_run_id: str | None = None,
+        prelaunch_recovery: bool = False,
         malformed_factory_position: bool = False,
     ):
         repository, project = synthetic_repository(root)
@@ -328,7 +332,11 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
             {
                 "id": self.FEATURE,
                 "title": "Imported Audio Transcription Workflow",
-                "status": "in_progress" if prepared else "ready",
+                "status": (
+                    "ready"
+                    if prelaunch_recovery
+                    else ("in_progress" if prepared else "ready")
+                ),
                 "implementation_status": "Proposed",
                 "spec": "docs/features/F097-imported-audio-transcription-workflow.md",
                 "branch": self.BRANCH if prepared else None,
@@ -373,14 +381,33 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
         (test_root / "PersistentDomainStoreTests.swift").write_text(
             "// persistent tests\n", encoding="utf-8"
         )
+        if prelaunch_recovery:
+            (
+                source_root / "ImportedAudioTranscriptionService.swift"
+            ).write_text(
+                "struct ImportedAudioTranscriptionService { let ready = true }\n",
+                encoding="utf-8",
+            )
+            (
+                test_root / "ImportedAudioTranscriptionServiceTests.swift"
+            ).write_text(
+                "// baseline imported audio tests\n", encoding="utf-8"
+            )
         git(repository, "add", ".")
         git(repository, "commit", "-m", "prepare F097 synthetic baseline")
         head = git(repository, "rev-parse", "HEAD")
         git(repository, "switch", "-c", self.BRANCH, head)
+        prepared_queue_fingerprint = capture_repository_snapshot(
+            project
+        ).queue_fingerprint
         write_json(
             repository / ".factory/conveyor-state.json",
             {"schema_version": 1, "project_id": project.project_id},
         )
+        if prelaunch_recovery:
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            queue["features"][0]["status"] = "in_progress"
+            write_json(queue_path, queue)
 
         persistent.write_text(
             "struct PersistentDomainStore { let imported = true }\n",
@@ -451,14 +478,12 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
                 transaction_id=self.PREPARATION_TRANSACTION,
                 workflow_type=WorkflowType.FEATURE_PREPARATION,
                 payload={
-                    "run_id": self.ORIGINAL_RUN,
+                    "run_id": preparation_run_id or self.ORIGINAL_RUN,
                     "milestone": "M0",
                     "feature_id": self.FEATURE,
                     "starting_branch": str(project.milestone_branch),
                     "starting_head": head,
-                    "starting_queue_fingerprint": (
-                        capture_repository_snapshot(project).queue_fingerprint
-                    ),
+                    "starting_queue_fingerprint": prepared_queue_fingerprint,
                     "allowed_mutation_policy": {},
                 },
             )
@@ -527,9 +552,7 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
                     "terminal_snapshot": {
                         "branch": self.BRANCH,
                         "head": head,
-                        "queue_fingerprint": (
-                            capture_repository_snapshot(project).queue_fingerprint
-                        ),
+                        "queue_fingerprint": prepared_queue_fingerprint,
                     },
                 },
             )
@@ -551,6 +574,173 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
                     "selected_feature": None,
                 },
             )
+        if prelaunch_recovery:
+            clean_snapshot = {
+                "repository_identity": identity["repository_id"],
+                "repository_path_fingerprint": identity["path_fingerprint"],
+                "branch": self.BRANCH,
+                "head": head,
+                "queue_fingerprint": prepared_queue_fingerprint,
+                "tracked_diff_fingerprint": (
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                ),
+                "untracked_fingerprint": fingerprint({}),
+                "tracked_changed_paths": [],
+                "untracked_paths": [],
+                "git_operations": {
+                    "cherry_pick": False,
+                    "merge": False,
+                    "rebase_apply": False,
+                    "rebase_merge": False,
+                },
+                "clean": True,
+            }
+            for event_type, payload in (
+                (
+                    "TransactionStarted",
+                    {
+                        "run_id": "failed-prelaunch-run",
+                        "milestone": "M0",
+                        "feature_id": self.FEATURE,
+                        "starting_branch": self.BRANCH,
+                        "starting_head": head,
+                        "starting_queue_fingerprint": prepared_queue_fingerprint,
+                        "starting_tracked_diff_fingerprint": hashlib.sha256(
+                            b""
+                        ).hexdigest(),
+                        "starting_untracked_fingerprint": fingerprint({}),
+                    },
+                ),
+                ("LeaseAcquired", {"lease_id": "failed-prelaunch"}),
+                ("SnapshotCaptured", {"snapshot": clean_snapshot}),
+                (
+                    "TransactionBlocked",
+                    {
+                        "classification": "FEATURE_VALIDATION_FAILED",
+                        "terminal_state": "terminal_failure",
+                        "next_state": "validation_failed",
+                        "reference": "UnicodeDecodeError",
+                        "terminal_snapshot": clean_snapshot,
+                    },
+                ),
+                ("LeaseReleased", {"lease_id": "failed-prelaunch"}),
+                (
+                    "ProjectionUpdated",
+                    {
+                        "current_state": "validation_failed",
+                        "current_feature": self.FEATURE,
+                        "selected_feature": None,
+                    },
+                ),
+            ):
+                ledger.append(
+                    event_type=event_type,
+                    transaction_id=self.FAILED_PRELAUNCH_TRANSACTION,
+                    workflow_type=WorkflowType.FEATURE_EXECUTION,
+                    payload=payload,
+                )
+            recovery_plan_fingerprint = "9" * 64
+            for event_type, payload in (
+                (
+                    "TransactionStarted",
+                    {
+                        "run_id": "prelaunch-recovery-run",
+                        "milestone": "M0",
+                        "feature_id": self.FEATURE,
+                        "starting_branch": self.BRANCH,
+                        "starting_head": head,
+                        "starting_queue_fingerprint": prepared_queue_fingerprint,
+                        "starting_tracked_diff_fingerprint": hashlib.sha256(
+                            b""
+                        ).hexdigest(),
+                        "starting_untracked_fingerprint": fingerprint({}),
+                    },
+                ),
+                ("LeaseAcquired", {"lease_id": "prelaunch-recovery"}),
+                ("SnapshotCaptured", {"snapshot": clean_snapshot}),
+                (
+                    "CheckpointRecorded",
+                    {
+                        "checkpoint": "feature_prelaunch_recovery_authenticated",
+                        "failed_transaction_id": self.FAILED_PRELAUNCH_TRANSACTION,
+                        "model_sessions_launched": 0,
+                        "child_sessions_launched": 0,
+                        "implementation_attempts_consumed": 0,
+                    },
+                ),
+                (
+                    "DeterministicExecutionStarted",
+                    {
+                        "execution_mode": "feature_prelaunch_recovery",
+                        "plan_fingerprint": recovery_plan_fingerprint,
+                        "model_session_launched": False,
+                        "child_sessions_launched": 0,
+                    },
+                ),
+                (
+                    "DeterministicResultAccepted",
+                    {
+                        "classification": "RECOVERY_APPLIED",
+                        "plan_fingerprint": recovery_plan_fingerprint,
+                    },
+                ),
+                (
+                    "ChangesDetected",
+                    {
+                        "changed_paths": [],
+                        "diff_fingerprint": hashlib.sha256(b"").hexdigest(),
+                    },
+                ),
+                ("ValidationStarted", {"changed_paths": []}),
+                (
+                    "ValidationPassed",
+                    {
+                        "checks": {
+                            "application_unchanged": True,
+                            "model_sessions_launched": 0,
+                            "child_sessions_launched": 0,
+                        }
+                    },
+                ),
+                (
+                    "CommitFinalized",
+                    {"commit": head, "no_change": True, "changed_paths": []},
+                ),
+                (
+                    "RecoveryApplied",
+                    {
+                        "classification": "FEATURE_PRELAUNCH_RECOVERY",
+                        "selected_feature": self.FEATURE,
+                    },
+                ),
+                (
+                    "TransactionCompleted",
+                    {
+                        "classification": "RECOVERY_APPLIED",
+                        "feature_id": self.FEATURE,
+                        "next_state": "feature_preparing",
+                        "feature_commit_created": False,
+                        "model_session_launched": False,
+                        "child_sessions_launched": 0,
+                        "terminal_snapshot": clean_snapshot,
+                    },
+                ),
+                ("LeaseReleased", {"lease_id": "prelaunch-recovery"}),
+                (
+                    "ProjectionUpdated",
+                    {
+                        "current_state": "feature_preparing",
+                        "current_feature": self.FEATURE,
+                        "selected_feature": self.FEATURE,
+                    },
+                ),
+            ):
+                ledger.append(
+                    event_type=event_type,
+                    transaction_id=self.PRELAUNCH_TRANSACTION,
+                    workflow_type=WorkflowType.RECOVERY,
+                    payload=payload,
+                )
         ledger.append(
             event_type="TransactionStarted",
             transaction_id=self.ORIGINAL_TRANSACTION,
@@ -561,9 +751,7 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
                 "feature_id": self.FEATURE,
                 "starting_branch": self.BRANCH,
                 "starting_head": head,
-                "starting_queue_fingerprint": capture_repository_snapshot(
-                    project
-                ).queue_fingerprint,
+                "starting_queue_fingerprint": prepared_queue_fingerprint,
                 "starting_tracked_diff_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "starting_untracked_fingerprint": fingerprint({}),
                 "allowed_mutation_policy": policy,
@@ -587,9 +775,7 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
                     ],
                     "branch": self.BRANCH,
                     "head": head,
-                    "queue_fingerprint": capture_repository_snapshot(
-                        project
-                    ).queue_fingerprint,
+                    "queue_fingerprint": prepared_queue_fingerprint,
                     "tracked_diff_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                     "untracked_fingerprint": fingerprint({}),
                     "tracked_changed_paths": [],
@@ -698,6 +884,8 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
                 "session_id": self.ORIGINAL_SESSION,
                 "action": "feature_cycle",
                 "result_classification": "structured_output_invalid",
+                "exit_classification": "structured_output_invalid",
+                "structured_output_validation": "invalid",
                 "structured_output_errors": [
                     "terminal session-result envelope workflow_type conflicts with invoked workflow"
                 ],
@@ -1253,6 +1441,125 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 "integration_pending", plan["final_projected_state"]
             )
+
+    def test_f070_preparation_prelaunch_execution_lineage_is_recoverable(self):
+        original_identity = (
+            self.FEATURE,
+            self.BRANCH,
+            self.PREPARATION_TRANSACTION,
+        )
+        self.FEATURE = "F070"
+        self.BRANCH = "codex/F070-applications-table"
+        self.PREPARATION_TRANSACTION = (
+            "0637f3ba-d7a6-4dfb-afee-d68f3d637249"
+        )
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                configuration, project, head, changed, _ = self._fixture(
+                    Path(temporary),
+                    prepared=True,
+                    preparation_run_id="distinct-preparation-run",
+                    prelaunch_recovery=True,
+                )
+                recovery = self._recovery(configuration, project)
+                before = git(
+                    project.repository,
+                    "status",
+                    "--porcelain=v1",
+                    "--branch",
+                )
+                plan = recovery.inspect_recorded(
+                    original_run_id=self.ORIGINAL_RUN,
+                    original_session_id=self.ORIGINAL_SESSION,
+                    expected_head=head,
+                    expected_paths=changed,
+                )
+                after = git(
+                    project.repository,
+                    "status",
+                    "--porcelain=v1",
+                    "--branch",
+                )
+                self.assertEqual(before, after)
+                self.assertTrue(
+                    plan["identity_discovered_from_report_and_ledger"]
+                )
+                self.assertEqual(
+                    self.PREPARATION_TRANSACTION,
+                    plan["preparation_transaction_id"],
+                )
+                self.assertEqual(
+                    self.PRELAUNCH_TRANSACTION,
+                    plan["prelaunch_recovery_transaction_id"],
+                )
+                self.assertTrue(plan["transaction_lineage"]["continuous"])
+                self.assertTrue(
+                    plan["checks"]["queue_in_progress_owned_by_execution"]
+                )
+                self.assertEqual(list(changed), plan["changed_paths"])
+                self.assertEqual(
+                    0, plan["model_sessions_that_would_launch"]
+                )
+                self.assertEqual(
+                    0, plan["child_sessions_that_would_launch"]
+                )
+                self.assertEqual(
+                    "integration_pending", plan["final_projected_state"]
+                )
+                (
+                    configuration.root
+                    / "state/projects"
+                    / f"{project.project_id}.json"
+                ).unlink()
+                engine = CycleEngine(configuration, SyntheticLauncher())
+                status = engine.project_plan(project)
+                self.assertEqual(
+                    "feature_result_recovery",
+                    status["proposed_next_action"],
+                )
+                consistency = ConsistencyChecker(
+                    controller_root=configuration.root,
+                    project=project,
+                    planner_observer=lambda: engine.project_plan(project),
+                ).check()
+                worktree_invariant = next(
+                    item
+                    for item in consistency["invariants"]
+                    if item["invariant"] == "worktree_status"
+                )
+                self.assertTrue(worktree_invariant["passed"])
+                self.assertTrue(
+                    worktree_invariant["evidence"][
+                        "feature_result_recovery"
+                    ]
+                )
+                plan_invariant = next(
+                    item
+                    for item in consistency["invariants"]
+                    if item["invariant"]
+                    == "execution_plan_projection_agreement"
+                )
+                self.assertTrue(plan_invariant["passed"])
+                self.assertEqual(
+                    "feature_result_recovery_plan",
+                    plan_invariant["evidence"]["observation_source"],
+                )
+                with self.assertRaisesRegex(
+                    RecoveryError, "command expectations disagree"
+                ):
+                    recovery.inspect_recorded(
+                        original_run_id=self.ORIGINAL_RUN,
+                        original_session_id=self.ORIGINAL_SESSION,
+                        expected_head=head,
+                        expected_diff_fingerprint="0" * 64,
+                        expected_paths=changed,
+                    )
+        finally:
+            (
+                self.FEATURE,
+                self.BRANCH,
+                self.PREPARATION_TRANSACTION,
+            ) = original_identity
 
     def test_consumed_selection_uses_preparation_and_current_feature_identity(self):
         with tempfile.TemporaryDirectory() as temporary:

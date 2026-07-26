@@ -327,6 +327,38 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-017",
+      "title": "Retained feature terminal-state transition",
+      "status": "review",
+      "priority": 17,
+      "milestone": "M1",
+      "dependencies": [
+        "M1-001",
+        "M1-011",
+        "M1-015",
+        "M1-016"
+      ],
+      "spec": "docs/features/M1-017-retained-feature-terminal-transition.md",
+      "acceptance_criteria": [
+        "Authenticated SessionLaunched evidence durably advances fresh feature execution from feature_preparing to feature_running before any terminal result is consumed",
+        "Invalid structured terminal output produces one retained-result outcome and bound human gate without a second transition from stale compatibility state",
+        "Exact F070 preparation, prelaunch-recovery, and execution lineage permits deterministic recovery of only its owning in-progress retained diff",
+        "Recovery dry-run is write-free and zero-model while apply remains validation-gated, creates at most one direct-child feature commit, supersedes the bound gate append-only, and stops at integration_pending without reconciliation or integration"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-17-retained-feature-terminal-transition",
+      "integration_base_commit": "2ab5d29fb1439a663fad9668b02301b924cf39a2",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

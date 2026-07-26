@@ -4,6 +4,50 @@ Last updated: 2026-07-25
 
 ## Summary
 
+Retained feature terminal-state transition and deterministic F070 recovery are
+implemented on `codex/m1-17-retained-feature-terminal-transition` from exact
+parent `2ab5d29fb1439a663fad9668b02301b924cf39a2`.
+
+`StateMachine.transition` raised the observed `InvalidTransition` when
+`CycleEngine._transition_project` received `feature_preparing` from the
+pre-dispatch compatibility document after the feature kernel had already
+recorded authenticated `SessionLaunched` evidence. The session callback now
+rebuilds the kernel projection, proves the active transaction is
+`result_pending`, advances both cycle and compatibility state to
+`feature_running`, and processes the terminal result from that authenticated
+transaction.
+
+Invalid structured output now returns one retained-result outcome with its
+bound append-only human gate, emits `FEATURE_RESULT_RETAINED`, preserves the
+application worktree, and stops cleanly. Exact F070 recovery additionally
+authenticates completed preparation, the intervening zero-session prelaunch
+recovery and its failed predecessor, the owning execution transaction and
+session, queue-fingerprint ownership of `in_progress`, the exact terminal gate,
+branch, HEAD, 20 tracked paths, empty untracked set, and retained fingerprint.
+It does not infer acceptance from the invalid model envelope.
+
+The live write-free dry-run authenticated transaction
+`80fa16eb-ffd7-4acb-9433-77b4b201fb5c`, session
+`019f9861-4ce9-79b3-9b5a-96e84d30a50f`, gate
+`gate-9669520e53b48b832572caa5e2526e7e`, exact starting HEAD
+`b22f89af7a03af1b26b768b640b680daa900dba9`, all 20 retained paths, and
+tracked fingerprint
+`37308e99f8977aedb88b94502009372198564f72508ea4674b47a13a77b192e1`.
+It launched zero models and children, ran no application command, acquired no
+lease, planned the three focused Swift test filters, `swift build`, and
+`git diff --check`, and stopped before its one possible commit,
+gate supersession, queue reconciliation, or integration. Apply remains
+intentionally unexecuted and would finish at `integration_pending`.
+
+Ninety-four distinct focused controller tests pass across retained-result
+recovery, prelaunch recovery, Autopilot, projection/consistency, execution-plan
+binding, state transitions, binary context, and retry exhaustion. The two
+previously documented live-ledger-coupled F097 post-transition cache tests
+remain excluded; F068 and F097 retained-result regressions pass. Compilation,
+configuration, JSON-compatible queue parsing, CLI help/mode rejection, and
+`git diff --check` pass. Live consistency is `CONSISTENT` with no failed
+invariant, and status proposes `feature_result_recovery`.
+
 Prepared-feature execution-plan binding is implemented on
 `codex/m1-16-prepared-feature-plan-binding` from exact parent
 `b19549cff80f416f4698db97d3ea33feb3820101`. Feature execution now carries an
@@ -355,21 +399,22 @@ M1 — Transactional workflow kernel
 
 ## Active controller repair
 
-Post-integration planning-result recovery (`review`)
+Retained feature terminal-state transition (`review`)
 
 ## Next boundary
 
-Commit the controller repair. Do not run `recover-planning --apply`, restart
-Autopilot, run ordinary Conveyor resume, resolve the technical gate through
-the generic human-decision route, integrate F068, reconcile its queue, merge,
-push, tag, publish, deploy, or release.
+Commit the controller repair. Do not run `recover-feature-result --apply`,
+restart Autopilot, run ordinary Conveyor resume, resolve the technical gate
+through the generic human-decision route, integrate F070, reconcile its queue,
+merge, push, tag, publish, deploy, or release.
 
 ## Validation scope
 
-Validation is limited to focused planning recovery, Autopilot, cycle-cache,
-projection, status, consistency, and execution-plan regressions, Python
-compilation, configuration validation, command help/mode checks, the exact
-Interview Companion F070 planning-recovery dry-run, and `git diff --check`.
-Application tests, the complete controller suite, Autopilot apply, ordinary
-resume, existing queue reconciliation, feature work, and milestone integration
-are intentionally excluded.
+Validation is limited to focused transition, session-result, retained-result
+recovery, Autopilot, projection, cycle-cache, status, consistency,
+binary-context, and prepared-feature regressions; Python compilation;
+configuration and queue validation; command help/mode checks; the exact
+Interview Companion F070 retained-result dry-run; and `git diff --check`.
+Application tests/builds, the complete controller suite, recovery apply,
+Autopilot restart, ordinary resume, queue reconciliation, feature work, and
+milestone integration are intentionally excluded.

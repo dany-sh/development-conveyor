@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from development_conveyor.contracts import (
@@ -24,10 +25,30 @@ from development_conveyor.queue import FeatureQueue
 from development_conveyor.repository import RepositoryInspector
 from development_conveyor.workflow_lease import WorkflowWriterLease
 from tests.helpers import (
+    SyntheticLauncher,
     controller_configuration,
     git,
     synthetic_repository,
 )
+
+class InvalidStructuredFeatureLauncher(SyntheticLauncher):
+    def launch(self, request, on_session_started=None):
+        result = super().launch(
+            request, on_session_started=on_session_started
+        )
+        if request.action != "feature_cycle":
+            return result
+        return replace(
+            result,
+            structured_result=None,
+            transaction_envelope=None,
+            structured_output_validation="invalid",
+            result_classification="structured_output_invalid",
+            exit_classification="structured_output_invalid",
+            failure_classification="structured_output_invalid",
+            terminal_marker_found=True,
+            structured_output_errors=("synthetic invalid envelope",),
+        )
 
 
 class FeaturePrelaunchRecoveryTests(unittest.TestCase):
@@ -311,6 +332,79 @@ class FeaturePrelaunchRecoveryTests(unittest.TestCase):
             expected=None,
         )
         self.assertIsNotNone(validated)
+
+    def test_authenticated_session_replaces_stale_preparing_transition_source(self):
+        plan = self.recovery().inspect(
+            feature_id="F001",
+            autopilot_run_id=self.autopilot_run,
+            expected_branch="codex/F001-synthetic-feature",
+            expected_head=self.head,
+        )
+        self.recovery().apply(plan)
+        engine = CycleEngine(
+            self.configuration, InvalidStructuredFeatureLauncher()
+        )
+        result = engine.run_project(self.project, "one_feature")
+        self.assertEqual("human_decision_required", result["outcome"])
+        self.assertEqual(
+            "structured_output_invalid",
+            result["retained_result"]["result_classification"],
+        )
+        self.assertTrue(result["implementation_preserved"])
+        run_events = [
+            json.loads(line)
+            for line in engine.events.path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        transitions = [
+            (
+                event.get("previous_state"),
+                event.get("next_state"),
+                event.get("result"),
+            )
+            for event in run_events
+        ]
+        self.assertIn(
+            (
+                "feature_preparing",
+                "feature_running",
+                "authenticated_feature_session_launched",
+            ),
+            transitions,
+        )
+        self.assertIn(
+            (
+                "feature_running",
+                "human_decision_required",
+                "session_terminal_failure",
+            ),
+            transitions,
+        )
+        ledger_path = (
+            self.configuration.root
+            / "state/projects/synthetic/evidence-ledger.jsonl"
+        )
+        events = [
+            json.loads(line)
+            for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        ]
+        feature_transactions = [
+            event["transaction_id"]
+            for event in events
+            if event["event_type"] == "SessionLaunched"
+            and event["workflow_type"] == "feature_execution"
+        ]
+        terminal = [
+            event
+            for event in events
+            if event["transaction_id"] == feature_transactions[-1]
+            and event["event_type"] == "HumanGateRaised"
+        ]
+        self.assertEqual(1, len(terminal))
+        self.assertFalse(
+            (self.repository / ".factory/locks/writer.json").exists()
+        )
 
     def test_prepared_feature_rejects_same_commit_on_milestone_branch(self):
         engine = self._apply_and_engine()

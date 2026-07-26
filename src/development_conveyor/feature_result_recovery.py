@@ -38,6 +38,12 @@ from .workflow_lease import WorkflowWriterLease
 
 
 CommandRunner = Callable[[list[str], Path], dict[str, Any]]
+_COMMAND_DISCOVERY_FIELDS = frozenset(
+    {
+        "command_expectation_checks",
+        "identity_discovered_from_report_and_ledger",
+    }
+)
 
 
 def _changed_paths(inspector: RepositoryInspector) -> tuple[str, ...]:
@@ -158,6 +164,113 @@ class FeatureResultRecovery:
         if not isinstance(value, dict):
             raise RecoveryError("original feature report is not an object")
         return report, value, _terminal_legacy_payload(value)
+
+    def inspect_recorded(
+        self,
+        *,
+        original_run_id: str,
+        original_session_id: str,
+        expected_head: str,
+        expected_diff_fingerprint: str | None = None,
+        expected_paths: tuple[str, ...] = (),
+        feature_id: str | None = None,
+        original_transaction_id: str | None = None,
+        expected_branch: str | None = None,
+    ) -> dict[str, Any]:
+        """Discover exact retained-result identity from its report and ledger."""
+
+        _, report, terminal = self._report(original_run_id)
+        discovered = {
+            "feature_id": self._terminal_value(
+                terminal, "feature_id", "selected_feature"
+            ),
+            "original_transaction_id": self._terminal_value(
+                terminal, "transaction_id"
+            ),
+            "original_run_id": self._terminal_value(
+                terminal, "run_id", "agent_run_id"
+            ),
+            "original_session_id": self._terminal_value(
+                terminal, "session_id"
+            ),
+            "expected_branch": self._terminal_value(
+                terminal, "starting_branch"
+            ),
+            "expected_head": self._terminal_value(
+                terminal, "starting_commit"
+            ),
+        }
+        explicit = {
+            "feature_id": feature_id,
+            "original_transaction_id": original_transaction_id,
+            "original_run_id": original_run_id,
+            "original_session_id": original_session_id,
+            "expected_branch": expected_branch,
+            "expected_head": expected_head,
+        }
+        mismatched = [
+            key
+            for key, value in explicit.items()
+            if value is not None and discovered.get(key) != value
+        ]
+        if mismatched:
+            raise RecoveryError(
+                "retained-result report identity disagrees: "
+                + ", ".join(mismatched)
+            )
+        if report.get("run_id") != original_run_id:
+            raise RecoveryError("retained-result report run identity disagrees")
+        required = (
+            "feature_id",
+            "original_transaction_id",
+            "original_run_id",
+            "original_session_id",
+            "expected_branch",
+            "expected_head",
+        )
+        missing = [
+            key
+            for key in required
+            if not isinstance(discovered.get(key), str)
+            or not discovered[key]
+        ]
+        if missing:
+            raise RecoveryError(
+                "retained-result report cannot discover exact identity: "
+                + ", ".join(missing)
+            )
+        plan = self.inspect(
+            **{key: str(discovered[key]) for key in required}
+        )
+        normalized_paths = tuple(sorted(set(expected_paths)))
+        expectation_checks = {
+            "diff_fingerprint": (
+                expected_diff_fingerprint is None
+                or plan.get("tracked_diff_fingerprint")
+                == expected_diff_fingerprint
+            ),
+            "changed_paths": (
+                not normalized_paths
+                or tuple(plan.get("changed_paths") or ())
+                == normalized_paths
+            ),
+            "expected_paths_unique": len(normalized_paths)
+            == len(expected_paths),
+        }
+        if not all(expectation_checks.values()):
+            failed = ", ".join(
+                key
+                for key, passed in expectation_checks.items()
+                if not passed
+            )
+            raise RecoveryError(
+                "retained-result command expectations disagree: " + failed
+            )
+        return {
+            **plan,
+            "command_expectation_checks": expectation_checks,
+            "identity_discovered_from_report_and_ledger": True,
+        }
 
     def inspect(
         self,
@@ -467,8 +580,7 @@ class FeatureResultRecovery:
                 continue
             payload = candidate.get("payload") or {}
             if (
-                payload.get("run_id") != original_run_id
-                or payload.get("feature_id") != feature_id
+                payload.get("feature_id") != feature_id
             ):
                 continue
             candidate_events = [
@@ -569,6 +681,160 @@ class FeatureResultRecovery:
         preparation_projection_payload = (
             preparation_projection.get("payload")
             if isinstance(preparation_projection, dict)
+            else {}
+        )
+        preparation_terminal_sequence = max(
+            (
+                int(event.get("sequence", 0))
+                for event in preparation_events
+            ),
+            default=0,
+        )
+        prelaunch_recovery_candidates: list[
+            tuple[dict[str, Any], list[dict[str, Any]]]
+        ] = []
+        for candidate in events:
+            if (
+                candidate.get("event_type") != "TransactionStarted"
+                or candidate.get("workflow_type")
+                != WorkflowType.RECOVERY.value
+                or candidate.get("sequence", 0)
+                <= preparation_terminal_sequence
+                or candidate.get("sequence", 0)
+                >= (start or {}).get("sequence", 0)
+            ):
+                continue
+            payload = candidate.get("payload") or {}
+            if payload.get("feature_id") != feature_id:
+                continue
+            candidate_events = [
+                event
+                for event in events
+                if event["transaction_id"] == candidate["transaction_id"]
+            ]
+            recovery_applied = next(
+                (
+                    event
+                    for event in candidate_events
+                    if event.get("event_type") == "RecoveryApplied"
+                    and event.get("payload", {}).get("classification")
+                    == "FEATURE_PRELAUNCH_RECOVERY"
+                ),
+                None,
+            )
+            completed = next(
+                (
+                    event
+                    for event in candidate_events
+                    if event.get("event_type") == "TransactionCompleted"
+                    and event.get("payload", {}).get("classification")
+                    == "RECOVERY_APPLIED"
+                    and event.get("payload", {}).get("next_state")
+                    == "feature_preparing"
+                ),
+                None,
+            )
+            if recovery_applied and completed:
+                prelaunch_recovery_candidates.append(
+                    (candidate, candidate_events)
+                )
+        prelaunch_recovery = (
+            prelaunch_recovery_candidates[0]
+            if len(prelaunch_recovery_candidates) == 1
+            else None
+        )
+        prelaunch_start = (
+            prelaunch_recovery[0] if prelaunch_recovery else None
+        )
+        prelaunch_events = (
+            prelaunch_recovery[1] if prelaunch_recovery else []
+        )
+        prelaunch_by_type = {
+            event["event_type"]: event
+            for event in prelaunch_events
+        }
+        prelaunch_start_payload = (
+            prelaunch_start.get("payload")
+            if isinstance(prelaunch_start, dict)
+            else {}
+        )
+        prelaunch_snapshot = (
+            prelaunch_by_type.get("SnapshotCaptured", {})
+            .get("payload", {})
+            .get("snapshot")
+            or {}
+        )
+        prelaunch_checkpoint = (
+            prelaunch_by_type.get("CheckpointRecorded", {})
+            .get("payload", {})
+        )
+        prelaunch_deterministic_start = (
+            prelaunch_by_type.get("DeterministicExecutionStarted", {})
+            .get("payload", {})
+        )
+        prelaunch_deterministic_result = (
+            prelaunch_by_type.get("DeterministicResultAccepted", {})
+            .get("payload", {})
+        )
+        prelaunch_changes = (
+            prelaunch_by_type.get("ChangesDetected", {})
+            .get("payload", {})
+        )
+        prelaunch_validation = (
+            prelaunch_by_type.get("ValidationPassed", {})
+            .get("payload", {})
+        )
+        prelaunch_commit = (
+            prelaunch_by_type.get("CommitFinalized", {})
+            .get("payload", {})
+        )
+        prelaunch_applied = (
+            prelaunch_by_type.get("RecoveryApplied", {})
+            .get("payload", {})
+        )
+        prelaunch_completed = (
+            prelaunch_by_type.get("TransactionCompleted", {})
+            .get("payload", {})
+        )
+        prelaunch_terminal_snapshot = (
+            prelaunch_completed.get("terminal_snapshot") or {}
+        )
+        prelaunch_projection = (
+            prelaunch_by_type.get("ProjectionUpdated", {})
+            .get("payload", {})
+        )
+        failed_prelaunch_transaction_id = prelaunch_checkpoint.get(
+            "failed_transaction_id"
+        )
+        failed_prelaunch_events = [
+            event
+            for event in events
+            if event["transaction_id"] == failed_prelaunch_transaction_id
+        ]
+        failed_prelaunch_start = next(
+            (
+                event
+                for event in failed_prelaunch_events
+                if event.get("event_type") == "TransactionStarted"
+            ),
+            None,
+        )
+        failed_prelaunch_terminal = next(
+            (
+                event
+                for event in failed_prelaunch_events
+                if event.get("event_type") == "TransactionBlocked"
+            ),
+            None,
+        )
+        failed_prelaunch_start_payload = (
+            failed_prelaunch_start.get("payload")
+            if isinstance(failed_prelaunch_start, dict)
+            else {}
+        )
+        failed_prelaunch_terminal_payload = (
+            failed_prelaunch_terminal.get("payload")
+            if isinstance(failed_prelaunch_terminal, dict)
             else {}
         )
         start_policy = start_payload.get("allowed_mutation_policy")
@@ -681,7 +947,6 @@ class FeatureResultRecovery:
             preparation_start
             and len(preparation_candidates) == 1
             and preparation_payload.get("feature_id") == feature_id
-            and preparation_payload.get("run_id") == original_run_id
             and preparation_payload.get("starting_head") == expected_head
             and preparation_terminal_payload.get("classification")
             == "FEATURE_PREPARED"
@@ -701,6 +966,139 @@ class FeatureResultRecovery:
             ).get("payload", {}).get("session_id")
             == "deterministic-feature-preparation:"
             + str(preparation_start.get("transaction_id"))
+        )
+        failed_prelaunch_authenticated = bool(
+            failed_prelaunch_start
+            and failed_prelaunch_terminal
+            and failed_prelaunch_start.get("workflow_type")
+            == WorkflowType.FEATURE_EXECUTION.value
+            and failed_prelaunch_start_payload.get("feature_id") == feature_id
+            and failed_prelaunch_start_payload.get("starting_branch")
+            == expected_branch
+            and failed_prelaunch_start_payload.get("starting_head")
+            == expected_head
+            and failed_prelaunch_start_payload.get(
+                "starting_queue_fingerprint"
+            )
+            == start_payload.get("starting_queue_fingerprint")
+            and not any(
+                event.get("event_type") == "SessionLaunched"
+                for event in failed_prelaunch_events
+            )
+            and failed_prelaunch_terminal_payload.get("classification")
+            == "FEATURE_VALIDATION_FAILED"
+            and failed_prelaunch_terminal_payload.get("next_state")
+            == "validation_failed"
+            and failed_prelaunch_terminal_payload.get("reference")
+            == "UnicodeDecodeError"
+            and int(failed_prelaunch_start.get("sequence", 0))
+            > preparation_terminal_sequence
+            and int(failed_prelaunch_terminal.get("sequence", 0))
+            < int((prelaunch_start or {}).get("sequence", 0))
+        )
+        prelaunch_recovery_authenticated = bool(
+            feature_id == "F070"
+            and prelaunch_start
+            and len(prelaunch_recovery_candidates) == 1
+            and failed_prelaunch_authenticated
+            and prelaunch_start_payload.get("feature_id") == feature_id
+            and prelaunch_start_payload.get("starting_branch")
+            == expected_branch
+            and prelaunch_start_payload.get("starting_head") == expected_head
+            and prelaunch_start_payload.get("starting_queue_fingerprint")
+            == start_payload.get("starting_queue_fingerprint")
+            and prelaunch_start_payload.get(
+                "starting_tracked_diff_fingerprint"
+            )
+            == hashlib.sha256(b"").hexdigest()
+            and prelaunch_start_payload.get("starting_untracked_fingerprint")
+            == fingerprint({})
+            and prelaunch_snapshot.get("branch") == expected_branch
+            and prelaunch_snapshot.get("head") == expected_head
+            and prelaunch_snapshot.get("queue_fingerprint")
+            == start_payload.get("starting_queue_fingerprint")
+            and prelaunch_snapshot.get("tracked_changed_paths") == []
+            and prelaunch_snapshot.get("untracked_paths") == []
+            and prelaunch_checkpoint.get("checkpoint")
+            == "feature_prelaunch_recovery_authenticated"
+            and prelaunch_checkpoint.get("model_sessions_launched") == 0
+            and prelaunch_checkpoint.get("child_sessions_launched") == 0
+            and prelaunch_checkpoint.get("implementation_attempts_consumed")
+            == 0
+            and prelaunch_deterministic_start.get("execution_mode")
+            == "feature_prelaunch_recovery"
+            and prelaunch_deterministic_start.get("model_session_launched")
+            is False
+            and prelaunch_deterministic_start.get("child_sessions_launched")
+            == 0
+            and prelaunch_deterministic_start.get("plan_fingerprint")
+            == prelaunch_deterministic_result.get("plan_fingerprint")
+            and prelaunch_deterministic_result.get("classification")
+            == "RECOVERY_APPLIED"
+            and prelaunch_changes.get("changed_paths") == []
+            and prelaunch_validation.get("checks", {}).get(
+                "application_unchanged"
+            )
+            is True
+            and prelaunch_validation.get("checks", {}).get(
+                "model_sessions_launched"
+            )
+            == 0
+            and prelaunch_validation.get("checks", {}).get(
+                "child_sessions_launched"
+            )
+            == 0
+            and prelaunch_commit.get("no_change") is True
+            and prelaunch_commit.get("commit") == expected_head
+            and prelaunch_applied.get("classification")
+            == "FEATURE_PRELAUNCH_RECOVERY"
+            and prelaunch_applied.get("selected_feature") == feature_id
+            and prelaunch_completed.get("feature_id") == feature_id
+            and prelaunch_completed.get("feature_commit_created") is False
+            and prelaunch_completed.get("model_session_launched") is False
+            and prelaunch_completed.get("child_sessions_launched") == 0
+            and prelaunch_terminal_snapshot.get("branch") == expected_branch
+            and prelaunch_terminal_snapshot.get("head") == expected_head
+            and prelaunch_terminal_snapshot.get("clean") is True
+            and prelaunch_terminal_snapshot.get("queue_fingerprint")
+            == start_payload.get("starting_queue_fingerprint")
+            and prelaunch_projection.get("current_state")
+            == "feature_preparing"
+            and prelaunch_projection.get("current_feature") == feature_id
+            and prelaunch_projection.get("selected_feature") == feature_id
+            and int(
+                prelaunch_by_type.get("ProjectionUpdated", {}).get(
+                    "sequence", 0
+                )
+            )
+            < int((start or {}).get("sequence", 0))
+        )
+        same_run_prepared_execution = bool(
+            preparation_authenticated
+            and preparation_payload.get("run_id") == original_run_id
+        )
+        preparation_lineage_authenticated = bool(
+            preparation_authenticated
+            and (
+                same_run_prepared_execution
+                or prelaunch_recovery_authenticated
+            )
+        )
+        queue_in_progress_owned_by_execution = bool(
+            isinstance(feature, dict)
+            and feature.get("status") == "in_progress"
+            and preparation_lineage_authenticated
+            and (
+                same_run_prepared_execution
+                or (
+                    prelaunch_recovery_authenticated
+                    and self.project.queue_location in changed_paths
+                    and starting_snapshot.get("queue_fingerprint")
+                    != terminal_snapshot.get("queue_fingerprint")
+                    and terminal_snapshot.get("queue_fingerprint")
+                    == current_snapshot.queue_fingerprint
+                )
+            )
         )
         phase_feature_identity = {
             "transaction_feature_id": start_payload.get("feature_id"),
@@ -846,10 +1244,21 @@ class FeatureResultRecovery:
                 )
             ),
             "preparation_topology": (
-                preparation_authenticated
+                preparation_lineage_authenticated
                 if isinstance(feature, dict)
                 and feature.get("status") == "in_progress"
                 else not preparation_candidates or preparation_authenticated
+            ),
+            "preparation_execution_lineage": (
+                preparation_lineage_authenticated
+                if isinstance(feature, dict)
+                and feature.get("status") == "in_progress"
+                else True
+            ),
+            "prelaunch_recovery_topology": (
+                prelaunch_recovery_authenticated
+                if prelaunch_recovery_candidates
+                else True
             ),
             "projection_transaction_inactive": projection.get(
                 "active_transaction"
@@ -870,10 +1279,13 @@ class FeatureResultRecovery:
             "queue_feature_recoverable": isinstance(feature, dict)
             and (
                 feature.get("status") == "ready"
-                or (
-                    feature.get("status") == "in_progress"
-                    and preparation_authenticated
-                )
+                or queue_in_progress_owned_by_execution
+            ),
+            "queue_in_progress_owned_by_execution": (
+                queue_in_progress_owned_by_execution
+                if isinstance(feature, dict)
+                and feature.get("status") == "in_progress"
+                else True
             ),
             "queue_decision_approved": isinstance(feature, dict)
             and feature.get("requires_human_decision") is False
@@ -891,6 +1303,23 @@ class FeatureResultRecovery:
             "original_transaction_not_recovered": not accepted_events,
             "application_commit_absent": not subject_commits,
             "commit_subject_exact": isinstance(subject, str) and bool(subject),
+            "autopilot_ownership_absent": not (
+                self.controller_root
+                / "state"
+                / "autopilot"
+                / self.project.project_id
+                / "ownership.json"
+            ).exists(),
+            "live_session_absent": projection.get("active_transaction") is None
+            and not writer.exists,
+            "exact_f070_terminal_report": (
+                report.get("exit_classification")
+                == "structured_output_invalid"
+                and report.get("structured_output_validation") == "invalid"
+                and not untracked_paths
+                if prelaunch_recovery_authenticated
+                else True
+            ),
         }
         if not all(checks.values()):
             failed = ", ".join(
@@ -930,6 +1359,33 @@ class FeatureResultRecovery:
             "preparation_event_fingerprints": [
                 event["fingerprint"] for event in preparation_events
             ],
+            "prelaunch_recovery_transaction_id": (
+                prelaunch_start["transaction_id"]
+                if prelaunch_start
+                else None
+            ),
+            "prelaunch_recovery_event_fingerprints": [
+                event["fingerprint"] for event in prelaunch_events
+            ],
+            "failed_prelaunch_transaction_id": (
+                failed_prelaunch_transaction_id
+                if prelaunch_recovery_authenticated
+                else None
+            ),
+            "transaction_lineage": {
+                "preparation_transaction_id": (
+                    preparation_start["transaction_id"]
+                    if preparation_start
+                    else None
+                ),
+                "prelaunch_recovery_transaction_id": (
+                    prelaunch_start["transaction_id"]
+                    if prelaunch_start
+                    else None
+                ),
+                "execution_transaction_id": original_transaction_id,
+                "continuous": preparation_lineage_authenticated,
+            },
             "phase_feature_identity": phase_feature_identity,
             "original_gate_id": gate["gate_id"],
             "original_gate_fingerprint": fingerprint(gate),
@@ -1575,7 +2031,10 @@ class FeatureResultRecovery:
 
     def _apply_f003(self, plan: dict[str, Any]) -> dict[str, Any]:
         if plan.get("plan_fingerprint") != fingerprint({
-            key: value for key, value in plan.items() if key != "plan_fingerprint"
+            key: value
+            for key, value in plan.items()
+            if key != "plan_fingerprint"
+            and key not in _COMMAND_DISCOVERY_FIELDS
         }):
             raise RecoveryError("F003 recovery plan fingerprint is invalid")
         run_id = f"feature-recovery-{uuid.uuid4()}"
@@ -1855,6 +2314,7 @@ class FeatureResultRecovery:
                 key: value
                 for key, value in plan.items()
                 if key != "plan_fingerprint"
+                and key not in _COMMAND_DISCOVERY_FIELDS
             }
         )
         if plan.get("plan_fingerprint") != expected_fingerprint:

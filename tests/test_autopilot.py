@@ -454,7 +454,12 @@ class AutopilotTests(unittest.TestCase):
                 {
                     "outcome": "human_decision_required",
                     "human_gate": {
-                        "classification": "structured_output_invalid"
+                        "classification": "structured_output_invalid",
+                        "gate_id": "technical-gate",
+                    },
+                    "retained_result": {
+                        "transaction_id": "execution-transaction",
+                        "result_classification": "structured_output_invalid",
                     },
                 },
                 {"outcome": "unused"},
@@ -487,6 +492,11 @@ class AutopilotTests(unittest.TestCase):
         self.assertIn("RECOVERY_STARTED", events)
         self.assertIn("RECOVERY_APPLIED", events)
         self.assertIn("FEATURE_INTEGRATED", events)
+        self.assertEqual(1, events.count("FEATURE_RESULT_RETAINED"))
+        self.assertLess(
+            events.index("FEATURE_RESULT_RETAINED"),
+            events.index("RECOVERY_STARTED"),
+        )
         self.assertNotIn("FEATURE_BLOCKED", events)
 
     def test_failed_retained_validation_auto_repairs_and_continues(self):

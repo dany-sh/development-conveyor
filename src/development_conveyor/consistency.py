@@ -330,10 +330,35 @@ class ConsistencyChecker:
             == sorted(self.inspector.tracked_changed_paths())
             and not self.inspector.untracked_file_hashes()
         )
+        feature_result_recovery = (
+            planner_status.get("feature_result_recovery")
+            if isinstance(planner_status, dict)
+            else None
+        )
+        current_untracked_hashes = self.inspector.untracked_file_hashes()
+        exact_feature_result_recovery = bool(
+            isinstance(planner_status, dict)
+            and planner_status.get("proposed_next_action")
+            == "feature_result_recovery"
+            and planner_status.get("transaction_mode") == "recovery"
+            and isinstance(feature_result_recovery, dict)
+            and feature_result_recovery.get("evidence_authenticated") is True
+            and feature_result_recovery.get("changed_paths")
+            == sorted(self.inspector.tracked_changed_paths())
+            and feature_result_recovery.get("tracked_diff_fingerprint")
+            == self.inspector.planning_diff_fingerprint()
+            and feature_result_recovery.get("untracked_fingerprint")
+            == fingerprint(current_untracked_hashes)
+            and not current_untracked_hashes
+            and planner_status.get("model_sessions_that_would_launch") == []
+            and planner_status.get("child_sessions_that_would_launch") == []
+            and planner_status.get("sessions_that_would_launch") == []
+        )
         recoverable_dirty = bool(
             active_transaction
             and (ledger_projection or {}).get("session_resume_eligible")
             or exact_planning_recovery
+            or exact_feature_result_recovery
         )
         add(
             "worktree_status",
@@ -344,8 +369,15 @@ class ConsistencyChecker:
                 "dirty_entries": len(self.inspector.dirty_entries),
                 "exact_recorded_transaction": recoverable_dirty,
                 "planning_finalization_recovery": exact_planning_recovery,
+                "feature_result_recovery": exact_feature_result_recovery,
             },
-            diagnostic="dirty worktree is not explained by an active transaction",
+            diagnostic=(
+                "dirty worktree is authenticated as a deterministic retained "
+                "feature-result recovery"
+                if exact_feature_result_recovery
+                else "dirty worktree is not explained by an active "
+                "transaction or authenticated deterministic recovery"
+            ),
         )
 
         # An active transaction is recoverable only when its exact repository
@@ -1385,6 +1417,77 @@ class ConsistencyChecker:
                     "planning_finalization_recovery_precedes_ordinary_routing": agreement,
                 }
                 observation_source = "planning_finalization_recovery_plan"
+            if (
+                isinstance(status, dict)
+                and status.get("workflow_type") == "feature_result_recovery"
+                and canonical_projection is not None
+            ):
+                recovery = status.get("feature_result_recovery") or {}
+                canonical_gate = canonical_projection.get("human_gate") or {}
+                feature_recovery_checks = {
+                    "workflow_precedence": status.get("proposed_next_action")
+                    == "feature_result_recovery",
+                    "transaction_mode": status.get("transaction_mode")
+                    == "recovery",
+                    "technical_recovery_state": status.get("current_state")
+                    == "technical_recovery_required",
+                    "canonical_state": canonical_projection.get("current_state")
+                    == "human_decision_required",
+                    "canonical_feature": status.get("selected_feature")
+                    == canonical_projection.get("current_feature")
+                    == recovery.get("feature_id"),
+                    "evidence_authenticated": recovery.get(
+                        "evidence_authenticated"
+                    )
+                    is True,
+                    "original_transaction": recovery.get(
+                        "original_transaction_id"
+                    )
+                    == canonical_gate.get("transaction_id"),
+                    "exact_gate": recovery.get("original_gate_id")
+                    == canonical_gate.get("gate_id"),
+                    "exact_changed_paths": recovery.get("changed_paths")
+                    == sorted(self.inspector.tracked_changed_paths()),
+                    "exact_tracked_fingerprint": recovery.get(
+                        "tracked_diff_fingerprint"
+                    )
+                    == self.inspector.planning_diff_fingerprint(),
+                    "exact_untracked_fingerprint": recovery.get(
+                        "untracked_fingerprint"
+                    )
+                    == fingerprint(self.inspector.untracked_file_hashes()),
+                    "no_untracked_paths": not self.inspector.untracked_file_hashes(),
+                    "no_models": status.get(
+                        "model_sessions_that_would_launch"
+                    )
+                    == [],
+                    "no_children": status.get(
+                        "child_sessions_that_would_launch"
+                    )
+                    == [],
+                    "no_sessions": status.get("sessions_that_would_launch")
+                    == [],
+                    "integration_pending_stop": recovery.get(
+                        "final_projected_state"
+                    )
+                    == "integration_pending",
+                    "no_queue_reconciliation": recovery.get(
+                        "queue_reconciliation_performed"
+                    )
+                    is False,
+                    "no_integration": recovery.get(
+                        "milestone_integration_performed"
+                    )
+                    is False,
+                }
+                agreement = all(feature_recovery_checks.values())
+                agreement_evidence = {
+                    "checks": feature_recovery_checks,
+                    "feature_result_recovery_precedes_human_resolution": (
+                        agreement
+                    ),
+                }
+                observation_source = "feature_result_recovery_plan"
             agreement_evidence["observation_source"] = observation_source
             add(
                 "execution_plan_projection_agreement",
