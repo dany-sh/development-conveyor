@@ -17,3 +17,4 @@
 | M1-017 | Retained feature terminal-state transition | review | M1 | `docs/features/M1-017-retained-feature-terminal-transition.md` |
 | M1-018 | Deterministic execution-policy finalization | review | M1 | `docs/features/M1-018-deterministic-execution-policy-finalization.md` |
 | M1-019 | GPT-5.3-Codex application-feature routing | review | M1 | `docs/features/M1-019-gpt-5-3-codex-application-routing.md` |
+| M1-020 | Checkpoint-aware retained feature-result recovery | review | M1 | `docs/features/M1-020-checkpoint-aware-feature-result-recovery.md` |

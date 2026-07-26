@@ -16,7 +16,11 @@ from development_conveyor.cycle_cache_repair import (
 from development_conveyor.cycle_engine import CycleEngine
 from development_conveyor.errors import RecoveryError
 from development_conveyor.feature_result_recovery import (
+    AUTHENTICATED_FEATURE_SESSION_CHECKPOINT,
+    CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY,
     FeatureResultRecovery,
+    LEGACY_RETAINED_RESULT_TOPOLOGY,
+    _authenticate_original_transaction_topology,
     _changed_paths,
 )
 from development_conveyor.retained_feature_repair import (
@@ -323,6 +327,7 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
         preparation_run_id: str | None = None,
         prelaunch_recovery: bool = False,
         malformed_factory_position: bool = False,
+        execution_checkpoint_payload: dict | None = None,
     ):
         repository, project = synthetic_repository(root)
         queue_path = repository / project.queue_location
@@ -795,6 +800,13 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
             workflow_type=WorkflowType.FEATURE_EXECUTION,
             payload={"session_id": self.ORIGINAL_SESSION},
         )
+        if execution_checkpoint_payload is not None:
+            ledger.append(
+                event_type="CheckpointRecorded",
+                transaction_id=self.ORIGINAL_TRANSACTION,
+                workflow_type=WorkflowType.FEATURE_EXECUTION,
+                payload=execution_checkpoint_payload,
+            )
         gate = bind_human_gate(
             {
                 "classification": "structured_output_invalid",
@@ -930,6 +942,272 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
             expected_branch=self.BRANCH,
             expected_head=head,
         )
+
+    def _topology_events(
+        self,
+        event_types: tuple[str, ...],
+        *,
+        checkpoint_payload: dict | None = None,
+        checkpoint_transaction: str | None = None,
+        broken_chain_at: int | None = None,
+    ) -> list[dict]:
+        events = []
+        previous = "prior-ledger-fingerprint"
+        for index, event_type in enumerate(event_types, start=1):
+            payload = {}
+            if event_type == "TransactionStarted":
+                payload = {"run_id": self.ORIGINAL_RUN}
+            elif event_type == "SessionLaunched":
+                payload = {"session_id": self.ORIGINAL_SESSION}
+            elif event_type == "CheckpointRecorded":
+                payload = dict(
+                    checkpoint_payload
+                    if checkpoint_payload is not None
+                    else AUTHENTICATED_FEATURE_SESSION_CHECKPOINT
+                )
+            event = {
+                "sequence": index,
+                "fingerprint": f"fingerprint-{index}",
+                "previous_fingerprint": (
+                    "broken-fingerprint"
+                    if broken_chain_at == index
+                    else previous
+                ),
+                "event_type": event_type,
+                "transaction_id": (
+                    checkpoint_transaction
+                    if event_type == "CheckpointRecorded"
+                    and checkpoint_transaction is not None
+                    else self.ORIGINAL_TRANSACTION
+                ),
+                "project_id": "synthetic",
+                "repository_identity": "repository-identity",
+                "repository_path_fingerprint": "repository-path-fingerprint",
+                "workflow_type": WorkflowType.FEATURE_EXECUTION.value,
+                "payload": payload,
+            }
+            events.append(event)
+            previous = event["fingerprint"]
+        return events
+
+    def _authenticate_topology(self, events: list[dict]) -> dict:
+        return _authenticate_original_transaction_topology(
+            events,
+            transaction_id=self.ORIGINAL_TRANSACTION,
+            project_id="synthetic",
+            repository_identity="repository-identity",
+            repository_path_fingerprint="repository-path-fingerprint",
+            run_id=self.ORIGINAL_RUN,
+            session_id=self.ORIGINAL_SESSION,
+        )
+
+    def test_legacy_and_checkpoint_aware_topologies_are_both_exact(self):
+        legacy = self._authenticate_topology(
+            self._topology_events(LEGACY_RETAINED_RESULT_TOPOLOGY)
+        )
+        checkpoint_aware = self._authenticate_topology(
+            self._topology_events(CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY)
+        )
+        self.assertTrue(legacy["authenticated"])
+        self.assertEqual("pre_m1_017", legacy["variant"])
+        self.assertTrue(checkpoint_aware["authenticated"])
+        self.assertEqual(
+            "m1_017_authenticated_session_checkpoint",
+            checkpoint_aware["variant"],
+        )
+
+    def test_checkpoint_payload_is_exact_and_duplicate_or_misplaced_is_rejected(self):
+        malformed_payloads = (
+            {
+                **AUTHENTICATED_FEATURE_SESSION_CHECKPOINT,
+                "checkpoint": "wrong",
+            },
+            {
+                **AUTHENTICATED_FEATURE_SESSION_CHECKPOINT,
+                "previous_phase": "feature_preparing",
+            },
+            {
+                **AUTHENTICATED_FEATURE_SESSION_CHECKPOINT,
+                "next_phase": "feature_running",
+            },
+            {
+                **AUTHENTICATED_FEATURE_SESSION_CHECKPOINT,
+                "extra": True,
+            },
+        )
+        for payload in malformed_payloads:
+            with self.subTest(payload=payload):
+                authenticated = self._authenticate_topology(
+                    self._topology_events(
+                        CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY,
+                        checkpoint_payload=payload,
+                    )
+                )
+                self.assertFalse(authenticated["authenticated"])
+                self.assertFalse(
+                    authenticated["checks"]["checkpoint_payload_exact"]
+                )
+
+        invalid_topologies = (
+            CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY[:5]
+            + ("CheckpointRecorded",)
+            + CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY[5:],
+            (
+                "TransactionStarted",
+                "LeaseAcquired",
+                "SnapshotCaptured",
+                "CheckpointRecorded",
+                "SessionLaunched",
+                "HumanGateRaised",
+                "LeaseReleased",
+                "ProjectionUpdated",
+            ),
+            (
+                "TransactionStarted",
+                "LeaseAcquired",
+                "SnapshotCaptured",
+                "SessionLaunched",
+                "HumanGateRaised",
+                "CheckpointRecorded",
+                "LeaseReleased",
+                "ProjectionUpdated",
+            ),
+        )
+        for topology in invalid_topologies:
+            with self.subTest(topology=topology):
+                authenticated = self._authenticate_topology(
+                    self._topology_events(topology)
+                )
+                self.assertFalse(authenticated["authenticated"])
+
+    def test_checkpoint_lineage_terminal_and_fingerprint_chain_fail_closed(self):
+        foreign = self._authenticate_topology(
+            self._topology_events(
+                CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY,
+                checkpoint_transaction="foreign-transaction",
+            )
+        )
+        self.assertFalse(foreign["authenticated"])
+        self.assertFalse(foreign["checks"]["event_lineage_exact"])
+
+        invalid_topologies = (
+            tuple(
+                event
+                for event in CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY
+                if event != "SessionLaunched"
+            ),
+            tuple(
+                event
+                for event in CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY
+                if event != "HumanGateRaised"
+            ),
+            CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY[:6]
+            + ("HumanGateRaised",)
+            + CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY[6:],
+            CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY[:5]
+            + ("ValidationStarted",)
+            + CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY[5:],
+        )
+        for topology in invalid_topologies:
+            with self.subTest(topology=topology):
+                self.assertFalse(
+                    self._authenticate_topology(
+                        self._topology_events(topology)
+                    )["authenticated"]
+                )
+
+        broken = self._authenticate_topology(
+            self._topology_events(
+                CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY,
+                broken_chain_at=5,
+            )
+        )
+        self.assertFalse(broken["authenticated"])
+        self.assertFalse(
+            broken["checks"]["events_are_globally_contiguous"]
+        )
+
+    def test_checkpoint_aware_retained_result_authenticates_full_recovery_plan(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            configuration, project, head, changed, gate = self._fixture(
+                Path(temporary),
+                prepared=True,
+                execution_checkpoint_payload=(
+                    AUTHENTICATED_FEATURE_SESSION_CHECKPOINT
+                ),
+            )
+            recovery = self._recovery(configuration, project)
+            before = (
+                git(project.repository, "status", "--porcelain=v1", "--branch"),
+                recovery.ledger.path.read_bytes(),
+                recovery.projection.cache_path.read_bytes(),
+            )
+            inspected = self._inspect(recovery, head)
+            after = (
+                git(project.repository, "status", "--porcelain=v1", "--branch"),
+                recovery.ledger.path.read_bytes(),
+                recovery.projection.cache_path.read_bytes(),
+            )
+            self.assertEqual(before, after)
+            self.assertEqual(
+                "m1_017_authenticated_session_checkpoint",
+                inspected["original_transaction_topology"]["variant"],
+            )
+            self.assertEqual(list(changed), inspected["changed_paths"])
+            self.assertEqual(gate["gate_id"], inspected["original_gate_id"])
+            self.assertEqual(0, inspected["model_sessions_that_would_launch"])
+            self.assertEqual(0, inspected["child_sessions_that_would_launch"])
+            self.assertEqual(
+                "integration_pending", inspected["final_projected_state"]
+            )
+            controller_cache = (
+                configuration.root
+                / "state/projects"
+                / f"{project.project_id}.json"
+            )
+            controller_cache.unlink()
+            engine = CycleEngine(configuration, SyntheticLauncher())
+            status = engine.project_plan(project)
+            self.assertEqual(
+                "feature_result_recovery",
+                status["proposed_next_action"],
+            )
+            self.assertEqual(
+                "technical_recovery_required", status["current_state"]
+            )
+            self.assertFalse(status["ordinary_resume_allowed"])
+            self.assertIsNone(status["human_gate"])
+
+    def test_checkpoint_aware_synthetic_apply_creates_one_direct_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            configuration, project, head, changed, gate = self._fixture(
+                Path(temporary),
+                prepared=True,
+                execution_checkpoint_payload=(
+                    AUTHENTICATED_FEATURE_SESSION_CHECKPOINT
+                ),
+            )
+            recovery = self._recovery(configuration, project)
+            result = recovery.apply(self._inspect(recovery, head))
+            inspector = RepositoryInspector(project.repository)
+            self.assertEqual("integration_pending", result["outcome"])
+            self.assertEqual(head, inspector.rev_parse(f"{inspector.head}^"))
+            self.assertEqual(
+                result["accepted_feature_commit"], inspector.head
+            )
+            self.assertTrue(set(changed).issubset(
+                inspector.changed_paths(inspector.head)
+            ))
+            self.assertEqual(gate["gate_id"], result["resolved_gate_id"])
+            self.assertEqual(0, result["model_sessions_launched"])
+            self.assertEqual(0, result["child_sessions_launched"])
+            self.assertFalse(result["milestone_integration_performed"])
+            self.assertFalse(result["queue_reconciliation_performed"])
+            self.assertFalse(
+                (
+                    project.repository / ".factory/locks/writer.json"
+                ).exists()
+            )
 
     def _failed_recovery_fixture(self, root: Path):
         configuration, project, head, changed, gate = self._fixture(

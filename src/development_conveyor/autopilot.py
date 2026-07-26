@@ -16,7 +16,10 @@ from .config import Configuration
 from .consistency import ConsistencyChecker
 from .cycle_engine import CycleEngine
 from .cycle_cache_repair import CycleCacheRepair
-from .feature_result_recovery import FeatureResultRecovery
+from .feature_result_recovery import (
+    FEATURE_RESULT_RECOVERY_CAPABILITY_VERSION,
+    FeatureResultRecovery,
+)
 from .retained_feature_repair import (
     RetainedFeatureRepairRecovery,
     RetainedFeatureValidationRepair,
@@ -35,6 +38,7 @@ from .logging import atomic_write_json, utc_now
 from .redaction import redact_text
 from .registry import Project
 from .repository import RepositoryInspector
+from .snapshots import capture_repository_snapshot
 from .workflow_lease import process_start_evidence
 
 
@@ -793,6 +797,74 @@ class Autopilot:
             json.dumps(evidence, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
 
+    def _deterministic_recovery_evidence(
+        self,
+        action: str,
+        plan: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        route_evidence = plan.get(action)
+        if not isinstance(route_evidence, dict):
+            route_evidence = {}
+        capability_version = str(
+            route_evidence.get("recovery_capability_version")
+            or (
+                FEATURE_RESULT_RECOVERY_CAPABILITY_VERSION
+                if action == "feature_result_recovery"
+                else "deterministic-recovery-v1"
+            )
+        )
+        projection = self._projection(plan)
+        snapshot = capture_repository_snapshot(self.project).to_dict()
+        diagnostic = str(
+            result.get("reason")
+            or result.get("diagnostic")
+            or route_evidence.get("preflight_error")
+            or "deterministic recovery preflight failed"
+        )
+        evidence = {
+            "action": action,
+            "capability_version": capability_version,
+            "project_id": self.project.project_id,
+            "feature": self._feature(plan),
+            "state": self._state(plan),
+            "recognized_technical_recovery": plan.get(
+                "recognized_technical_recovery"
+            ),
+            "route_evidence": route_evidence,
+            "technical_gate_to_supersede": plan.get(
+                "technical_gate_to_supersede"
+            ),
+            "projection": {
+                key: projection.get(key)
+                for key in (
+                    "ledger_sequence",
+                    "ledger_fingerprint",
+                    "projection_fingerprint",
+                    "current_state",
+                    "current_feature",
+                    "selected_next_feature",
+                    "active_transaction",
+                    "human_gate",
+                )
+            },
+            "repository_snapshot": snapshot,
+            "preflight_diagnostic": diagnostic,
+        }
+        return {
+            "fingerprint": hashlib.sha256(
+                json.dumps(
+                    evidence,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "capability_version": capability_version,
+            "preflight_diagnostic": diagnostic,
+            "evidence": evidence,
+        }
+
     def _retry_budget_key(self, action: str, outcome: str) -> str:
         if "validation" in outcome.lower():
             return "validation_retries"
@@ -821,6 +893,7 @@ class Autopilot:
                     "continuous controller loop acquired exclusive project ownership"
                 ),
             )
+            pending_plan: dict[str, Any] | None = None
             while True:
                 stop = self._stop_requested()
                 if stop is not None:
@@ -839,7 +912,12 @@ class Autopilot:
                     diagnostic = "stopped at a safe transition checkpoint"
                     break
 
-                plan = self.engine.project_plan(self.project)
+                plan = (
+                    pending_plan
+                    if pending_plan is not None
+                    else self.engine.project_plan(self.project)
+                )
+                pending_plan = None
                 consistency = self._consistency()
                 classification = consistency.get("classification")
                 action = self._action(plan)
@@ -1073,6 +1151,105 @@ class Autopilot:
                     "repair_exhausted",
                 }
                 if failed:
+                    if (
+                        recovery
+                        and action in DETERMINISTIC_RECOVERY_ROUTES
+                        and outcome == "deterministic_recovery_failed"
+                    ):
+                        current_evidence = (
+                            self._deterministic_recovery_evidence(
+                                action, plan, result
+                            )
+                        )
+                        budget_key = "deterministic_recovery_attempts"
+                        counter_key = (feature, budget_key)
+                        attempts = (
+                            self._retry_counts.get(counter_key, 0) + 1
+                        )
+                        self._retry_counts[counter_key] = attempts
+                        next_plan = self.engine.project_plan(self.project)
+                        next_action = self._action(next_plan)
+                        next_evidence = (
+                            self._deterministic_recovery_evidence(
+                                next_action, next_plan, result
+                            )
+                            if next_action == action
+                            else None
+                        )
+                        unchanged = bool(
+                            next_evidence
+                            and next_evidence["fingerprint"]
+                            == current_evidence["fingerprint"]
+                        )
+                        record = (
+                            self._feature_records.setdefault(
+                                feature, {"feature": feature}
+                            )
+                            if feature is not None
+                            else None
+                        )
+                        if record is not None:
+                            record.update(
+                                {
+                                    "recovery_evidence_fingerprint": (
+                                        current_evidence["fingerprint"]
+                                    ),
+                                    "recovery_capability_version": (
+                                        current_evidence[
+                                            "capability_version"
+                                        ]
+                                    ),
+                                    "preflight_diagnostic": (
+                                        current_evidence[
+                                            "preflight_diagnostic"
+                                        ]
+                                    ),
+                                    "deterministic_recovery_attempts": (
+                                        attempts
+                                    ),
+                                    "quarantined": False,
+                                }
+                            )
+                        if unchanged:
+                            if record is not None:
+                                record["terminal_classification"] = (
+                                    "technical_recovery_required"
+                                )
+                            terminal = "AUTOPILOT_STOPPED"
+                            diagnostic = (
+                                "technical_recovery_required: "
+                                + current_evidence[
+                                    "preflight_diagnostic"
+                                ]
+                                + "; unchanged recovery evidence "
+                                + current_evidence["fingerprint"]
+                                + "; deterministic recovery was not repeated"
+                            )
+                            break
+                        if attempts > self.retry_budgets[budget_key]:
+                            self._emit(
+                                "FEATURE_BLOCKED",
+                                plan=plan,
+                                diagnostic=(
+                                    f"{budget_key} exhausted across changed "
+                                    "recovery evidence; feature quarantined in "
+                                    "autopilot evidence without being marked "
+                                    "complete"
+                                ),
+                            )
+                            if record is not None:
+                                record["quarantined"] = True
+                                record["terminal_classification"] = (
+                                    "bounded_recovery_exhausted"
+                                )
+                            terminal = "AUTOPILOT_STOPPED"
+                            diagnostic = (
+                                "recoverable technical failure: bounded "
+                                "recovery exhausted across distinct evidence"
+                            )
+                            break
+                        pending_plan = next_plan
+                        continue
                     signature = self._failure_signature(action, plan, result)
                     count = self._failure_signatures.get(signature, 0) + 1
                     self._failure_signatures[signature] = count

@@ -110,7 +110,7 @@ failure remain invalid.
 
 Cache-binding recovery provenance is transient. The recovery result, append-only evidence, and controller reports retain the applicable source and run identities, while the rewritten compatibility cycle cache contains only the common canonical schema. Deterministic rebinding may load the one historical top-level `cache_binding_recovery` object only when it contains exactly non-empty `source_transaction` and `recovery_run_id` strings; normalization validates the remaining document against the common schema and never rewrites that legacy field.
 
-Terminal feature-result recovery is a distinct zero-model transaction. The protected F003 contract remains unchanged. Later retained feature results use a general fail-closed contract that proves the exact original event topology, report and terminal-marker identity, repository, run, transaction, session, branch, HEAD, clean starting snapshot, retained tracked/untracked fingerprints and paths, untracked file hashes, current gate and projection, queue and approved-decision state, absent lease/reservation/active transaction, and absence of any prior recovery or manual feature commit. The sole workflow alias is `feature_cycle` to `feature_execution`, and it is accepted only after every surrounding feature-execution identity matches; arbitrary workflow conflicts still fail.
+Terminal feature-result recovery is a distinct zero-model transaction. The protected F003 contract and the general F068/F070/F072/F097 contract share one exact original-transaction topology authenticator. It accepts either the pre-M1-017 seven-event sequence or the eight-event M1-017 sequence with exactly one `authenticated_feature_session_launched` checkpoint between `SessionLaunched` and `HumanGateRaised`, with exact `branch_preparing` to `feature_in_progress` phases. Every event must preserve transaction, project, repository, repository-path, workflow, run, and session lineage; the sequence and fingerprint chain must be globally contiguous. Arbitrary, duplicated, misplaced, foreign, malformed, or additional checkpoints and terminal events fail closed. The remaining general contract proves report and terminal-marker identity, branch, HEAD, clean starting snapshot, retained tracked/untracked fingerprints and paths, untracked file hashes, current gate and projection, queue and approved-decision state, absent lease/reservation/active transaction, and absence of any prior recovery or manual feature commit. The sole workflow alias is `feature_cycle` to `feature_execution`, and it is accepted only after every surrounding feature-execution identity matches; arbitrary workflow conflicts still fail.
 
 An `in_progress` queue entry is recoverable only when its current diff is owned
 by the exact retained execution transaction. For the recorded F070 topology,
@@ -156,7 +156,14 @@ closed. Autopilot recognizes an exact structured-output-invalid result as this
 registered deterministic route before generic human-gate stopping, emits
 recovery lifecycle events, reloads projection, and can proceed to integration
 only from the recovered `integration_pending` state. Identical technical
-failures are bounded without creating another human gate.
+failures are not invoked twice against unchanged evidence. After one failed
+deterministic preflight, Autopilot fingerprints the route evidence, recovery
+capability version, exact diagnostic, canonical projection, technical gate,
+and live repository snapshot, then reloads the plan once. An unchanged
+fingerprint stops cleanly at `technical_recovery_required`, records one
+attempt, preserves the retained worktree, and neither quarantines the feature
+nor claims bounded exhaustion. A changed evidence or capability fingerprint
+may consume a later retry under the existing deterministic budget.
 
 Accepted-commit reconstruction is a narrower protected recovery for a completed candidate whose immutable accepted metadata is missing. Its read-only plan binds the exact historical feature and acceptance transactions, ledger tail and fingerprints, candidate, milestone parent, refs, absent lease, source/test hashes, and candidate queue snapshot. A protected failed acceptance may additionally bind one exact retained metadata-prefix path set and binary diff fingerprint; every retained file must equal the deterministic final rendering while every not-yet-written metadata file must remain byte-identical to the candidate. Extra, altered, source, test, or untracked paths fail closed. Apply revalidates the same plan under the launch reservation, adopts the exact dirty prefix when present, uses the normal deterministic accepted-commit finalizer, appends rather than rewrites ledger evidence, refreshes projection and compatibility state through the recovery transaction, and stops at `integration_ready` with `milestone_integration` as the next action. It launches no session and never integrates.
 

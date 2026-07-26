@@ -1525,3 +1525,97 @@ This log records model configuration and deterministic deployment evidence. It n
   No live application write, apply, lease, transaction, session, preparation,
   execution, test, build, Autopilot, ordinary resume, reconciliation, push,
   merge, tag, publication, deployment, or release ran.
+
+### Checkpoint-aware retained feature-result recovery — 2026-07-25
+
+- Scope: controller-only implementation on
+  `codex/m1-20-checkpoint-aware-feature-result-recovery` from exact parent
+  `693ef372ab5f8a875934c086d1a9ef091b532570`; one
+  `gpt-5.6-sol`/high interactive parent and zero child or named-agent
+  sessions.
+- Raising authority: `FeatureResultRecovery._inspect_general` and the
+  protected F003 path compared the original transaction to only
+  `TransactionStarted`, `LeaseAcquired`, `SnapshotCaptured`,
+  `SessionLaunched`, `HumanGateRaised`, `LeaseReleased`,
+  `ProjectionUpdated`. M1-017 inserts one authenticated
+  `CheckpointRecorded` between session launch and the terminal gate, so the
+  canonical F072 transaction failed
+  `original_transaction_exact_event_topology` before its remaining recovery
+  evidence could authenticate.
+- Topology repair: `_authenticate_original_transaction_topology` accepts only
+  the exact legacy sequence or the exact M1-017 sequence with one payload
+  equal to `authenticated_feature_session_launched`,
+  `previous_phase: branch_preparing`, and
+  `next_phase: feature_in_progress`. Exact transaction, project, repository,
+  repository-path, workflow, run, session, globally contiguous sequence, and
+  previous-fingerprint lineage are required. Missing, duplicate, misplaced,
+  foreign, malformed, unrelated, missing-terminal, duplicate-terminal, and
+  broken-chain variants fail closed. F003, F068, F070, F072, and F097 share
+  the matcher; the existing `feature_cycle` to `feature_execution` alias is
+  unchanged.
+- Autopilot suppression: after one deterministic preflight failure, Autopilot
+  fingerprints the complete route evidence, recovery capability version,
+  exact diagnostic, canonical projection identity, technical gate, and live
+  repository snapshot, then reloads the plan once. Unchanged evidence stops
+  at `technical_recovery_required`, records one attempt and the exact
+  diagnostic/fingerprint, preserves the retained worktree, and neither
+  repeats the route, quarantines the feature, marks it complete, nor claims
+  bounded exhaustion. Changed evidence or capability permits a later bounded
+  retry.
+- Focused validation: 54/54 retained-result and Autopilot tests passed,
+  including live-style checkpoint inspection, every named malformed topology,
+  status precedence, ordinary-resume rejection, unchanged-evidence
+  suppression, changed-evidence retry, and a disposable synthetic apply that
+  creates one direct-child commit and stops at `integration_pending`.
+  Another 131/131 focused M1-015 through M1-019 context, prelaunch,
+  execution-plan, state-machine, execution-policy, planning, policy-rebind,
+  projection, and cache regressions passed. The distinct focused total is
+  185.
+- Baseline exclusions: a wider diagnostic run passed 210/214 tests. The two
+  already documented mutable-live-ledger F097 post-transition cache fixtures
+  remain excluded. Two legacy CLI compatibility expectations also fail
+  unchanged in an isolated archive of exact starting commit `693ef372`;
+  neither touches the changed topology or Autopilot suppression surfaces.
+  The complete controller suite was not run.
+- Deterministic validators: Python compilation, `validate-config`,
+  JSON-compatible controller queue/config parsing, CLI help and required-mode
+  rejection, profile-aware `personal_private` content audit over 263 files
+  with no hard gate, and `git diff --check` passed.
+- Live consistency and status: `verify-consistency` reports `CONSISTENT` with
+  no failed invariant. `worktree_status` authenticates the exact 12-path dirty
+  F072 result, and `execution_plan_projection_agreement` passes. Status is
+  `technical_recovery_required`, proposes `feature_result_recovery`, sets
+  `ordinary_resume_allowed: false`, exposes no active human-resolution route,
+  and identifies gate `gate-3035b9a4d00f239afcbbb39d672ddf0f` for later
+  supersession.
+- Live dry-run: original run `e5a1e74f-dde2-4874-832e-64303a54f44b`,
+  transaction `6fb8645d-740e-4acc-9f5c-973964daf01a`, session
+  `019f9cd5-e590-7800-a1a9-9b220c191419`, branch
+  `codex/F072-job-application-detail-workspace`, HEAD
+  `b745d648f406ab5a2024d9ea07198c187024e135`, all 12 tracked paths,
+  fingerprint
+  `59d0c8b8af72054fef8ff207f33dc08a70f783b99c4c7c3006560b198d7c5e62`,
+  empty untracked paths, and empty-map fingerprint
+  `44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a`
+  all authenticate. Apply would run `swift test --filter DomainModelTests`,
+  `swift build`, and `git diff --check`, create exactly one accepted commit
+  with direct parent `b745d648`, supersede and resolve the bound gate, and
+  stop at `integration_pending` without reconciliation or integration.
+- Isolation: live apply, ordinary resume, Autopilot, gate resolution, queue
+  reconciliation, application validation/build, application transaction,
+  application lease, application commit, integration, branch switch, reset,
+  stash, push, merge, tag, publication, deployment, and release did not run.
+  Interview Companion remained on its exact F072 branch and HEAD with the
+  same 12-path diff, tracked and untracked fingerprints, absent writer lease,
+  absent Autopilot ownership, and byte-identical ledger, projection,
+  compatibility cache, feature report, and application cycle cache.
+
+### Model execution — 2026-07-26T06:30:09+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `checkpoint_aware_feature_result_recovery`
+- Safety and autonomy contracts unchanged: `true`

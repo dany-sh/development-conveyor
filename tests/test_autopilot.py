@@ -577,11 +577,87 @@ class AutopilotTests(unittest.TestCase):
             result = self.make(engine).apply()
 
         events = [item["event"] for item in result["events"]]
-        self.assertEqual(events.count("RECOVERY_STARTED"), 2)
+        self.assertEqual(events.count("FEATURE_SELECTED"), 1)
+        self.assertEqual(events.count("RECOVERY_STARTED"), 1)
         self.assertNotIn("RECOVERY_APPLIED", events)
-        self.assertIn("FEATURE_BLOCKED", events)
+        self.assertNotIn("FEATURE_BLOCKED", events)
         self.assertTrue(result["ownership_released"])
-        self.assertIn("recoverable technical failure", result["diagnostic"])
+        self.assertIn("technical_recovery_required", result["diagnostic"])
+        self.assertIn(
+            "same retained evidence mismatch", result["diagnostic"]
+        )
+        feature = result["features"][0]
+        self.assertFalse(feature["quarantined"])
+        self.assertEqual(
+            "technical_recovery_required",
+            feature["terminal_classification"],
+        )
+        self.assertEqual(1, feature["deterministic_recovery_attempts"])
+        self.assertEqual(
+            64, len(feature["recovery_evidence_fingerprint"])
+        )
+
+    def test_changed_recovery_evidence_permits_one_later_retry(self):
+        first = plan(
+            "feature_result_recovery",
+            state="technical_recovery_required",
+        )
+        first["recognized_technical_recovery"] = True
+        first["feature_result_recovery"] = {
+            "feature_id": "F001",
+            "original_transaction_id": "execution-transaction",
+            "original_run_id": "feature-run",
+            "original_session_id": "feature-session",
+            "expected_branch": "codex/F001",
+            "expected_head": "a" * 40,
+            "tracked_diff_fingerprint": "1" * 64,
+            "recovery_capability_version": "checkpoint-aware-v2",
+        }
+        changed = json.loads(json.dumps(first))
+        changed["feature_result_recovery"][
+            "tracked_diff_fingerprint"
+        ] = "2" * 64
+        paused = plan("paused", feature=None, state="paused")
+
+        class SequencedProjectionEngine(FakeEngine):
+            def __init__(inner_self):
+                super().__init__([], [])
+                inner_self.projected = [first, first, changed, paused]
+                inner_self.project_calls = 0
+
+            def project_plan(inner_self, _project):
+                value = inner_self.projected[
+                    min(
+                        inner_self.project_calls,
+                        len(inner_self.projected) - 1,
+                    )
+                ]
+                inner_self.project_calls += 1
+                return value
+
+        engine = SequencedProjectionEngine()
+        with mock.patch(
+            "development_conveyor.autopilot.FeatureResultRecovery"
+        ) as recovery_type:
+            recovery_type.return_value.inspect.side_effect = [
+                RecoveryError("first preflight failure"),
+                {"plan_fingerprint": "authenticated-after-change"},
+            ]
+            recovery_type.return_value.apply.return_value = {
+                "outcome": "integration_pending",
+                "model_sessions_launched": 0,
+                "child_sessions_launched": 0,
+            }
+            result = self.make(engine).apply()
+
+        events = [item["event"] for item in result["events"]]
+        self.assertEqual(2, events.count("RECOVERY_STARTED"))
+        self.assertEqual(1, events.count("RECOVERY_APPLIED"))
+        self.assertNotIn("FEATURE_BLOCKED", events)
+        self.assertEqual("AUTOPILOT_COMPLETED", result["classification"])
+        self.assertEqual(
+            2, recovery_type.return_value.inspect.call_count
+        )
 
     def test_canonical_feature_execution_alias_uses_feature_route(self):
         engine = FakeEngine(

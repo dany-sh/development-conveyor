@@ -38,6 +38,33 @@ from .workflow_lease import WorkflowWriterLease
 
 
 CommandRunner = Callable[[list[str], Path], dict[str, Any]]
+FEATURE_RESULT_RECOVERY_CAPABILITY_VERSION = (
+    "checkpoint-aware-original-transaction-v2"
+)
+LEGACY_RETAINED_RESULT_TOPOLOGY = (
+    "TransactionStarted",
+    "LeaseAcquired",
+    "SnapshotCaptured",
+    "SessionLaunched",
+    "HumanGateRaised",
+    "LeaseReleased",
+    "ProjectionUpdated",
+)
+CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY = (
+    "TransactionStarted",
+    "LeaseAcquired",
+    "SnapshotCaptured",
+    "SessionLaunched",
+    "CheckpointRecorded",
+    "HumanGateRaised",
+    "LeaseReleased",
+    "ProjectionUpdated",
+)
+AUTHENTICATED_FEATURE_SESSION_CHECKPOINT = {
+    "checkpoint": "authenticated_feature_session_launched",
+    "previous_phase": "branch_preparing",
+    "next_phase": "feature_in_progress",
+}
 _COMMAND_DISCOVERY_FIELDS = frozenset(
     {
         "command_expectation_checks",
@@ -51,6 +78,92 @@ def _changed_paths(inspector: RepositoryInspector) -> tuple[str, ...]:
         *inspector.tracked_changed_paths(),
         *inspector.untracked_file_hashes().keys(),
     }))
+
+
+def _authenticate_original_transaction_topology(
+    transaction_events: list[dict[str, Any]],
+    *,
+    transaction_id: str,
+    project_id: str,
+    repository_identity: str,
+    repository_path_fingerprint: str,
+    run_id: str,
+    session_id: str,
+) -> dict[str, Any]:
+    """Authenticate only the legacy or M1-017 retained-result topology."""
+
+    event_types = tuple(
+        str(event.get("event_type") or "") for event in transaction_events
+    )
+    if event_types == LEGACY_RETAINED_RESULT_TOPOLOGY:
+        variant = "pre_m1_017"
+        checkpoint = None
+    elif event_types == CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY:
+        variant = "m1_017_authenticated_session_checkpoint"
+        checkpoint = transaction_events[4]
+    else:
+        variant = None
+        checkpoint = None
+
+    contiguous_chain = bool(transaction_events) and all(
+        int(current.get("sequence", 0)) == int(previous.get("sequence", 0)) + 1
+        and current.get("previous_fingerprint") == previous.get("fingerprint")
+        for previous, current in zip(
+            transaction_events, transaction_events[1:]
+        )
+    )
+    exact_event_lineage = bool(transaction_events) and all(
+        event.get("transaction_id") == transaction_id
+        and event.get("project_id") == project_id
+        and event.get("repository_identity") == repository_identity
+        and event.get("repository_path_fingerprint")
+        == repository_path_fingerprint
+        and event.get("workflow_type")
+        == WorkflowType.FEATURE_EXECUTION.value
+        for event in transaction_events
+    )
+    start_payload = (
+        transaction_events[0].get("payload") or {}
+        if transaction_events
+        else {}
+    )
+    launch_payload = (
+        transaction_events[3].get("payload") or {}
+        if len(transaction_events) > 3
+        and transaction_events[3].get("event_type") == "SessionLaunched"
+        else {}
+    )
+    checkpoint_payload = (
+        checkpoint.get("payload") or {}
+        if isinstance(checkpoint, dict)
+        else None
+    )
+    checks = {
+        "accepted_event_sequence": variant is not None,
+        "events_are_globally_contiguous": contiguous_chain,
+        "event_lineage_exact": exact_event_lineage,
+        "run_lineage_exact": start_payload.get("run_id") == run_id,
+        "session_lineage_exact": launch_payload.get("session_id") == session_id,
+        "checkpoint_count_exact": event_types.count("CheckpointRecorded")
+        == (1 if checkpoint is not None else 0),
+        "checkpoint_payload_exact": (
+            checkpoint_payload == AUTHENTICATED_FEATURE_SESSION_CHECKPOINT
+            if checkpoint is not None
+            else True
+        ),
+    }
+    return {
+        "authenticated": all(checks.values()),
+        "capability_version": FEATURE_RESULT_RECOVERY_CAPABILITY_VERSION,
+        "variant": variant,
+        "event_types": list(event_types),
+        "accepted_topologies": [
+            list(LEGACY_RETAINED_RESULT_TOPOLOGY),
+            list(CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY),
+        ],
+        "checkpoint_payload": checkpoint_payload,
+        "checks": checks,
+    }
 
 
 def _terminal_legacy_payload(report: dict[str, Any]) -> dict[str, Any]:
@@ -316,11 +429,6 @@ class FeatureResultRecovery:
             event for event in events
             if event["transaction_id"] == original_transaction_id
         ]
-        event_types = [event["event_type"] for event in transaction_events]
-        expected_event_types = [
-            "TransactionStarted", "LeaseAcquired", "SnapshotCaptured",
-            "SessionLaunched", "HumanGateRaised", "LeaseReleased", "ProjectionUpdated",
-        ]
         start = next(
             (event for event in transaction_events if event["event_type"] == "TransactionStarted"),
             None,
@@ -335,6 +443,15 @@ class FeatureResultRecovery:
         )
         _, report, legacy = self._report(original_run_id)
         identity = self.inspector.identity()
+        topology = _authenticate_original_transaction_topology(
+            transaction_events,
+            transaction_id=original_transaction_id,
+            project_id=self.project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+            run_id=original_run_id,
+            session_id=original_session_id,
+        )
         writer = inspect_repository_writer_lock(
             self.inspector.writer_lock_path(
                 self.configuration["lock_policy"]["writer_lock_relative_path"]
@@ -381,7 +498,9 @@ class FeatureResultRecovery:
         }
         checks = {
             "ledger_integrity": integrity.valid,
-            "original_transaction_exact_event_topology": event_types == expected_event_types,
+            "original_transaction_exact_event_topology": topology[
+                "authenticated"
+            ],
             "original_transaction_terminal": terminal is not None,
             "original_transaction_feature": (start or {}).get("payload", {}).get("feature_id") == feature_id,
             "original_transaction_run": (start or {}).get("payload", {}).get("run_id") == original_run_id,
@@ -426,6 +545,7 @@ class FeatureResultRecovery:
             "original_run_id": original_run_id,
             "original_session_id": original_session_id,
             "original_event_fingerprints": old_event_fingerprints,
+            "original_transaction_topology": topology,
             "changed_paths": list(changed),
             "original_content_fingerprint": self.inspector.content_diff_fingerprint(changed),
             "preserved_implementation_paths": [
@@ -525,16 +645,6 @@ class FeatureResultRecovery:
             for event in events
             if event["transaction_id"] == original_transaction_id
         ]
-        event_types = [event["event_type"] for event in transaction_events]
-        expected_event_types = [
-            "TransactionStarted",
-            "LeaseAcquired",
-            "SnapshotCaptured",
-            "SessionLaunched",
-            "HumanGateRaised",
-            "LeaseReleased",
-            "ProjectionUpdated",
-        ]
         start = next(
             (
                 event
@@ -622,6 +732,15 @@ class FeatureResultRecovery:
         )
         report_path, report, terminal_payload = self._report(original_run_id)
         identity = self.inspector.identity()
+        topology = _authenticate_original_transaction_topology(
+            transaction_events,
+            transaction_id=original_transaction_id,
+            project_id=self.project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+            run_id=original_run_id,
+            session_id=original_session_id,
+        )
         writer = inspect_repository_writer_lock(
             self.inspector.writer_lock_path(
                 self.configuration["lock_policy"]["writer_lock_relative_path"]
@@ -1120,8 +1239,9 @@ class FeatureResultRecovery:
         }
         checks = {
             "ledger_integrity": integrity.valid,
-            "original_transaction_exact_event_topology": event_types
-            == expected_event_types,
+            "original_transaction_exact_event_topology": topology[
+                "authenticated"
+            ],
             "original_transaction_terminal": terminal is not None,
             "original_transaction_workflow": all(
                 event.get("workflow_type")
@@ -1351,6 +1471,7 @@ class FeatureResultRecovery:
             "original_event_fingerprints": [
                 event["fingerprint"] for event in transaction_events
             ],
+            "original_transaction_topology": topology,
             "preparation_transaction_id": (
                 preparation_start["transaction_id"]
                 if preparation_start

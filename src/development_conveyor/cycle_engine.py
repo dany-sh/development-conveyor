@@ -1777,7 +1777,10 @@ class CycleEngine:
             "expected_branch": snapshot["branch"],
             "expected_head": snapshot["head"],
         }
-        from .feature_result_recovery import FeatureResultRecovery
+        from .feature_result_recovery import (
+            FEATURE_RESULT_RECOVERY_CAPABILITY_VERSION,
+            FeatureResultRecovery,
+        )
 
         try:
             inspected = FeatureResultRecovery(
@@ -1790,6 +1793,9 @@ class CycleEngine:
                 **arguments,
                 "evidence_authenticated": False,
                 "preflight_error": redact_text(str(exc)),
+                "recovery_capability_version": (
+                    FEATURE_RESULT_RECOVERY_CAPABILITY_VERSION
+                ),
                 "model_sessions_that_would_launch": 0,
                 "child_sessions_that_would_launch": 0,
                 "milestone_integration_performed": False,
@@ -1798,6 +1804,9 @@ class CycleEngine:
         return {
             **arguments,
             "evidence_authenticated": True,
+            "recovery_capability_version": (
+                FEATURE_RESULT_RECOVERY_CAPABILITY_VERSION
+            ),
             "preparation_transaction_id": inspected.get(
                 "preparation_transaction_id"
             ),

@@ -423,6 +423,36 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-020",
+      "title": "Checkpoint-aware retained feature-result recovery",
+      "status": "review",
+      "priority": 20,
+      "milestone": "M1",
+      "dependencies": [
+        "M1-011",
+        "M1-017"
+      ],
+      "spec": "docs/features/M1-020-checkpoint-aware-feature-result-recovery.md",
+      "acceptance_criteria": [
+        "Retained feature-result recovery accepts both the exact pre-M1-017 transaction topology and the exact authenticated-feature-session checkpoint topology while rejecting malformed checkpoint variants",
+        "The checkpoint-aware topology preserves exact transaction, project, repository, feature, run, session, event-order, payload, and fingerprint-chain authentication before any recovery write",
+        "Autopilot invokes one deterministic recovery attempt for unchanged evidence, records the exact preflight diagnostic and evidence fingerprint, and stops technical_recovery_required without quarantine or false exhaustion",
+        "The exact F072 dry-run authenticates its 12 retained paths and fingerprints with zero models, children, writes, leases, transactions, application commands, reconciliation, or integration"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-20-checkpoint-aware-feature-result-recovery",
+      "integration_base_commit": "693ef372ab5f8a875934c086d1a9ef091b532570",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

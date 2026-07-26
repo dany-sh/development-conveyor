@@ -4,6 +4,53 @@ Last updated: 2026-07-25
 
 ## Summary
 
+Checkpoint-aware retained feature-result recovery is implemented on
+`codex/m1-20-checkpoint-aware-feature-result-recovery` from exact parent
+`693ef372ab5f8a875934c086d1a9ef091b532570`.
+
+The original-transaction validator now accepts only the exact pre-M1-017
+seven-event topology or the exact M1-017 eight-event topology containing one
+`authenticated_feature_session_launched` checkpoint with
+`branch_preparing` to `feature_in_progress` phases. Transaction, project,
+repository, workflow, run, session, global ordering, and fingerprint-chain
+lineage remain exact. Malformed, duplicate, misplaced, foreign, unrelated, or
+broken-chain variants fail closed. F003 uses the same matcher as the general
+F068/F070/F072/F097 path, and workflow alias normalization is unchanged.
+
+Autopilot now fingerprints complete deterministic recovery evidence and
+reloads projection after one failed preflight. If route, capability,
+diagnostic, projection, gate, and repository evidence are unchanged, it stops
+at `technical_recovery_required` without invoking the route twice,
+quarantining the feature, or claiming bounded recovery exhaustion. Changed
+evidence or a changed capability version permits a later bounded retry.
+
+The live F072 consistency result is `CONSISTENT`; the 12-path dirty worktree is
+authenticated as `feature_result_recovery`, execution-plan agreement passes,
+and status prioritizes that route over human-decision resolution. The exact
+write-free dry-run authenticates the M1-017 checkpoint, original run,
+transaction, session, gate, branch, HEAD, all 12 paths, tracked fingerprint
+`59d0c8b8af72054fef8ff207f33dc08a70f783b99c4c7c3006560b198d7c5e62`,
+empty untracked set, and untracked fingerprint
+`44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a`.
+It plans `swift test --filter DomainModelTests`, `swift build`, and
+`git diff --check`, one possible direct-child commit, and
+`integration_pending`, with zero models, children, writes, leases,
+transactions, application commands, reconciliation, or integration. Live
+apply remains unexecuted.
+
+One hundred eighty-five distinct focused controller tests pass across
+checkpoint-aware and legacy retained-result recovery, F003/F068/F070/F097
+regressions, Autopilot, binary context, prelaunch recovery, execution-plan
+identity, state transitions, execution-policy finalization, policy rebinding,
+projection authority, and cache binding. A broader diagnostic run passed 210
+of 214 tests; the four failures are pre-existing stale fixtures, including the
+two already documented mutable-live-ledger F097 cache tests and two legacy CLI
+expectations reproduced unchanged from the M1-020 starting commit. Python
+compilation, configuration validation, JSON-compatible queue/config parsing,
+CLI help and required-mode rejection, profile-aware content audit, and
+`git diff --check` pass. The complete controller suite and all application
+tests/builds remain intentionally unexecuted.
+
 GPT-5.3-Codex application-feature routing is implemented on
 `codex/m1-19-gpt-5-3-codex-application-routing` from exact parent
 `c3969af5d0ec75514aaca02e7129a16c1ca64fda`.
