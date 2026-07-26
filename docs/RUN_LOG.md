@@ -1464,3 +1464,64 @@ This log records model configuration and deterministic deployment evidence. It n
   command, transaction, lease, model, child, apply, ordinary resume, Autopilot
   restart, reconciliation rerun, integration, push, merge, tag, publication,
   deployment, or release ran.
+
+### Model execution — 2026-07-26T04:50:38+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `gpt_5_3_codex_application_routing`
+- Safety and autonomy contracts unchanged: `true`
+
+### GPT-5.3-Codex application-feature routing — 2026-07-25
+
+- Scope: controller-only implementation on
+  `codex/m1-19-gpt-5-3-codex-application-routing` from exact parent
+  `c3969af5d0ec75514aaca02e7129a16c1ca64fda`; one
+  `gpt-5.6-sol`/medium parent and zero child or named-agent sessions.
+- Profile: `application_feature_implementation` resolves exactly to
+  `gpt-5.3-codex`/high, one parent, zero children. Deterministic workflows
+  remain zero-model; queue reconciliation remains Luna/high; controller repair
+  remains Sol/medium; existing explicit feature policies remain unchanged.
+- Command: `rebind-ready-feature-policy` authenticates exact ready selection,
+  repository and Git identity, old queue/specification policy, ownership
+  absence, exact paths, and local compatibility. Dry-run uses an isolated Git
+  index, writes nothing, and cannot prepare or execute the feature.
+- Synthetic apply: one direct-child metadata commit changed only the queue and
+  bound feature specification, refreshed projection and both compatibility
+  caches, remained `feature_ready` with the feature selected, released the
+  lease, and launched zero models or children.
+- Focused validation: 138 profile, compatibility, cost-policy,
+  binary-context, prepared-feature, execution-plan, planning-finalization,
+  post-integration recovery, projection, and cache-binding tests passed.
+  Python compilation, `validate-config`, JSON-compatible queue/config parsing,
+  CLI help and required-mode rejection, and `git diff --check` passed. The
+  complete controller suite and application tests/builds were not run.
+- Profile-aware content audit: `personal_private`, seven categories reviewed,
+  zero secret, sensitive-source, destructive-risk, or unexplained-binary
+  findings, and no hard gate.
+- Pinned compatibility evidence: Codex CLI `0.145.0`; refreshed catalog has no
+  exact `gpt-5.3-codex` and exposes only `gpt-5.3-codex-spark` among 5.3
+  slugs; bundled catalog has no 5.3 slug. Exact target compatibility is
+  `unsupported_model`; no alias or fallback was used.
+- Live F072 rebind dry-run: old `generic_or_architectural` policy, predicted
+  `application_feature_implementation` policy, exact paths
+  `docs/FEATURE_QUEUE.yaml` and
+  `docs/features/F072-job-application-detail-workspace.md`, predicted final
+  fingerprint
+  `9f01753e15f8d529d134e36657dd25870c7ac5b96b39f6507f7523d0bb0081ea`,
+  `POLICY_REBIND_REJECTED`, and zero writes, leases, transactions, models,
+  children, preparation, or execution.
+- Live feature-cycle plan: F072 at
+  `b745d648f406ab5a2024d9ea07198c187024e135`,
+  `application_feature_implementation`, `gpt-5.3-codex`/high, one parent,
+  zero children, retained binary-safe context fingerprint
+  `8ef60d7a3791583f261eb402b480cabdd9a1eb8b2c14fd1f3abf9b599a1239de`,
+  and zero dry-run activity. Local compatibility prevented launch.
+- Isolation: Interview Companion remained clean on `codex/m0-foundation` at
+  `b745d648f406ab5a2024d9ea07198c187024e135` with its original F072 policy.
+  No live application write, apply, lease, transaction, session, preparation,
+  execution, test, build, Autopilot, ordinary resume, reconciliation, push,
+  merge, tag, publication, deployment, or release ran.

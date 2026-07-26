@@ -16,3 +16,4 @@
 | M1-016 | Prepared-feature execution-plan binding | review | M1 | `docs/features/M1-016-prepared-feature-plan-binding.md` |
 | M1-017 | Retained feature terminal-state transition | review | M1 | `docs/features/M1-017-retained-feature-terminal-transition.md` |
 | M1-018 | Deterministic execution-policy finalization | review | M1 | `docs/features/M1-018-deterministic-execution-policy-finalization.md` |
+| M1-019 | GPT-5.3-Codex application-feature routing | review | M1 | `docs/features/M1-019-gpt-5-3-codex-application-routing.md` |

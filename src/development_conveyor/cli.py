@@ -34,6 +34,7 @@ from .cycle_cache_repair import CycleCacheRepair
 from .product_plan import ProductPlanReconciler
 from .autopilot import Autopilot, autopilot_status, request_stop
 from .feature_prelaunch_recovery import FeaturePrelaunchRecovery
+from .policy_rebind import ReadyFeaturePolicyRebinder
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
 
@@ -311,6 +312,40 @@ def _parser() -> argparse.ArgumentParser:
     mode = repair_cycle_cache.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
+    rebind_policy = subparsers.add_parser(
+        "rebind-ready-feature-policy",
+        help=(
+            "deterministically rebind one exact ready, selected, and unstarted "
+            "feature execution policy"
+        ),
+    )
+    rebind_policy.add_argument("--project", required=True)
+    rebind_policy.add_argument("--feature", required=True)
+    rebind_policy.add_argument("--expected-branch", required=True)
+    rebind_policy.add_argument("--expected-head", required=True)
+    rebind_policy.add_argument("--expected-old-profile", required=True)
+    rebind_policy.add_argument(
+        "--expected-old-parent-sessions", required=True, type=int
+    )
+    rebind_policy.add_argument(
+        "--expected-old-child-sessions", required=True, type=int
+    )
+    rebind_policy.add_argument("--expected-old-escalation-trigger")
+    rebind_policy.add_argument(
+        "--expected-old-escalation-profile", choices=PROFILE_NAMES
+    )
+    rebind_policy.add_argument(
+        "--target-profile", required=True, choices=PROFILE_NAMES
+    )
+    rebind_policy.add_argument(
+        "--expected-path",
+        action="append",
+        required=True,
+        help="exact metadata normalization path; repeat for queue and feature specification",
+    )
+    mode = rebind_policy.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
     autopilot = subparsers.add_parser(
         "autopilot",
         help="continuously execute authoritative project transitions until safely stopped",
@@ -424,6 +459,38 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
         launcher,
         execution_profile_override=getattr(args, "execution_profile", None),
     )
+    if args.command == "rebind-ready-feature-policy":
+        if bool(args.expected_old_escalation_trigger) != bool(
+            args.expected_old_escalation_profile
+        ):
+            raise ConveyorError(
+                "expected old escalation trigger and profile must be supplied together"
+            )
+        expected_old_policy = {
+            "profile": args.expected_old_profile,
+            "parent_sessions": args.expected_old_parent_sessions,
+            "child_sessions": args.expected_old_child_sessions,
+        }
+        if args.expected_old_escalation_trigger:
+            expected_old_policy["escalation"] = {
+                "trigger": args.expected_old_escalation_trigger,
+                "profile": args.expected_old_escalation_profile,
+            }
+        rebinder = ReadyFeaturePolicyRebinder(configuration, launcher, engine)
+        request = rebinder.inspect(
+            project=registry.get(args.project),
+            feature_id=args.feature,
+            expected_branch=args.expected_branch,
+            expected_head=args.expected_head,
+            expected_old_policy=expected_old_policy,
+            target_profile=args.target_profile,
+            expected_paths=tuple(args.expected_path),
+        )
+        return (
+            rebinder.apply(request)
+            if args.apply
+            else request.public_plan(dry_run=True)
+        )
     if args.command == "autopilot":
         controller = Autopilot(
             configuration=configuration,
@@ -693,6 +760,7 @@ def main(arguments: list[str] | None = None) -> int:
         return 2 if (
             result.get("launch_allowed") is False
             or result.get("outcome") == "resolution_rejected"
+            or result.get("classification") == "POLICY_REBIND_REJECTED"
             or result.get("classification") == "AUTOPILOT_FAILED"
             or result.get("classification") in {
                 "HUMAN_DECISION_REQUIRED", "CORRUPT_EVIDENCE", "UNSAFE_REPOSITORY_STATE"

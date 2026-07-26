@@ -19,6 +19,7 @@ PROFILE_NAMES = (
     "repository_aware",
     "bounded_precise",
     "multi_module_precise",
+    "application_feature_implementation",
     "generic_or_architectural",
     "ambiguous_or_authoritative",
     "unresolved_after_high",
@@ -29,6 +30,10 @@ DEFAULT_PROFILES: dict[str, dict[str, str]] = {
     "repository_aware": {"model": "gpt-5.6-luna", "reasoning": "high"},
     "bounded_precise": {"model": "gpt-5.6-terra", "reasoning": "medium"},
     "multi_module_precise": {"model": "gpt-5.6-terra", "reasoning": "high"},
+    "application_feature_implementation": {
+        "model": "gpt-5.3-codex",
+        "reasoning": "high",
+    },
     "generic_or_architectural": {"model": "gpt-5.6-sol", "reasoning": "medium"},
     "ambiguous_or_authoritative": {"model": "gpt-5.6-sol", "reasoning": "high"},
     "unresolved_after_high": {"model": "gpt-5.6-sol", "reasoning": "xhigh"},

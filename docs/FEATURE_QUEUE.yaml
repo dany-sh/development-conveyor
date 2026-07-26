@@ -390,6 +390,39 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-019",
+      "title": "GPT-5.3-Codex application-feature routing",
+      "status": "review",
+      "priority": 19,
+      "milestone": "M1",
+      "dependencies": [
+        "M1-002",
+        "M1-015",
+        "M1-016",
+        "M1-017",
+        "M1-018"
+      ],
+      "spec": "docs/features/M1-019-gpt-5-3-codex-application-routing.md",
+      "acceptance_criteria": [
+        "The canonical application_feature_implementation profile resolves exactly to gpt-5.3-codex with high reasoning, one parent, and zero children without changing deterministic, Luna, or Sol workflow separation",
+        "Existing explicit feature policies remain unchanged unless the exact authenticated ready-feature policy-rebind command is invoked",
+        "Dry-run is write-free and reports old and new policy, exact two-path normalization, predicted fingerprint, compatibility, and zero model, child, lease, transaction, preparation, or execution activity",
+        "Apply fails closed on identity, state, ownership, path, old-policy, or local compatibility disagreement and otherwise creates one metadata commit, refreshes projection and caches, and stops at feature_ready"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-19-gpt-5-3-codex-application-routing",
+      "integration_base_commit": "c3969af5d0ec75514aaca02e7129a16c1ca64fda",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

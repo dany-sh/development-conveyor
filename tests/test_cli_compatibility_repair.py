@@ -270,6 +270,31 @@ class CompatibilityRepairTests(unittest.TestCase):
             self.assertTrue(result.compatible)
             self.assertEqual(result.detected_version, "0.144.5")
 
+    def test_01a_exact_gpt_5_3_codex_high_compatibility(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = fake_codex(
+                Path(temporary),
+                models={"gpt-5.3-codex": ["medium", "high"]},
+            )
+            compatible = check_compatibility(
+                str(executable),
+                selection(model="gpt-5.3-codex", reasoning="high"),
+            )
+            wrong_slug = check_compatibility(
+                str(executable),
+                selection(model="gpt-5.3-codex-spark", reasoning="high"),
+            )
+            wrong_reasoning = check_compatibility(
+                str(executable),
+                selection(model="gpt-5.3-codex", reasoning="xhigh"),
+            )
+            self.assertTrue(compatible.compatible)
+            self.assertEqual(compatible.classification, "compatible")
+            self.assertEqual(wrong_slug.classification, "unsupported_model")
+            self.assertEqual(
+                wrong_reasoning.classification, "unsupported_reasoning_effort"
+            )
+
     def test_02_missing_cli(self):
         result = check_compatibility("/definitely/missing/codex", selection())
         self.assertEqual(result.classification, "cli_missing")

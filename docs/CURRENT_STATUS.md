@@ -4,6 +4,43 @@ Last updated: 2026-07-25
 
 ## Summary
 
+GPT-5.3-Codex application-feature routing is implemented on
+`codex/m1-19-gpt-5-3-codex-application-routing` from exact parent
+`c3969af5d0ec75514aaca02e7129a16c1ca64fda`.
+
+The new explicit `application_feature_implementation` profile resolves to
+exact `gpt-5.3-codex`/high with one parent and zero children. Existing
+workflow fallbacks are unchanged: deterministic work remains zero-model,
+queue reconciliation retains Luna/high, and controller repair retains
+Sol/medium. Existing valid queue/specification policies remain authoritative
+and are not rewritten implicitly.
+
+The new zero-model `rebind-ready-feature-policy` command authenticates one
+exact ready, selected, unstarted feature; branch and HEAD; matching old
+queue/specification policy; absent transaction, session, lease, reservation,
+Autopilot owner, and Git operation; clean repository; exact two-path metadata
+boundary; and local target-model compatibility. Dry-run predicts replacement
+bytes and the final Git binary-diff fingerprint through an isolated temporary
+index. Apply uses one planning-writer transaction, validates inventory and
+`git diff --check`, creates one direct-child metadata commit, refreshes
+projection and compatibility caches, and stops at `feature_ready` without
+preparation or execution.
+
+The pinned Codex `0.145.0` executable currently fails exact compatibility:
+its refreshed catalog exposes `gpt-5.3-codex-spark` but not
+`gpt-5.3-codex`; its bundled catalog exposes neither. The live F072 rebind
+therefore correctly reports `POLICY_REBIND_REJECTED` and `apply_allowed:
+false`, while still showing the predicted new policy, exact two metadata
+paths, final fingerprint
+`9f01753e15f8d529d134e36657dd25870c7ac5b96b39f6507f7523d0bb0081ea`,
+and zero model, child, lease, transaction, or write. A read-only feature-cycle
+plan with the target profile selects F072 at exact starting commit
+`b745d648f406ab5a2024d9ea07198c187024e135`, `gpt-5.3-codex`/high,
+one parent, zero children, retains context fingerprint
+`8ef60d7a3791583f261eb402b480cabdd9a1eb8b2c14fd1f3abf9b599a1239de`,
+and excludes 100 generated paths before decoding. Compatibility blocks launch.
+No live apply ran and F072 did not start.
+
 Deterministic execution-policy finalization is implemented on
 `codex/m1-18-deterministic-execution-policy-finalization` from exact parent
 `3540447bffe01b43d5084a6b925c09e952723926`.
