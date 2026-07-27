@@ -31,6 +31,14 @@ of allowing its ordinary recovery route.
   `current_feature` and nullable `selected_next_feature`. The current feature
   may supply the next execution plan without being written back as a projected
   selection.
+- A run-scoped capability-isolation failure may reuse deterministic prelaunch
+  recovery only when the failed feature transaction is the latest terminal
+  feature execution, no argv/model/session/terminal marker exists, the report
+  names the exact repository and `feature_cycle`, and the prepared branch,
+  HEAD, queue, lease, ownership, and Git evidence remain unchanged.
+- Any drift in that evidence fails closed. Recovery launches no model, consumes
+  no implementation attempt, creates no commit, and returns the same prepared
+  feature to `feature_cycle`.
 
 ## Acceptance evidence
 
@@ -47,6 +55,9 @@ of allowing its ordinary recovery route.
 - The live cache rebind updates only ignored compatibility state, launches
   zero models and children, creates no application commit, and leaves
   consistency `CONSISTENT`.
+- Live read-only status authenticates the exact F078 run-scoped launch report
+  and selects zero-model `feature_prelaunch_recovery` rather than looping on
+  `verify_consistency`.
 
 ## Execution policy
 

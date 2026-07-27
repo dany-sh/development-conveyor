@@ -21,13 +21,16 @@ sessions instead of raising an unrelated historical recovery error.
 
 The deterministic cache rebind has now completed with zero models, children,
 or application commits and only the ignored `.factory/conveyor-state.json`
-updated. Consistency reports `CONSISTENT`; the next boundary is resuming the
-existing F078 feature execution with the exact four-capability allowlist.
+updated. Consistency reports `CONSISTENT`. Read-only status now authenticates
+the exact run-scoped, zero-session capability failure and selects deterministic
+`feature_prelaunch_recovery`; after that zero-model repair, the existing F078
+feature execution can resume with the exact four-capability allowlist.
 
-Seventy-one focused capability, routing, runtime-audit, planning, recovery,
-and execution-identity tests pass. Compilation, configuration and queue
-validation, the global model-policy validator, pinned-CLI capability proof,
-runtime audit, and `git diff --check` pass.
+The existing focused capability, routing, runtime-audit, planning, recovery,
+and execution-identity validation passes, plus all nine feature-prelaunch
+recovery tests. Compilation, configuration and queue validation, the global
+model-policy validator, pinned-CLI capability proof, runtime audit, and
+`git diff --check` pass.
 
 Atomic checkpoint-tolerant planning finalization is implemented on
 `codex/m1-24-atomic-planning-finalization` from exact parent

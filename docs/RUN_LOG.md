@@ -1903,3 +1903,17 @@ This log records model configuration and deterministic deployment evidence. It n
   `.factory/conveyor-state.json`, launched zero models and children, created no
   application commit, and stopped. Consistency returned `CONSISTENT` with no
   failed invariant.
+- Prelaunch routing correction: after consistency passed, ordinary resume
+  remained on the read-only `verify_consistency` action because the existing
+  clean-prelaunch recovery recognized only older Autopilot context failures.
+  Run-scoped `capability_isolation_unsupported` reports now enter that same
+  recovery only when the latest feature transaction, empty argv, absent
+  session/model/terminal marker, exact repository/action, clean branch/HEAD,
+  queue, lease, ownership, reservation, Git, report, commit, and idempotency
+  evidence all agree. Any drift fails closed.
+- Prelaunch validation: all nine `test_feature_prelaunch_recovery` tests pass,
+  including live-shape routing and rejection of argv, session, model, terminal,
+  classification, diagnostic, or repository drift. Live read-only F078 status
+  now selects `feature_prelaunch_recovery` for run
+  `db034d5f-8e27-4df7-a81e-881b02bdf22d` on the exact prepared branch and HEAD
+  with zero models and zero implementation attempts.

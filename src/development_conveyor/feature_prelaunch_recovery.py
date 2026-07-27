@@ -54,6 +54,31 @@ class FeaturePrelaunchRecovery:
             reports = self.root / reports
         return reports.resolve()
 
+    def _failure_report(
+        self, run_id: str
+    ) -> tuple[dict[str, Any], str]:
+        run_report = (
+            self._report_root
+            / run_id
+            / "feature_cycle-launch-failure.json"
+        ).resolve()
+        try:
+            run_report.relative_to(self._report_root)
+        except ValueError:
+            run_report = self._report_root / ".invalid-run-id"
+        candidates = (
+            (self._autopilot_report, "autopilot"),
+            (run_report, "run_scoped_launch_failure"),
+        )
+        for path, kind in candidates:
+            try:
+                report = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(report, dict) and report.get("run_id") == run_id:
+                return report, kind
+        raise RecoveryError("prelaunch recovery lacks its exact failure report")
+
     def inspect(
         self,
         *,
@@ -62,10 +87,7 @@ class FeaturePrelaunchRecovery:
         expected_branch: str,
         expected_head: str,
     ) -> dict[str, Any]:
-        try:
-            report = json.loads(self._autopilot_report.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RecoveryError("prelaunch recovery lacks its Autopilot report") from exc
+        report, report_kind = self._failure_report(autopilot_run_id)
         projection = self.projection.rebuild(persist_cache=False)
         latest = max(
             (
@@ -102,6 +124,31 @@ class FeaturePrelaunchRecovery:
             blocked.get("classification") == "FEATURE_PRELAUNCH_CONTEXT_FAILED"
             and blocked.get("reference") == "ContextReadError"
         )
+        isolation_failure = (
+            blocked.get("classification") == "FEATURE_VALIDATION_FAILED"
+            and blocked.get("reference") == "SessionError"
+            and report_kind == "run_scoped_launch_failure"
+            and start.get("run_id") == report.get("run_id")
+            and report.get("project_id") == self.project.project_id
+            and report.get("action") == "feature_cycle"
+            and report.get("failure_classification") == "session_execution_failed"
+            and report.get("exit_classification") == "session_execution_failed"
+            and report.get("result_classification") == "session_execution_failed"
+            and report.get("exit_status") is None
+            and report.get("argv") == []
+            and report.get("session_id") is None
+            and report.get("launched_model") is None
+            and report.get("terminal_marker_found") is False
+            and report.get("context_pack_evidence") is None
+            and report.get("context_read_failure") is None
+            and report.get("structured_result") is None
+            and report.get("parsed_structured_result") is None
+            and str(report.get("redacted_stderr") or "").startswith(
+                "capability_isolation_unsupported:"
+            )
+            and Path(str(report.get("working_directory") or "")).resolve()
+            == self.project.repository.resolve()
+        )
         report_events = report.get("events") if isinstance(report, dict) else []
         authenticated_session_events = [
             event for event in report_events or []
@@ -109,15 +156,24 @@ class FeaturePrelaunchRecovery:
             and "authenticated model session=" in str(event.get("diagnostic") or "")
         ]
         checks = {
-            "project": report.get("project") == self.project.project_id,
+            "project": (
+                report.get("project") == self.project.project_id
+                if report_kind == "autopilot"
+                else report.get("project_id") == self.project.project_id
+            ),
             "feature": start.get("feature_id") == feature_id == latest.get("feature_id"),
             "autopilot_run": report.get("run_id") == autopilot_run_id,
-            "autopilot_failed": report.get("terminal_classification") == "AUTOPILOT_FAILED",
+            "failure_report": (
+                report.get("terminal_classification") == "AUTOPILOT_FAILED"
+                if report_kind == "autopilot"
+                else report.get("failure_classification")
+                == "session_execution_failed"
+            ),
             "exact_transaction_shape": event_names == [
                 "TransactionStarted", "LeaseAcquired", "SnapshotCaptured",
                 "TransactionBlocked", "LeaseReleased", "ProjectionUpdated",
             ],
-            "prelaunch_failure": legacy_failure or typed_failure,
+            "prelaunch_failure": legacy_failure or typed_failure or isolation_failure,
             "zero_session_events": not any(
                 event.get("event_type") == "SessionLaunched" for event in events
             ),
@@ -181,6 +237,7 @@ class FeaturePrelaunchRecovery:
             "project_id": self.project.project_id,
             "feature_id": feature_id,
             "autopilot_run_id": autopilot_run_id,
+            "failure_report_kind": report_kind,
             "failed_feature_run_id": start["run_id"],
             "failed_transaction_id": transaction_id,
             "failure_classification": blocked["classification"],

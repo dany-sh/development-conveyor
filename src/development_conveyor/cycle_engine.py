@@ -1362,36 +1362,44 @@ class CycleEngine:
         report_root = self.configuration.owned_path(
             self.configuration.conveyor["report_directory"]
         )
-        report_path = (
-            report_root / "autopilot" / project.project_id / "latest.json"
-        )
+        report_path = report_root / "autopilot" / project.project_id / "latest.json"
         try:
             report = json.loads(report_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return None
+            report = {}
         if not all(
             isinstance(value, str) and value
             for value in (
                 feature_id,
                 snapshot.get("branch"),
                 snapshot.get("head"),
-                report.get("run_id"),
             )
         ):
             return None
-        try:
-            return FeaturePrelaunchRecovery(
-                controller_root=self.root,
-                configuration=self.configuration,
-                project=project,
-            ).inspect(
-                feature_id=feature_id,
-                autopilot_run_id=report["run_id"],
-                expected_branch=snapshot["branch"],
-                expected_head=snapshot["head"],
-            )
-        except RecoveryError:
-            return None
+        candidate_runs = []
+        for candidate in (latest.get("run_id"), report.get("run_id")):
+            if (
+                isinstance(candidate, str)
+                and candidate
+                and candidate not in candidate_runs
+            ):
+                candidate_runs.append(candidate)
+        recovery = FeaturePrelaunchRecovery(
+            controller_root=self.root,
+            configuration=self.configuration,
+            project=project,
+        )
+        for candidate in candidate_runs:
+            try:
+                return recovery.inspect(
+                    feature_id=feature_id,
+                    autopilot_run_id=candidate,
+                    expected_branch=snapshot["branch"],
+                    expected_head=snapshot["head"],
+                )
+            except RecoveryError:
+                continue
+        return None
 
     def _failed_planning_recovery_supersession(
         self,

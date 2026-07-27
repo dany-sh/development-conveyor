@@ -15,7 +15,7 @@ from development_conveyor.contracts import (
 )
 from development_conveyor.consistency import ConsistencyChecker
 from development_conveyor.cycle_engine import CycleEngine
-from development_conveyor.errors import ProjectionError
+from development_conveyor.errors import ProjectionError, RecoveryError
 from development_conveyor.feature_prelaunch_recovery import FeaturePrelaunchRecovery
 from development_conveyor.kernel import FeatureExecutionAdapter, WorkflowKernel
 from development_conveyor.ledger import EvidenceLedger
@@ -228,6 +228,151 @@ class FeaturePrelaunchRecoveryTests(unittest.TestCase):
             configuration=self.configuration,
             project=self.project,
         )
+
+    def _append_capability_isolation_prelaunch_failure(self):
+        state_root = (
+            self.configuration.root / "state/projects" / self.project.project_id
+        )
+        identity = RepositoryInspector(self.repository).identity()
+        ledger = EvidenceLedger(
+            state_root / "evidence-ledger.jsonl",
+            project_id=self.project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        run_id = "capability-isolation-prelaunch-run"
+        transaction_id = "capability-isolation-prelaunch-transaction"
+        snapshot = {
+            "branch": "codex/F001-synthetic-feature",
+            "head": self.head,
+            "clean": True,
+            "git_operations": {
+                "merge": False,
+                "cherry_pick": False,
+                "rebase_apply": False,
+                "rebase_merge": False,
+            },
+            "repository_identity": identity["repository_id"],
+            "repository_path_fingerprint": identity["path_fingerprint"],
+        }
+        for event_type, payload in (
+            (
+                "TransactionStarted",
+                {
+                    "run_id": run_id,
+                    "feature_id": "F001",
+                    "milestone": "M0",
+                    "starting_branch": snapshot["branch"],
+                    "starting_head": snapshot["head"],
+                    "allowed_mutation_policy": {},
+                },
+            ),
+            ("LeaseAcquired", {"lease_id": "capability-isolation-lease"}),
+            ("SnapshotCaptured", {"snapshot": snapshot}),
+            (
+                "TransactionBlocked",
+                {
+                    "classification": "FEATURE_VALIDATION_FAILED",
+                    "next_state": "validation_failed",
+                    "reference": "SessionError",
+                    "terminal_state": "terminal_failure",
+                    "terminal_snapshot": snapshot,
+                },
+            ),
+            ("LeaseReleased", {"lease_id": "capability-isolation-lease"}),
+            (
+                "ProjectionUpdated",
+                {
+                    "current_state": "validation_failed",
+                    "current_feature": "F001",
+                    "selected_feature": None,
+                },
+            ),
+        ):
+            ledger.append(
+                event_type=event_type,
+                transaction_id=transaction_id,
+                workflow_type=WorkflowType.FEATURE_EXECUTION,
+                payload=payload,
+            )
+        ProjectionEngine(
+            ledger, state_root / "projection-cache.json"
+        ).rebuild(persist_cache=True)
+        atomic_write_json(
+            self.configuration.root
+            / f"reports/{run_id}/feature_cycle-launch-failure.json",
+            {
+                "schema_version": 1,
+                "project_id": self.project.project_id,
+                "run_id": run_id,
+                "action": "feature_cycle",
+                "failure_classification": "session_execution_failed",
+                "exit_classification": "session_execution_failed",
+                "result_classification": "session_execution_failed",
+                "exit_status": None,
+                "argv": [],
+                "session_id": None,
+                "launched_model": None,
+                "terminal_marker_found": False,
+                "context_pack_evidence": None,
+                "context_read_failure": None,
+                "structured_result": None,
+                "parsed_structured_result": None,
+                "redacted_stderr": (
+                    "capability_isolation_unsupported: missing requested=example"
+                ),
+                "working_directory": str(self.repository),
+            },
+        )
+        return run_id
+
+    def test_run_scoped_capability_failure_routes_to_prelaunch_recovery(self):
+        run_id = self._append_capability_isolation_prelaunch_failure()
+        engine = CycleEngine(self.configuration)
+        projected = engine.project_plan(self.project)
+        self.assertEqual(
+            projected["proposed_next_action"], "feature_prelaunch_recovery"
+        )
+        evidence = projected["feature_prelaunch_recovery"]
+        self.assertEqual(evidence["autopilot_run_id"], run_id)
+        self.assertEqual(
+            evidence["failure_report_kind"], "run_scoped_launch_failure"
+        )
+        result = self.recovery().apply(evidence)
+        self.assertEqual(result["outcome"], "prelaunch_recovery_applied")
+        self.assertEqual(
+            result["kernel_projection"]["allowed_next_action"], "feature_cycle"
+        )
+
+    def test_run_scoped_capability_failure_rejects_session_or_report_drift(self):
+        run_id = self._append_capability_isolation_prelaunch_failure()
+        report_path = (
+            self.configuration.root
+            / f"reports/{run_id}/feature_cycle-launch-failure.json"
+        )
+        baseline = json.loads(report_path.read_text(encoding="utf-8"))
+        mutations = {
+            "argv": {"argv": ["codex", "exec"]},
+            "session": {"session_id": "session-was-launched"},
+            "model": {"launched_model": "gpt-5.6-terra"},
+            "terminal": {"terminal_marker_found": True},
+            "classification": {"failure_classification": "process_failed"},
+            "capability_error": {"redacted_stderr": "unrelated failure"},
+            "repository": {"working_directory": str(self.root / "other")},
+        }
+        for name, mutation in mutations.items():
+            with self.subTest(name=name):
+                atomic_write_json(report_path, {**baseline, **mutation})
+                with self.assertRaisesRegex(
+                    RecoveryError, "prelaunch_failure"
+                ):
+                    self.recovery().inspect(
+                        feature_id="F001",
+                        autopilot_run_id=run_id,
+                        expected_branch="codex/F001-synthetic-feature",
+                        expected_head=self.head,
+                    )
+        atomic_write_json(report_path, baseline)
 
     def test_dry_run_authenticates_and_writes_nothing(self):
         before = {

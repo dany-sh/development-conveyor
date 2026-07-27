@@ -589,7 +589,8 @@
         "Swift source discovery alone does not require unavailable build-macos-apps skills; exact feature-contract declarations remain authoritative and fail closed when unavailable",
         "The pinned CLI proves the minimal feature requested and effective allowlists are identical before model launch",
         "A later feature failure cannot be intercepted by an unrelated historical planning or integration finalization recovery",
-        "The live F078 state routes first through deterministic cache rebinding and then to the exact prepared feature execution plan"
+        "The live F078 state routes first through deterministic cache rebinding and then to the exact prepared feature execution plan",
+        "An exact zero-session run-scoped capability-isolation failure recovers deterministically to feature_cycle while any report, session, model, repository, branch, HEAD, lease, or Git drift fails closed"
       ],
       "requires_human_decision": false,
       "execution_policy": {
