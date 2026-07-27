@@ -6926,10 +6926,9 @@ class CycleEngine:
             )
         )
         queue = FeatureQueue.from_location(project.repository, project.queue_location)
-        selected = canonical_projection.get(
-            "selected_next_feature"
-        ) or canonical_projection.get("current_feature")
+        selected = canonical_projection.get("selected_next_feature")
         current_feature = canonical_projection.get("current_feature")
+        execution_feature = selected or current_feature
         current_state = canonical_projection.get("current_state")
         ordinary_next_action = canonical_projection.get("allowed_next_action")
         writer = inspect_repository_writer_lock(
@@ -6947,7 +6946,11 @@ class CycleEngine:
             or any(inspector.git_operation_state().values())
         ):
             return None
-        selected_queue_feature = queue.feature(selected) if selected is not None else None
+        selected_queue_feature = (
+            queue.feature(execution_feature)
+            if execution_feature is not None
+            else None
+        )
         observed_projection = projection_engine.rebuild(
             persist_cache=False,
             observations=build_projection_observations(
@@ -7044,7 +7047,7 @@ class CycleEngine:
             build_run_plan(
                 {
                     "proposed_next_action": "feature_cycle",
-                    "selected_feature": selected,
+                    "selected_feature": execution_feature,
                     "application_mutation_expected": True,
                 },
                 self.root,
@@ -7052,7 +7055,7 @@ class CycleEngine:
                 profile_configuration=self.configuration.execution_profiles or None,
                 override_profile=self.execution_profile_override,
             )
-            if selected is not None
+            if execution_feature is not None
             else None
         )
         return {
@@ -7064,6 +7067,7 @@ class CycleEngine:
             "current_state": current_state,
             "current_feature": current_feature,
             "selected_feature": selected,
+            "execution_feature": execution_feature,
             "ordinary_next_action": ordinary_next_action,
             "source_transaction": source_transaction,
             "ledger_sequence": canonical_binding.ledger_sequence,
@@ -7105,7 +7109,9 @@ class CycleEngine:
         reservation.acquire(make_lock_record(
             project_id=project.project_id,
             repository_identity=inspector.identity()["repository_id"], run_id=run_id,
-            current_feature=plan.get("selected_feature"),
+            current_feature=(
+                plan.get("execution_feature") or plan.get("current_feature")
+            ),
             current_phase="cache_binding_recovery",
         ))
         try:
@@ -7115,7 +7121,8 @@ class CycleEngine:
             immutable = (
                 "source_transaction", "ledger_sequence", "ledger_fingerprint", "projection_fingerprint",
                 "repository_branch", "repository_head", "queue_fingerprint", "current_state",
-                "current_feature", "selected_feature", "ordinary_next_action",
+                "current_feature", "selected_feature", "execution_feature",
+                "ordinary_next_action",
             )
             if refreshed is None or any(refreshed.get(key) != plan.get(key) for key in immutable):
                 raise RecoveryError("cache-binding recovery evidence changed before signing")
@@ -7195,7 +7202,9 @@ class CycleEngine:
                 inspector.cycle_state_path(), state, ledger=ledger,
                 projection_engine=projection_engine,
                 transaction_id=str(plan["source_transaction"]),
-                expected_feature=plan["selected_feature"],
+                expected_feature=(
+                    plan.get("execution_feature") or plan.get("current_feature")
+                ),
             )
             return {
                 "project_id": project.project_id,

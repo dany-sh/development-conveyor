@@ -1895,3 +1895,11 @@ This log records model configuration and deterministic deployment evidence. It n
   Runtime audit reports exact zero-model and zero-child routing, empty
   capability allowlists, and zero mutation counters. No application or
   authoritative controller state was changed during inspection.
+- Live recovery correction: apply-time proof exposed that the cache plan had
+  collapsed canonical nullable `selected_next_feature` into `current_feature`.
+  The corrected plan preserves both identities while using the current feature
+  only for the prepared execution plan. All 17 focused cache-binding
+  regressions passed. The live cache rebind then updated only ignored
+  `.factory/conveyor-state.json`, launched zero models and children, created no
+  application commit, and stopped. Consistency returned `CONSISTENT` with no
+  failed invariant.

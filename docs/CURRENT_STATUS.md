@@ -19,6 +19,11 @@ The live F078 repository remains clean on
 now selects deterministic `cache_binding_recovery` with zero model and child
 sessions instead of raising an unrelated historical recovery error.
 
+The deterministic cache rebind has now completed with zero models, children,
+or application commits and only the ignored `.factory/conveyor-state.json`
+updated. Consistency reports `CONSISTENT`; the next boundary is resuming the
+existing F078 feature execution with the exact four-capability allowlist.
+
 Seventy-one focused capability, routing, runtime-audit, planning, recovery,
 and execution-identity tests pass. Compilation, configuration and queue
 validation, the global model-policy validator, pinned-CLI capability proof,
@@ -664,10 +669,9 @@ Explicit capability selection and failed-resume recovery (`review`)
 
 ## Next boundary
 
-Commit the controller repair, apply only the deterministic F078 cache rebind,
-verify the exact feature capability allowlist, then resume the existing F078
-cycle. Do not create another feature, merge a default branch, push, tag,
-publish, deploy, or release.
+Resume the existing F078 cycle with the exact feature capability allowlist.
+Do not create another feature, merge a default branch, push, tag, publish,
+deploy, or release.
 
 ## Validation scope
 

@@ -27,6 +27,10 @@ of allowing its ordinary recovery route.
   existing authenticated failed-planning-recovery supersession.
 - A later feature failure therefore cannot reopen unrelated historical
   recovery evidence.
+- Cache rebinding preserves the canonical distinction between
+  `current_feature` and nullable `selected_next_feature`. The current feature
+  may supply the next execution plan without being written back as a projected
+  selection.
 
 ## Acceptance evidence
 
@@ -40,6 +44,9 @@ of allowing its ordinary recovery route.
 - Read-only status recognizes the stale compatibility cache as a deterministic
   zero-model recovery instead of raising historical planning or integration
   recovery errors.
+- The live cache rebind updates only ignored compatibility state, launches
+  zero models and children, creates no application commit, and leaves
+  consistency `CONSISTENT`.
 
 ## Execution policy
 
