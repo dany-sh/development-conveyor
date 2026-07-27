@@ -25,3 +25,5 @@
 | M1-025 | Explicit capability selection and failed-resume recovery | review | M1 | `docs/features/M1-025-explicit-capability-selection-and-resume-recovery.md` |
 | M1-026 | Deterministic queue control and project pause | review | M1 | `docs/features/M1-026-deterministic-queue-control-and-project-pause.md` |
 | M1-027 | Native Conveyor backlog control plane | review | M1 | `docs/features/M1-027-native-backlog-control-plane.md` |
+| M1-028 | Complete queue browsing scopes | integrated | M1 | `docs/features/M1-028-complete-queue-browsing-scopes.md` |
+| M1-029 | Generic retained repair recovery | ready | M1 | `docs/features/M1-029-generic-retained-repair-recovery.md` |

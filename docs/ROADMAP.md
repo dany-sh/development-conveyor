@@ -2,7 +2,11 @@
 
 ## Current milestone
 
-M1 replaces phase-specific mutable-state authority with an append-only transaction ledger and rebuildable projections. M1-001 is the sole integrated feature; its post-integration repair/finalization commits remain distinct from the immutable accepted feature commit.
+M1 replaces phase-specific mutable-state authority with an append-only
+transaction ledger and rebuildable projections. M1-001 and the historical
+M1-028 queue-browsing work are recorded as integrated; M1-001's
+post-integration repair/finalization commits remain distinct from its immutable
+accepted feature commit.
 
 M1-014 adds a fail-closed recovery boundary for a valid post-integration
 planning parent whose named nested roles were unavailable before inspection.
@@ -21,6 +25,11 @@ read-only queue inspection, queue-only reprioritization, exact eligible feature
 selection, and an operator pause flag in the existing project runtime
 authority. Exceptional model-backed product-plan reconciliation remains
 explicit rather than part of routine run or resume.
+
+M1-029 is the next dependency-ready controller feature. It generalizes retained
+repair recovery across structured-result-invalid, host-validation-failed, and
+mixed attempt chains while preserving evidence-derived commands and fail-closed
+identity, topology, ownership, path, fingerprint, and command checks.
 
 ## Later milestones
 

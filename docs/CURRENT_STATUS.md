@@ -4,6 +4,22 @@ Last updated: 2026-07-27
 
 ## Summary
 
+M1-029, Generic retained repair recovery, is the sole dependency-ready
+feature. It depends on integrated M1-028 and is assigned to
+`codex/m1-29-generic-retained-repair-recovery`; deterministic preparation will
+bind its exact integration base before production implementation begins. Its
+acceptance boundary covers structured-result-invalid plus valid
+`FEATURE_ACCEPTED`, host-validation-failed, and mixed repair chains; generic
+evidence-derived validation commands; fail-closed identity, path, fingerprint,
+topology, ownership, and command checks; and complete configured validation.
+
+Historical M1-028, Complete queue browsing scopes, is reconciled as integrated
+commit `b7ac3641564c9827e426bc08b8cfe131917faa74` on
+`codex/development-conveyor`. It adds active, unfinished, and all queue scopes,
+optional milestone filtering, complete read-only feature rows and milestone
+summaries, future-milestone execution-ineligibility reasons, and a structured
+unknown-milestone result without changing active execution selection.
+
 Native backlog control operations are implemented on
 `codex/m1-27-backlog-control-plane` from exact parent
 `7e8e24af6fa4260404bbb653bea42b249f26e332`.

@@ -8,9 +8,10 @@
       "base_commit": "eb9a0198f8d1a69db2b7e4099ebd17c3bed9550b",
       "integration_branch": "codex/development-conveyor",
       "integrated_features": [
-        "M1-001"
+        "M1-001",
+        "M1-028"
       ],
-      "last_validated_commit": "96c5c4a85f54b183e7c6b798890b947bd1de782f",
+      "last_validated_commit": "b7ac3641564c9827e426bc08b8cfe131917faa74",
       "human_gate": true
     }
   ],
@@ -660,6 +661,66 @@
       },
       "branch": "codex/m1-27-backlog-control-plane",
       "integration_base_commit": "7e8e24af6fa4260404bbb653bea42b249f26e332",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
+    },
+    {
+      "id": "M1-028",
+      "title": "Complete queue browsing scopes",
+      "status": "integrated",
+      "priority": "P1",
+      "milestone": "M1",
+      "dependencies": [
+        "M1-027"
+      ],
+      "spec": "docs/features/M1-028-complete-queue-browsing-scopes.md",
+      "acceptance_criteria": [
+        "Queue inspection supports active, unfinished, and all scopes without changing active-milestone execution selection",
+        "An optional milestone filter returns complete typed rows for the requested known milestone while future-milestone work remains execution-ineligible",
+        "Unknown milestones return a stable structured read-only error with zero model and child sessions",
+        "Focused queue-control tests prove deterministic counts, ordering, milestone summaries, execution reasons, and zero queue or Git mutation"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "multi_module_precise",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-28-feature-scope-and-panel-controls",
+      "integration_base_commit": "e46a6a92f620b0f984503a70a5d1fb2997a28b6c",
+      "accepted_commit": "b7ac3641564c9827e426bc08b8cfe131917faa74",
+      "integrated_commit": "b7ac3641564c9827e426bc08b8cfe131917faa74",
+      "integration_status": "passed",
+      "integration_fix_commits": []
+    },
+    {
+      "id": "M1-029",
+      "title": "Generic retained repair recovery",
+      "status": "ready",
+      "priority": "P1",
+      "milestone": "M1",
+      "dependencies": [
+        "M1-028"
+      ],
+      "spec": "docs/features/M1-029-generic-retained-repair-recovery.md",
+      "acceptance_criteria": [
+        "Ledger ValidationFailed and immutable report semantics authenticate a structured-result-invalid attempt followed by a valid FEATURE_ACCEPTED result, host-validation-failed chains, and mixed chains",
+        "The recovery command plan is derived generically from authenticated retained evidence and preserves the exact ordered trusted-host validation commands",
+        "Repository identity, path, fingerprint, topology, ownership, and command disagreement fail closed before validation, commit, gate supersession, or projection mutation",
+        "A passing retained candidate completes deterministic final recovery with zero models and children and reaches integration_pending without integration",
+        "No feature-specific IDs, paths, command arrays, or diagnostic strings are embedded in the generic recovery implementation",
+        "The complete configured validation command set and focused retained-repair recovery regressions pass"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "ambiguous_or_authoritative",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-29-generic-retained-repair-recovery",
+      "integration_base_commit": null,
       "accepted_commit": null,
       "integrated_commit": null,
       "integration_status": "pending",

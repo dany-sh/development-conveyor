@@ -2008,3 +2008,33 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `m1_027_direct_parent_implementation`
 - Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-27T21:03:22+00:00
+
+- Agent role: `repository-explorer`
+- Effective model: `gpt-5.6-terra`
+- Effective reasoning effort: `medium`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_029_repository_evidence`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-27T21:03:22+00:00
+
+- Agent role: `product-architect`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `xhigh`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_029_architecture_recommendation`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-27T21:03:22+00:00
+
+- Agent role: `feature-inventory-lead`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m1_029_inventory_reconciliation`
+- Safety and autonomy contracts unchanged: `true`
