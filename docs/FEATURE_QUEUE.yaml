@@ -512,6 +512,36 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-023",
+      "title": "Runtime policy and context discipline",
+      "status": "review",
+      "priority": 23,
+      "milestone": "M1",
+      "dependencies": [
+        "M1-022"
+      ],
+      "spec": "docs/features/M1-023-runtime-policy-and-context-discipline.md",
+      "acceptance_criteria": [
+        "Canonical routing uses zero models for deterministic work, Luna for preparation, Terra for bounded application implementation, and Sol only for controller, architecture, ambiguity, or recorded escalation authority",
+        "Selected feature profiles remain authoritative, unavailable exact models and silent fallback fail closed, and child budget defaults to zero with one child permitted only by complete cost-saving evidence",
+        "Conveyor-launched sessions prove an exact workflow capability allowlist through pinned-CLI session configuration and a model-free prompt-input probe or fail closed before launch",
+        "Workflow-specific context packs and compact terminal contracts preserve exact identity, failures, changed paths, validation, commit, blocker, and recovery evidence while excluding unrelated context",
+        "The read-only audit-runtime command reports model, capability, context, output, repository, and zero-mutation evidence and exits nonzero on policy violations"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-23-runtime-policy-and-context-discipline",
+      "integration_base_commit": "56489e89ab2b9404ca98b8eed132b506d544afab",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

@@ -215,6 +215,8 @@ def build_context_pack(
     *,
     phase: str,
     explicitly_requested: Iterable[str] = (),
+    inclusion_reasons: dict[str, str] | None = None,
+    excluded_categories: Iterable[str] = (),
     max_text_bytes: int = DEFAULT_MAX_TEXT_BYTES,
 ) -> ContextPack:
     """Render text and bounded metadata while producing fingerprinted evidence."""
@@ -253,6 +255,26 @@ def build_context_pack(
     evidence: dict[str, Any] = {
         "schema_version": 1,
         "phase": phase,
+        "file_count": (
+            len(included_textual)
+            + len(binary_metadata)
+            + len(oversized)
+        ),
+        "approximate_bytes": textual_bytes,
+        "included_paths": [
+            *included_textual,
+            *(item["path"] for item in binary_metadata),
+            *(item["path"] for item in oversized),
+        ],
+        "excluded_categories": list(dict.fromkeys(excluded_categories)),
+        "inclusion_reasons": {
+            path: (inclusion_reasons or {}).get(path, "controller-selected workflow context")
+            for path in [
+                *included_textual,
+                *(item["path"] for item in binary_metadata),
+                *(item["path"] for item in oversized),
+            ]
+        },
         "included_textual_paths": included_textual,
         "excluded_generated_paths": excluded_generated,
         "binary_metadata_paths": binary_metadata,

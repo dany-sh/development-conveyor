@@ -99,3 +99,24 @@ class ContextPackTests(unittest.TestCase):
             second.evidence["context_pack_fingerprint"],
         )
         self.assertEqual(first.evidence["typed_read_failures"], [])
+
+    def test_evidence_reports_count_bytes_paths_and_reasons(self):
+        self.write("src/app.py", b"print('ok')\n")
+        pack = build_context_pack(
+            self.root,
+            ["src/app.py"],
+            phase="feature_prompt_render",
+            inclusion_reasons={"src/app.py": "directly relevant source"},
+            excluded_categories=("unrelated feature specifications",),
+        )
+        self.assertEqual(pack.evidence["file_count"], 1)
+        self.assertEqual(pack.evidence["approximate_bytes"], 12)
+        self.assertEqual(pack.evidence["included_paths"], ["src/app.py"])
+        self.assertEqual(
+            pack.evidence["inclusion_reasons"]["src/app.py"],
+            "directly relevant source",
+        )
+        self.assertEqual(
+            pack.evidence["excluded_categories"],
+            ["unrelated feature specifications"],
+        )

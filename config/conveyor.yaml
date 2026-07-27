@@ -12,6 +12,12 @@
     "capture_json_events": true,
     "resume_sessions": true
   },
+  "runtime_policy": {
+    "capability_isolation_required": true,
+    "compact_output_required": true,
+    "default_child_session_budget": 0,
+    "maximum_child_session_budget": 1
+  },
   "lock_policy": {
     "writer_lock_relative_path": ".factory/locks/writer.json",
     "controller_launch_lock_directory": "state/launch-locks",

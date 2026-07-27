@@ -607,14 +607,14 @@ M1 — Transactional workflow kernel
 
 ## Active controller repair
 
-Retained feature terminal-state transition (`review`)
+Runtime policy and context discipline (`review`)
 
 ## Next boundary
 
-Commit the controller repair. Do not run `recover-feature-result --apply`,
-restart Autopilot, run ordinary Conveyor resume, resolve the technical gate
-through the generic human-decision route, integrate F070, reconcile its queue,
-merge, push, tag, publish, deploy, or release.
+Commit the controller repair. Do not run a real Conveyor resume, queue
+reconciliation, feature cycle, milestone integration, Autopilot, application
+build, or application test; do not merge, push, tag, publish, deploy, or
+release.
 
 ## Validation scope
 

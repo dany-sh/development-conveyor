@@ -74,7 +74,7 @@ class CostPolicyTests(unittest.TestCase):
             write_json(queue_path, queue)
             plan = build_run_plan({"proposed_next_action": "feature_cycle", "selected_feature": "F003", "application_mutation_expected": True}, Path.cwd(), project=project)
             self.assertEqual((plan["task_classification"], plan["risk_classification"]), ("application_feature", "high"))
-            self.assertEqual((plan["selected_model"], plan["selected_reasoning_effort"]), ("gpt-5.6-sol", "medium"))
+            self.assertEqual((plan["selected_model"], plan["selected_reasoning_effort"]), ("gpt-5.6-terra", "medium"))
             self.assertGreater(plan["context_pack"]["file_count"], 0)
             self.assertEqual(plan["profile_resolution_source"], "workflow_fallback")
 
@@ -105,6 +105,7 @@ class CostPolicyTests(unittest.TestCase):
                 "queue_reconciliation", project, "budgeted-run", "one_feature",
                 parent_session_budget=1,
                 planned_model="gpt-5.6-luna", planned_reasoning="high",
+                model_plan_source="workflow_fallback",
             )
             with (
                 patch.object(launcher, "compatibility", return_value=compatible),
@@ -182,6 +183,7 @@ class CostPolicyTests(unittest.TestCase):
                 "one_feature",
                 planned_model="gpt-5.6-terra",
                 planned_reasoning="medium",
+                model_plan_source="workflow_fallback",
             )
             with (
                 patch.object(launcher, "compatibility", return_value=compatible),
@@ -337,7 +339,7 @@ class CostPolicyTests(unittest.TestCase):
             "child_sessions": 0,
             "escalation": {
                 "trigger": "material_architecture_or_authority_ambiguity",
-                "profile": "generic_or_architectural",
+                "profile": "bounded_precise",
             },
         }
         parsed = validate_feature_execution_policy(policy)
@@ -365,7 +367,7 @@ class CostPolicyTests(unittest.TestCase):
         self.assertEqual(
             resolved["execution_policy"],
             {
-                "profile": "generic_or_architectural",
+                "profile": "bounded_precise",
                 "parent_sessions": 1,
                 "child_sessions": 0,
             },
@@ -376,7 +378,7 @@ class CostPolicyTests(unittest.TestCase):
                 resolved["resolved_execution_profile"]["reasoning"],
                 resolved["policy_source"],
             ),
-            ("gpt-5.6-sol", "medium", "workflow_fallback"),
+            ("gpt-5.6-terra", "medium", "workflow_fallback"),
         )
         self.assertFalse(resolved["explicit_policy_preserved"])
 
@@ -472,6 +474,16 @@ class CostPolicyTests(unittest.TestCase):
                 "recorded": True, "context_complete": True,
                 "trigger": "material_architecture_or_authority_ambiguity",
                 "evidence_id": "e-3",
+                "previous_profile": "multi_module_precise",
+                "previous_model": "gpt-5.6-terra",
+                "previous_reasoning": "high",
+                "failed_command_or_unresolved_evidence": "architecture ownership remains contradictory",
+                "escalation_trigger": "material_architecture_or_authority_ambiguity",
+                "new_profile": "generic_or_architectural",
+                "new_model": "gpt-5.6-sol",
+                "new_reasoning": "medium",
+                "expected_resolution": "resolve the recorded authority ambiguity",
+                "attempt_number": 1,
             },
         )
         self.assertEqual(

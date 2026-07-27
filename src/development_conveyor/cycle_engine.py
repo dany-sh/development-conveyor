@@ -5099,6 +5099,11 @@ class CycleEngine:
                 planned_model=str(cost_plan["selected_model"]),
                 planned_reasoning=str(cost_plan["selected_reasoning_effort"]),
                 model_plan_source=str(cost_plan["profile_resolution_source"]),
+                selected_profile=str(cost_plan["profile"]),
+                child_delegation=cost_plan.get("child_agent_justification"),
+                relevant_macos_skills=tuple(
+                    cost_plan.get("relevant_macos_skills") or ()
+                ),
                 context_files=tuple(cost_plan["context_pack"]["files"]),
             )
             if request.feature != bound_feature_id:
@@ -5714,6 +5719,8 @@ class CycleEngine:
             planned_model=str(cost_plan["selected_model"]),
             planned_reasoning=str(cost_plan["selected_reasoning_effort"]),
             model_plan_source=str(cost_plan["profile_resolution_source"]),
+            selected_profile=str(cost_plan["profile"]),
+            child_delegation=cost_plan.get("child_agent_justification"),
         ), inspector, "queue_reconciliation", "queue_reconciliation_repairs", reservation_held=True,
             on_session_started=kernel.session_launched)
         if not result.session_id:

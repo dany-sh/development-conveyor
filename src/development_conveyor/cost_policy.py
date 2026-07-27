@@ -12,6 +12,7 @@ import os
 import platform
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -27,6 +28,7 @@ from .execution_profiles import (
     DEFAULT_PROFILES,
     resolve_execution_profile,
 )
+from .capability_policy import requested_capability_allowlist
 
 
 POLICY_VERSION = 1
@@ -208,11 +210,16 @@ class ChildSessionBudget:
 
 
 def contain_command_output(command: list[str], *, cwd: Path, report_path: Path) -> dict[str, Any]:
+    started = time.monotonic()
     result = subprocess.run(command, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    duration = round(time.monotonic() - started, 6)
     output = result.stdout + result.stderr
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(output, encoding="utf-8")
-    return {"command": command, "exit_status": result.returncode, "report_path": str(report_path),
+    return {"command": command, "exit_status": result.returncode, "exit_code": result.returncode,
+            "duration": duration, "output_hash": hashlib.sha256(output.encode()).hexdigest(),
+            "bounded_tail_or_summary": output[-1000:] if output else "no command output",
+            "report_path": str(report_path),
             "output_bytes": len(output.encode()), "truncated_for_context": len(output) > 4000,
             "failure_excerpt": output[-1000:] if result.returncode else None}
 
@@ -223,7 +230,11 @@ def _queue_reconciliation_context_pack(project: Any) -> dict[str, Any]:
     queue = FeatureQueue.from_location(repository, project.queue_location)
     milestone = project.active_milestone or ""
     selected = queue.select_next(milestone)
-    candidates = [] if selected is not None else queue.features_for_milestone(milestone)
+    all_candidates = [] if selected is not None else [
+        item for item in queue.features_for_milestone(milestone)
+        if item.get("status") not in {"accepted", "integrated", "passed", "completed"}
+    ]
+    candidates = all_candidates[:3]
     paths = [project.queue_location, "docs/CURRENT_STATUS.md", "docs/FEATURE_CATALOG.md"]
     # Candidate specs carry the only feature-level semantic context permitted.
     paths.extend(
@@ -243,6 +254,10 @@ def _queue_reconciliation_context_pack(project: Any) -> dict[str, Any]:
             **{path: "candidate specification or roadmap ordering constraint" for path in files if path != project.queue_location},
         },
         "excluded_categories": ["all milestones", "unrelated feature specifications", "full Git history", "global memory", "application source"],
+        "candidate_feature_ids": [
+            item.get("id") for item in candidates if isinstance(item.get("id"), str)
+        ],
+        "excluded_candidate_feature_count": max(0, len(all_candidates) - len(candidates)),
         "output_contract": "queue reconciliation terminal result contract",
     }
 
@@ -315,14 +330,27 @@ def _application_feature_context_pack(project: Any, feature: dict[str, Any]) -> 
         )
     planning_paths = [
         project.queue_location, "docs/CURRENT_STATUS.md", spec,
-        ".factory/project.yaml", "docs/architecture.md", "docs/data-flow.md",
+        "AGENTS.md", ".factory/project.yaml", "docs/ARCHITECTURE.md",
+        "docs/architecture.md", "docs/data-flow.md",
+    ]
+    dependencies = [
+        item for item in feature.get("dependencies", [])
+        if isinstance(item, str)
+    ]
+    queue = FeatureQueue.from_location(repository, project.queue_location)
+    dependency_specs = [
+        str((queue.feature(dependency) or {}).get("spec") or "")
+        for dependency in dependencies
     ]
     direct_paths = [
         token for token in re.findall(r"`([^`]+)`", contract)
         if "/" in token and (repository / token).is_file()
     ]
     files = list(dict.fromkeys(
-        path for path in [*planning_paths, *direct_paths, *source_files, *test_files]
+        path for path in [
+            *planning_paths, *dependency_specs, *direct_paths,
+            *source_files, *test_files,
+        ]
         if path and (repository / path).is_file()
     ))
     reasons = {
@@ -338,6 +366,15 @@ def _application_feature_context_pack(project: Any, feature: dict[str, Any]) -> 
         [*files, *sorted(set(generated_candidates))[:100]],
         phase="feature_context_selection",
         explicitly_requested=direct_paths,
+        inclusion_reasons=reasons,
+        excluded_categories=(
+            "unrelated feature specifications",
+            "unrelated milestones",
+            "full Git history",
+            "global memory",
+            "unrelated skills/plugins",
+            "full test logs",
+        ),
     )
     return {
         "files": files, "file_count": len(files),
@@ -415,6 +452,19 @@ def build_run_plan(
     )
     parent_sessions_planned = resolved.parent_sessions if resolved.model is not None else 0
     child_sessions_planned = resolved.child_sessions if resolved.model is not None else 0
+    macos_skills: tuple[str, ...] = ()
+    if application_feature and any(
+        str(path).endswith(".swift") for path in pack.get("files", [])
+    ):
+        macos_skills = (
+            "build-macos-apps:swiftpm-macos",
+            "build-macos-apps:swiftui-patterns",
+            "build-macos-apps:test-triage",
+        )
+    requested_capabilities = requested_capability_allowlist(
+        action,
+        relevant_macos_skills=macos_skills,
+    )
     return {"schema_version": POLICY_VERSION, "workflow_type": action, "task_classification": task,
             "queue_reconciliation_route": (
                 "deterministic_queue_selection" if deterministic_queue_selection
@@ -428,7 +478,11 @@ def build_run_plan(
             "selected_model": resolved.model, "selected_reasoning_effort": resolved.reasoning,
             "parent_session_budget": resolved.parent_sessions,
             "child_session_budget": resolved.child_sessions,
-            "child_agent_justification": None,
+            "child_agent_justification": (
+                resolved.child_delegation or None
+            ),
+            "requested_capability_allowlist": list(requested_capabilities),
+            "relevant_macos_skills": list(macos_skills),
             "context_pack": pack, "deterministic_commands_planned": verify["commands"], "selected_tests": verify["tests"],
             "implementation_loop_verification": {"tests": verify["tests"], "commands": verify["commands"], "builds": verify["builds"]},
             "final_feature_acceptance_gates": verify.get("final_acceptance_gates", []),

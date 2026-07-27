@@ -7,6 +7,7 @@ evidence only; feature wording is never a routing signal.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -31,8 +32,8 @@ DEFAULT_PROFILES: dict[str, dict[str, str]] = {
     "bounded_precise": {"model": "gpt-5.6-terra", "reasoning": "medium"},
     "multi_module_precise": {"model": "gpt-5.6-terra", "reasoning": "high"},
     "application_feature_implementation": {
-        "model": "gpt-5.3-codex",
-        "reasoning": "high",
+        "model": "gpt-5.6-terra",
+        "reasoning": "medium",
     },
     "generic_or_architectural": {"model": "gpt-5.6-sol", "reasoning": "medium"},
     "ambiguous_or_authoritative": {"model": "gpt-5.6-sol", "reasoning": "high"},
@@ -41,7 +42,7 @@ DEFAULT_PROFILES: dict[str, dict[str, str]] = {
 
 DEFAULT_WORKFLOW_FALLBACKS = {
     "queue_reconciliation": "repository_aware",
-    "application_feature": "generic_or_architectural",
+    "application_feature": "bounded_precise",
     "controller_repair": "generic_or_architectural",
     "metadata": "mechanical",
 }
@@ -54,6 +55,7 @@ class FeatureExecutionPolicy:
     child_sessions: int
     escalation_trigger: str | None = None
     escalation_profile: str | None = None
+    child_delegation: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         value: dict[str, Any] = {
@@ -66,6 +68,8 @@ class FeatureExecutionPolicy:
                 "trigger": self.escalation_trigger,
                 "profile": self.escalation_profile,
             }
+        if self.child_delegation is not None:
+            value["child_delegation"] = self.child_delegation
         return value
 
 
@@ -81,6 +85,7 @@ class ResolvedExecutionProfile:
     escalation_profile: str | None
     escalated: bool = False
     escalation_evidence_id: str | None = None
+    child_delegation: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -94,7 +99,111 @@ class ResolvedExecutionProfile:
             "escalation_profile": self.escalation_profile,
             "escalated": self.escalated,
             "escalation_evidence_id": self.escalation_evidence_id,
+            "child_delegation": self.child_delegation,
         }
+
+
+_MODEL_COST_RANK = {
+    "gpt-5.6-luna": 0,
+    "gpt-5.6-terra": 1,
+    "gpt-5.6-sol": 2,
+}
+_GENERIC_CHILD_JUSTIFICATIONS = {
+    "save tokens",
+    "cost saving",
+    "cheaper child",
+    "reduce cost",
+    "use a child",
+}
+_UNSUITABLE_CHILD_BOUNDARY_TERMS = (
+    "whole application",
+    "architecture decision",
+    "durable state",
+    "integration decision",
+    "recovery decision",
+    "dispatch policy",
+    "repository-wide contradiction",
+)
+
+
+def _validate_child_delegation(
+    value: Any,
+    *,
+    path: str,
+    error_type: type[Exception],
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise error_type(f"{path}: expected an object")
+    required = {
+        "role",
+        "profile",
+        "cost_saving_justification",
+        "task_boundary",
+        "expected_input_context_bytes",
+        "parent_context_bytes",
+        "expected_output_contract",
+        "read_only",
+        "owned_paths",
+        "parent_owned_paths",
+    }
+    if set(value) != required:
+        missing = sorted(required - set(value))
+        unknown = sorted(set(value) - required)
+        detail = []
+        if missing:
+            detail.append("missing " + ", ".join(missing))
+        if unknown:
+            detail.append("unsupported " + ", ".join(unknown))
+        raise error_type(f"{path}: " + "; ".join(detail))
+    normalized = dict(value)
+    for key, minimum in (
+        ("role", 1),
+        ("cost_saving_justification", 20),
+        ("task_boundary", 12),
+        ("expected_output_contract", 12),
+    ):
+        item = value.get(key)
+        if not isinstance(item, str) or len(item.strip()) < minimum:
+            raise error_type(f"{path}.{key}: expected at least {minimum} non-whitespace characters")
+        normalized[key] = item.strip()
+    justification = normalized["cost_saving_justification"].lower()
+    if (
+        justification in _GENERIC_CHILD_JUSTIFICATIONS
+        or (
+            any(term in justification for term in _GENERIC_CHILD_JUSTIFICATIONS)
+            and len(justification.split()) <= 6
+        )
+    ):
+        raise error_type(f"{path}.cost_saving_justification: generic justification is not cost evidence")
+    boundary = normalized["task_boundary"].lower()
+    if any(term in boundary for term in _UNSUITABLE_CHILD_BOUNDARY_TERMS):
+        raise error_type(f"{path}.task_boundary: child cannot own architecture or durable authority")
+    profile = value.get("profile")
+    if profile not in PROFILE_NAMES:
+        raise error_type(f"{path}.profile: unsupported profile {profile!r}")
+    for key in ("expected_input_context_bytes", "parent_context_bytes"):
+        item = value.get(key)
+        if not isinstance(item, int) or isinstance(item, bool) or item < 1:
+            raise error_type(f"{path}.{key}: expected a positive integer")
+    if value["expected_input_context_bytes"] * 2 > value["parent_context_bytes"]:
+        raise error_type(f"{path}: child context must be materially smaller than parent context")
+    if not isinstance(value.get("read_only"), bool):
+        raise error_type(f"{path}.read_only: expected a boolean")
+    for key in ("owned_paths", "parent_owned_paths"):
+        paths = value.get(key)
+        if (
+            not isinstance(paths, list)
+            or not all(isinstance(item, str) and item.strip() for item in paths)
+            or len(paths) != len(set(paths))
+        ):
+            raise error_type(f"{path}.{key}: expected unique non-empty repository-relative paths")
+        normalized[key] = sorted(paths)
+    if not normalized["read_only"] and not normalized["owned_paths"]:
+        raise error_type(f"{path}: a writing child requires exclusive owned_paths")
+    overlap = sorted(set(normalized["owned_paths"]) & set(normalized["parent_owned_paths"]))
+    if overlap:
+        raise error_type(f"{path}: child and parent production-file ownership overlaps: {', '.join(overlap)}")
+    return normalized
 
 
 def validate_feature_execution_policy(
@@ -105,7 +214,10 @@ def validate_feature_execution_policy(
 ) -> FeatureExecutionPolicy:
     if not isinstance(value, dict):
         raise error_type(f"{path}: expected an object")
-    allowed = {"profile", "parent_sessions", "child_sessions", "escalation"}
+    allowed = {
+        "profile", "parent_sessions", "child_sessions", "escalation",
+        "child_delegation",
+    }
     unknown = sorted(set(value) - allowed)
     if unknown:
         raise error_type(f"{path}: unsupported keys: {', '.join(unknown)}")
@@ -118,6 +230,22 @@ def validate_feature_execution_policy(
         raise error_type(f"{path}.parent_sessions: expected an integer of at least 1")
     if not isinstance(child, int) or isinstance(child, bool) or child < 0:
         raise error_type(f"{path}.child_sessions: expected a non-negative integer")
+    if child > 1:
+        raise error_type(f"{path}.child_sessions: initial policy permits at most one child")
+    child_delegation = value.get("child_delegation")
+    if child == 0 and child_delegation is not None:
+        raise error_type(f"{path}.child_delegation: must be absent when child_sessions is zero")
+    if child == 1 and child_delegation is None:
+        raise error_type(f"{path}.child_delegation: required when child_sessions is positive")
+    normalized_child = (
+        _validate_child_delegation(
+            child_delegation,
+            path=f"{path}.child_delegation",
+            error_type=error_type,
+        )
+        if child_delegation is not None
+        else None
+    )
     trigger = None
     escalation_profile = None
     escalation = value.get("escalation")
@@ -140,6 +268,7 @@ def validate_feature_execution_policy(
         child_sessions=child,
         escalation_trigger=trigger.strip() if isinstance(trigger, str) else None,
         escalation_profile=escalation_profile,
+        child_delegation=normalized_child,
     )
 
 
@@ -242,15 +371,115 @@ def _eligible_escalation(
         or evidence.get("environment_failure") is True
         or evidence.get("localized_test_omission") is True
     )
+    required_record = {
+        "previous_profile",
+        "previous_model",
+        "previous_reasoning",
+        "failed_command_or_unresolved_evidence",
+        "escalation_trigger",
+        "new_profile",
+        "new_model",
+        "new_reasoning",
+        "expected_resolution",
+        "attempt_number",
+    }
+    complete_record = required_record <= set(evidence)
+    previous = DEFAULT_PROFILES.get(policy.profile, {})
+    next_profile = DEFAULT_PROFILES.get(policy.escalation_profile, {})
+    attempt = evidence.get("attempt_number")
+    xhigh_first_attempt = (
+        policy.escalation_profile == "unresolved_after_high"
+        and (not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 2)
+    )
     eligible = (
         evidence.get("recorded") is True
         and evidence.get("trigger") == policy.escalation_trigger
+        and evidence.get("escalation_trigger") == policy.escalation_trigger
         and evidence.get("context_complete") is True
         and not disqualifying
+        and complete_record
+        and evidence.get("previous_profile") == policy.profile
+        and evidence.get("previous_model") == previous.get("model")
+        and evidence.get("previous_reasoning") == previous.get("reasoning")
+        and evidence.get("new_profile") == policy.escalation_profile
+        and evidence.get("new_model") == next_profile.get("model")
+        and evidence.get("new_reasoning") == next_profile.get("reasoning")
+        and isinstance(evidence.get("failed_command_or_unresolved_evidence"), str)
+        and bool(evidence["failed_command_or_unresolved_evidence"].strip())
+        and isinstance(evidence.get("expected_resolution"), str)
+        and bool(evidence["expected_resolution"].strip())
+        and isinstance(attempt, int)
+        and not isinstance(attempt, bool)
+        and attempt >= 1
+        and not xhigh_first_attempt
         and isinstance(evidence.get("evidence_id"), str)
         and bool(evidence.get("evidence_id").strip())
     )
     return eligible, evidence.get("evidence_id") if eligible else None
+
+
+def validate_authenticated_profile_binding(
+    *,
+    authenticated: dict[str, Any],
+    current: ResolvedExecutionProfile,
+    escalation_record: dict[str, Any] | None,
+) -> None:
+    """Reject a post-validation profile change without exact escalation evidence."""
+
+    prior = (
+        authenticated.get("profile"),
+        authenticated.get("model"),
+        authenticated.get("reasoning"),
+        authenticated.get("parent_sessions"),
+        authenticated.get("child_sessions"),
+    )
+    observed = (
+        current.profile,
+        current.model,
+        current.reasoning,
+        current.parent_sessions,
+        current.child_sessions,
+    )
+    if prior == observed:
+        return
+    if not isinstance(escalation_record, dict):
+        raise ConfigurationError(
+            "authenticated execution profile changed without an escalation record"
+        )
+    checks = {
+        "previous_profile": escalation_record.get("previous_profile") == prior[0],
+        "previous_model": escalation_record.get("previous_model") == prior[1],
+        "previous_reasoning": escalation_record.get("previous_reasoning") == prior[2],
+        "new_profile": escalation_record.get("new_profile") == observed[0],
+        "new_model": escalation_record.get("new_model") == observed[1],
+        "new_reasoning": escalation_record.get("new_reasoning") == observed[2],
+        "escalation_trigger": (
+            isinstance(escalation_record.get("escalation_trigger"), str)
+            and bool(escalation_record["escalation_trigger"].strip())
+        ),
+        "failed_evidence": (
+            isinstance(
+                escalation_record.get("failed_command_or_unresolved_evidence"), str
+            )
+            and bool(
+                escalation_record["failed_command_or_unresolved_evidence"].strip()
+            )
+        ),
+        "expected_resolution": (
+            isinstance(escalation_record.get("expected_resolution"), str)
+            and bool(escalation_record["expected_resolution"].strip())
+        ),
+        "attempt_number": (
+            isinstance(escalation_record.get("attempt_number"), int)
+            and not isinstance(escalation_record.get("attempt_number"), bool)
+            and escalation_record["attempt_number"] >= 1
+        ),
+    }
+    if not all(checks.values()):
+        failed = ", ".join(name for name, passed in checks.items() if not passed)
+        raise ConfigurationError(
+            "authenticated execution profile escalation record is invalid: " + failed
+        )
 
 
 def resolve_execution_profile(
@@ -278,6 +507,7 @@ def resolve_execution_profile(
             feature_policy.child_sessions if feature_policy else 0,
             feature_policy.escalation_trigger if feature_policy else None,
             feature_policy.escalation_profile if feature_policy else None,
+            feature_policy.child_delegation if feature_policy else None,
         )
         source = "explicit_run_override"
     elif feature_policy is not None:
@@ -296,6 +526,21 @@ def resolve_execution_profile(
         escalated, evidence_id = False, None
     resolved_profile = policy.escalation_profile if escalated else policy.profile
     profile = configured["profiles"][resolved_profile]
+    child_delegation = policy.child_delegation
+    if policy.child_sessions:
+        assert child_delegation is not None
+        child_profile = configured["profiles"][child_delegation["profile"]]
+        parent_rank = _MODEL_COST_RANK.get(profile["model"])
+        child_rank = _MODEL_COST_RANK.get(child_profile["model"])
+        if parent_rank is None or child_rank is None or child_rank >= parent_rank:
+            raise ConfigurationError(
+                "positive child budget requires a strictly cheaper configured child model"
+            )
+        child_delegation = {
+            **child_delegation,
+            "model": child_profile["model"],
+            "reasoning": child_profile["reasoning"],
+        }
     return ResolvedExecutionProfile(
         profile=resolved_profile,
         resolution_source="evidence_based_escalation" if escalated else source,
@@ -307,6 +552,7 @@ def resolve_execution_profile(
         escalation_profile=policy.escalation_profile,
         escalated=escalated,
         escalation_evidence_id=evidence_id,
+        child_delegation=child_delegation,
     )
 
 
@@ -341,6 +587,8 @@ def markdown_execution_policy(
     lines, start, base_indent = blocks[0]
     policy: dict[str, Any] = {}
     escalation: dict[str, Any] | None = None
+    child_delegation: dict[str, Any] | None = None
+    nested_section: str | None = None
     for line in lines[start + 1:]:
         if not line.strip():
             continue
@@ -360,6 +608,7 @@ def markdown_execution_policy(
             )
         key, value = key_value.groups()
         if indent == base_indent + 2:
+            nested_section = None
             if key == "escalation" and value == "":
                 if "escalation" in policy:
                     raise QueueError(
@@ -368,6 +617,16 @@ def markdown_execution_policy(
                     )
                 escalation = {}
                 policy["escalation"] = escalation
+                nested_section = "escalation"
+            elif key == "child_delegation" and value == "":
+                if "child_delegation" in policy:
+                    raise QueueError(
+                        f"feature contract contains duplicate execution_policy "
+                        f"keys for {feature_id}"
+                    )
+                child_delegation = {}
+                policy["child_delegation"] = child_delegation
+                nested_section = "child_delegation"
             elif key in {"profile", "parent_sessions", "child_sessions"}:
                 if key in policy:
                     raise QueueError(
@@ -384,18 +643,49 @@ def markdown_execution_policy(
                     f"feature contract contains unsupported execution_policy "
                     f"YAML for {feature_id}"
                 )
-        elif escalation is None or key not in {"trigger", "profile"}:
-            raise QueueError(
-                f"feature contract contains malformed execution_policy "
-                f"escalation for {feature_id}"
-            )
-        else:
+        elif nested_section == "escalation" and escalation is not None:
+            if key not in {"trigger", "profile"}:
+                raise QueueError(
+                    f"feature contract contains malformed execution_policy "
+                    f"escalation for {feature_id}"
+                )
             if key in escalation:
                 raise QueueError(
                     f"feature contract contains duplicate execution_policy "
                     f"escalation keys for {feature_id}"
                 )
             escalation[key] = value
+        elif nested_section == "child_delegation" and child_delegation is not None:
+            allowed_child = {
+                "role", "profile", "cost_saving_justification", "task_boundary",
+                "expected_input_context_bytes", "parent_context_bytes",
+                "expected_output_contract", "read_only", "owned_paths",
+                "parent_owned_paths",
+            }
+            if key not in allowed_child or key in child_delegation:
+                raise QueueError(
+                    f"feature contract contains malformed execution_policy "
+                    f"child_delegation for {feature_id}"
+                )
+            if key in {"expected_input_context_bytes", "parent_context_bytes"}:
+                child_delegation[key] = int(value) if value.isdigit() else value
+            elif key == "read_only":
+                child_delegation[key] = (
+                    True if value == "true" else False if value == "false" else value
+                )
+            elif key in {"owned_paths", "parent_owned_paths"}:
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError:
+                    parsed = value
+                child_delegation[key] = parsed
+            else:
+                child_delegation[key] = value
+        else:
+            raise QueueError(
+                f"feature contract contains malformed nested execution_policy "
+                f"for {feature_id}"
+            )
 
     validate_feature_execution_policy(
         policy,
@@ -423,6 +713,28 @@ def render_markdown_execution_policy(value: dict[str, Any]) -> str:
             f"    trigger: {policy.escalation_trigger}",
             f"    profile: {policy.escalation_profile}",
         ])
+    if policy.child_delegation is not None:
+        lines.append("  child_delegation:")
+        for key in (
+            "role",
+            "profile",
+            "cost_saving_justification",
+            "task_boundary",
+            "expected_input_context_bytes",
+            "parent_context_bytes",
+            "expected_output_contract",
+            "read_only",
+            "owned_paths",
+            "parent_owned_paths",
+        ):
+            value = policy.child_delegation[key]
+            if isinstance(value, bool):
+                rendered = "true" if value else "false"
+            elif isinstance(value, list):
+                rendered = json.dumps(value, separators=(",", ":"))
+            else:
+                rendered = str(value)
+            lines.append(f"    {key}: {rendered}")
     lines.extend(["```", ""])
     return "\n".join(lines)
 

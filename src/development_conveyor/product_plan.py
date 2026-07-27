@@ -654,6 +654,7 @@ class ProductPlanReconciler:
                     planned_model=PRODUCT_PLAN_MODEL,
                     planned_reasoning=PRODUCT_PLAN_REASONING,
                     model_plan_source="approved_product_plan_policy",
+                    selected_profile="generic_or_architectural",
                     context_files=context_files,
                     embedded_context=(
                         "# Immutable brief identity\n\n```json\n"

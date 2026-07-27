@@ -35,6 +35,7 @@ from .product_plan import ProductPlanReconciler
 from .autopilot import Autopilot, autopilot_status, request_stop
 from .feature_prelaunch_recovery import FeaturePrelaunchRecovery
 from .policy_rebind import ReadyFeaturePolicyRebinder
+from .runtime_audit import RuntimeAuditor
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
 
@@ -79,6 +80,11 @@ def _parser() -> argparse.ArgumentParser:
 
     status = subparsers.add_parser("status", help="show read-only portfolio or project status")
     status.add_argument("--project")
+    audit_runtime = subparsers.add_parser(
+        "audit-runtime",
+        help="audit effective model, capability, context, and output policy without launching a model",
+    )
+    audit_runtime.add_argument("--project", required=True)
 
     plan = subparsers.add_parser("plan", help="produce a read-only project plan")
     plan.add_argument("--project", required=True)
@@ -459,6 +465,14 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
         launcher,
         execution_profile_override=getattr(args, "execution_profile", None),
     )
+    if args.command == "audit-runtime":
+        project = registry.get(args.project)
+        return RuntimeAuditor(
+            controller_root=controller_root,
+            configuration=configuration,
+            project=project,
+            planner=lambda: engine.project_plan(project),
+        ).audit()
     if args.command == "rebind-ready-feature-policy":
         if bool(args.expected_old_escalation_trigger) != bool(
             args.expected_old_escalation_profile
@@ -759,6 +773,7 @@ def main(arguments: list[str] | None = None) -> int:
         print(render_json(result))
         return 2 if (
             result.get("launch_allowed") is False
+            or result.get("runtime_policy_passed") is False
             or result.get("outcome") == "resolution_rejected"
             or result.get("classification") == "POLICY_REBIND_REJECTED"
             or result.get("classification") == "AUTOPILOT_FAILED"

@@ -3,7 +3,7 @@
   "$id": "conveyor-config.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "approved_environment_variables", "maximum_parallel_projects", "default_mode", "state_directory", "report_directory", "log_directory", "codex", "lock_policy", "retries", "logging", "scheduling", "goal_mode", "prohibited_operations"],
+  "required": ["schema_version", "approved_environment_variables", "maximum_parallel_projects", "default_mode", "state_directory", "report_directory", "log_directory", "codex", "runtime_policy", "lock_policy", "retries", "logging", "scheduling", "goal_mode", "prohibited_operations"],
   "properties": {
     "schema_version": {"type": "integer", "enum": [1]},
     "approved_environment_variables": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"}, "uniqueItems": true},
@@ -13,6 +13,17 @@
     "report_directory": {"type": "string", "minLength": 1},
     "log_directory": {"type": "string", "minLength": 1},
     "codex": {"type": "object", "required": ["executable", "session_timeout_seconds", "capture_json_events", "resume_sessions"], "properties": {"executable": {"type": "string", "minLength": 1}, "session_timeout_seconds": {"type": "integer", "minimum": 1}, "capture_json_events": {"type": "boolean"}, "resume_sessions": {"type": "boolean"}}, "additionalProperties": false},
+    "runtime_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability_isolation_required", "compact_output_required", "default_child_session_budget", "maximum_child_session_budget"],
+      "properties": {
+        "capability_isolation_required": {"type": "boolean", "enum": [true]},
+        "compact_output_required": {"type": "boolean", "enum": [true]},
+        "default_child_session_budget": {"type": "integer", "enum": [0]},
+        "maximum_child_session_budget": {"type": "integer", "enum": [1]}
+      }
+    },
     "lock_policy": {"type": "object", "required": ["writer_lock_relative_path", "controller_launch_lock_directory", "heartbeat_seconds", "require_process_identity", "timestamp_alone_is_stale"], "properties": {"writer_lock_relative_path": {"type": "string", "minLength": 1}, "controller_launch_lock_directory": {"type": "string", "minLength": 1}, "heartbeat_seconds": {"type": "integer", "minimum": 1}, "require_process_identity": {"type": "boolean"}, "timestamp_alone_is_stale": {"type": "boolean", "enum": [false]}}, "additionalProperties": false},
     "retries": {"type": "object", "required": ["implementation_repairs", "integration_repairs", "additional_adversarial_reviews", "queue_reconciliation_repairs"], "properties": {"implementation_repairs": {"type": "integer", "minimum": 0}, "integration_repairs": {"type": "integer", "minimum": 0}, "additional_adversarial_reviews": {"type": "integer", "minimum": 0}, "queue_reconciliation_repairs": {"type": "integer", "minimum": 0}}, "additionalProperties": false},
     "autopilot": {

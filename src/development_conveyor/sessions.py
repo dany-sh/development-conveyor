@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -27,6 +27,14 @@ from .queue import FeatureQueue
 from .validation import SafetyPolicy
 from .contracts import TERMINAL_ENVELOPE_MARKER, extract_terminal_envelope
 from .context_pack import ContextReadError, build_context_pack
+from .capability_policy import (
+    build_capability_plan,
+    require_capability_isolation,
+)
+from .compact_output import (
+    compact_output_contract,
+    render_compact_output_instructions,
+)
 
 ACTION_PROMPTS = {
     "queue_reconciliation": "queue-reconciliation.md",
@@ -107,6 +115,9 @@ class SessionRequest:
     planned_model: str | None = None
     planned_reasoning: str | None = None
     model_plan_source: str | None = None
+    selected_profile: str | None = None
+    child_delegation: dict[str, Any] | None = None
+    relevant_macos_skills: tuple[str, ...] = ()
     context_files: tuple[str, ...] = ()
     embedded_context: str | None = None
 
@@ -129,6 +140,12 @@ class SessionRequest:
             or self.child_session_budget < 0
         ):
             raise SessionError("child session budget must be a non-negative integer")
+        if self.child_session_budget is not None and self.child_session_budget > 1:
+            raise SessionError("initial runtime policy permits at most one child session")
+        if self.child_session_budget == 0 and self.child_delegation is not None:
+            raise SessionError("zero-child request cannot contain a child delegation plan")
+        if self.child_session_budget == 1 and not isinstance(self.child_delegation, dict):
+            raise SessionError("positive child budget requires an explicit cost-saving delegation plan")
         if self.action == "feature_cycle":
             bindings = {
                 "feature": self.feature,
@@ -189,6 +206,12 @@ class SessionPlan:
     launched_reasoning: str | None = None
     collaboration_tools_removed: bool = False
     context_pack_evidence: dict[str, Any] | None = None
+    selected_profile: str | None = None
+    policy_source: str | None = None
+    parent_session_budget: int | None = None
+    child_session_budget: int | None = None
+    capability_policy: dict[str, Any] | None = None
+    compact_output_contract_present: bool = False
 
 
 @dataclass(frozen=True)
@@ -1344,15 +1367,23 @@ class SessionLauncher:
                 )
                 + "Otherwise emit no retry marker and stop at the precise failure or human gate.\n"
             )
+        contract = compact_output_contract(
+            workflow_type=request.action,
+            task=request.feature or request.action,
+            selected_profile=request.selected_profile,
+            exact_model=request.planned_model,
+            reasoning_effort=request.planned_reasoning,
+            policy_source=request.model_plan_source,
+        )
+        prompt += render_compact_output_instructions(contract)
         return prompt
 
     def plan(self, request: SessionRequest) -> SessionPlan:
-        if request.action in {
-            "feature_cycle", "scope_features", "reconcile_product_plan"
-        } and request.child_session_budget not in {0, None}:
-            raise SessionError(
-                "positive child-session budgets are not enforceable by this direct launcher"
-            )
+        if request.planned_model is not None and (
+            not isinstance(request.model_plan_source, str)
+            or not request.model_plan_source.strip()
+        ):
+            raise SessionError("model session launch requires a non-empty policy source")
         context_evidence = None
         if request.action == "feature_cycle":
             try:
@@ -1363,7 +1394,6 @@ class SessionLauncher:
                 ).evidence
             except ContextReadError:
                 raise
-        prompt = self._render_prompt(request)
         compatibility = self.compatibility(
             request.action,
             project_id=request.project.project_id,
@@ -1381,13 +1411,36 @@ class SessionLauncher:
                 f"validate={compatibility.validation_command}"
             )
         executable = str(compatibility.executable)
+        planned_model = request.planned_model or compatibility.effective_model
+        planned_reasoning = request.planned_reasoning or compatibility.effective_reasoning
+        policy_source = request.model_plan_source or compatibility.policy_source
+        if not planned_model or not planned_reasoning or not policy_source:
+            raise SessionError("model session launch lacks a complete authoritative execution plan")
+        effective_request = replace(
+            request,
+            planned_model=planned_model,
+            planned_reasoning=planned_reasoning,
+            model_plan_source=policy_source,
+        )
+        prompt = self._render_prompt(effective_request)
+        capability = None
+        capability_args: tuple[str, ...] = ()
+        runtime_policy = self.configuration.get("runtime_policy")
+        if (
+            isinstance(runtime_policy, dict)
+            and runtime_policy.get("capability_isolation_required") is True
+        ):
+            capability = build_capability_plan(
+                executable=executable,
+                cwd=request.project.repository,
+                action=request.action,
+                relevant_macos_skills=request.relevant_macos_skills,
+            )
+            require_capability_isolation(capability)
+            capability_args = capability.config_args
         collaboration_tools_removed = request.child_session_budget == 0
         if collaboration_tools_removed:
             self._verify_zero_child_capability(executable, request.project.repository)
-        planned_model = request.planned_model or compatibility.effective_model
-        planned_reasoning = request.planned_reasoning or compatibility.effective_reasoning
-        if not planned_model or not planned_reasoning:
-            raise SessionError("model session launch lacks a complete authoritative execution plan")
         sandbox = (
             "read-only"
             if request.action == "human_decision_report" or request.mode in {"audit", "dry-run", "dry-run-validation"}
@@ -1401,11 +1454,13 @@ class SessionLauncher:
         if request.session_id:
             argv = (
                 executable, "exec", *policy_args, *zero_child_args,
+                *capability_args,
                 "resume", "--json", request.session_id, "-",
             )
         else:
             argv = (
                 executable, "exec", *policy_args, *zero_child_args,
+                *capability_args,
                 "--cd", str(request.project.repository),
                 "--json", "--sandbox", sandbox, "-",
             )
@@ -1435,6 +1490,12 @@ class SessionLauncher:
             launched_reasoning=launched_reasoning,
             collaboration_tools_removed=collaboration_tools_removed,
             context_pack_evidence=context_evidence,
+            selected_profile=request.selected_profile,
+            policy_source=policy_source,
+            parent_session_budget=request.parent_session_budget,
+            child_session_budget=request.child_session_budget,
+            capability_policy=capability.to_dict() if capability is not None else None,
+            compact_output_contract_present="## Compact terminal output contract" in prompt,
         )
 
     def launch(
@@ -1479,6 +1540,7 @@ class SessionLauncher:
         stderr_lines: list[str] = []
         callback_errors: list[BaseException] = []
         budget_violations: list[str] = []
+        observed_child_calls: list[str] = []
         observed_session: list[str] = []
         observer_lock = threading.Lock()
 
@@ -1486,17 +1548,16 @@ class SessionLauncher:
             try:
                 for line in iter(stream.readline, ""):
                     destination.append(line)
-                    if observe and request.child_session_budget == 0:
-                        try:
-                            self._enforce_child_session_budget(
-                                line, request.child_session_budget
-                            )
-                        except SessionError:
-                            budget_violations.append(
-                                self._collaboration_tool_call(line)
-                                or "unknown_collaboration_tool"
-                            )
-                            raise
+                    if observe:
+                        collaboration_tool = self._collaboration_tool_call(line)
+                        if collaboration_tool is not None:
+                            observed_child_calls.append(collaboration_tool)
+                            budget = request.child_session_budget or 0
+                            if len(observed_child_calls) > budget:
+                                budget_violations.append(collaboration_tool)
+                                raise SessionError(
+                                    "child-session budget exceeded before terminal result"
+                                )
                     if observe and on_session_started is not None:
                         session = self._session_id(line)
                         if session:
@@ -1539,7 +1600,7 @@ class SessionLauncher:
                 raise callback_errors[0]
             if budget_violations:
                 raise SessionError(
-                    "zero-child execution plan exceeded its collaboration boundary"
+                    "execution plan exceeded its child-session collaboration boundary"
                 )
             if on_session_started is not None and not observed_session:
                 raise SessionError("typed workflow completed without an early session identity")

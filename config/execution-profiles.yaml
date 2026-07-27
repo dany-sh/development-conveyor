@@ -5,14 +5,14 @@
     "repository_aware": {"model": "gpt-5.6-luna", "reasoning": "high"},
     "bounded_precise": {"model": "gpt-5.6-terra", "reasoning": "medium"},
     "multi_module_precise": {"model": "gpt-5.6-terra", "reasoning": "high"},
-    "application_feature_implementation": {"model": "gpt-5.3-codex", "reasoning": "high"},
+    "application_feature_implementation": {"model": "gpt-5.6-terra", "reasoning": "medium"},
     "generic_or_architectural": {"model": "gpt-5.6-sol", "reasoning": "medium"},
     "ambiguous_or_authoritative": {"model": "gpt-5.6-sol", "reasoning": "high"},
     "unresolved_after_high": {"model": "gpt-5.6-sol", "reasoning": "xhigh"}
   },
   "workflow_fallbacks": {
     "queue_reconciliation": "repository_aware",
-    "application_feature": "generic_or_architectural",
+    "application_feature": "bounded_precise",
     "controller_repair": "generic_or_architectural",
     "metadata": "mechanical"
   },

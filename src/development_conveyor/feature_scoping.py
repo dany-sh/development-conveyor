@@ -551,6 +551,7 @@ class FeatureScoper:
                     planned_model=SCOPING_MODEL,
                     planned_reasoning=SCOPING_REASONING,
                     model_plan_source="explicit_scope_features_policy",
+                    selected_profile="generic_or_architectural",
                     context_files=(
                         *(request.target_specs[item] for item in request.existing_features),
                     ),

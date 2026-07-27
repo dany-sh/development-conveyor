@@ -247,7 +247,7 @@ class ReadyFeaturePolicyRebindTests(unittest.TestCase):
                 resolved.parent_sessions,
                 resolved.child_sessions,
             ),
-            (NEW_PROFILE, "gpt-5.3-codex", "high", 1, 0),
+            (NEW_PROFILE, "gpt-5.6-terra", "medium", 1, 0),
         )
         deterministic = resolve_execution_profile(
             workflow="application_feature",
@@ -313,7 +313,7 @@ class ReadyFeaturePolicyRebindTests(unittest.TestCase):
                     plan["resolved_execution_profile"]["model"],
                     plan["resolved_execution_profile"]["reasoning"],
                 ),
-                ("gpt-5.3-codex", "high"),
+                ("gpt-5.6-terra", "medium"),
             )
             self.assertRegex(plan["predicted_final_fingerprint"], r"^[0-9a-f]{64}$")
             self.assertEqual(

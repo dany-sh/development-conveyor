@@ -20,3 +20,4 @@
 | M1-020 | Checkpoint-aware retained feature-result recovery | review | M1 | `docs/features/M1-020-checkpoint-aware-feature-result-recovery.md` |
 | M1-021 | Committed planning-result recovery finalization | review | M1 | `docs/features/M1-021-committed-planning-recovery.md` |
 | M1-022 | Post-integration planning baseline binding | review | M1 | `docs/features/M1-022-post-integration-planning-baseline-binding.md` |
+| M1-023 | Runtime policy and context discipline | review | M1 | `docs/features/M1-023-runtime-policy-and-context-discipline.md` |

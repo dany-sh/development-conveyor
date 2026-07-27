@@ -43,6 +43,7 @@ The named profiles are:
 | `repository_aware` | `gpt-5.6-luna` | high | repository discovery, classification, and plan preparation |
 | `bounded_precise` | `gpt-5.6-terra` | medium | one bounded, precisely specified implementation path |
 | `multi_module_precise` | `gpt-5.6-terra` | high | several known modules under a complete contract |
+| `application_feature_implementation` | `gpt-5.6-terra` | medium | compatibility name for a bounded application implementation |
 | `generic_or_architectural` | `gpt-5.6-sol` | medium | reusable or generic behavior, or architecture that must be determined |
 | `ambiguous_or_authoritative` | `gpt-5.6-sol` | high | material ownership or authority ambiguity |
 | `unresolved_after_high` | `gpt-5.6-sol` | xhigh | unresolved reasoning after complete high-reasoning evidence |
@@ -66,6 +67,19 @@ Each newly readied feature must declare:
 `escalation` is optional. Historical ready entries may use a validated workflow fallback. The controller does not mass-edit historical feature metadata.
 
 The resolved profile, source, model, reasoning, parent and child budgets, escalation trigger, and escalation target are inspectable in dry-run. The resolved model and reasoning are passed explicitly to Codex argv. Parent and child budgets fail closed at the launcher boundary; a zero-child feature launch mechanically removes collaboration tools.
+
+Child sessions default to zero and the initial maximum is one. A positive
+budget requires a strictly cheaper configured child, an independently bounded
+task, materially smaller expected input context, a compact output contract,
+exclusive file ownership or read-only scope, and a concrete cost-saving
+justification. Delegation is not assumed to save usage merely because a child
+exists.
+
+Every Conveyor model launch also receives a workflow-specific capability
+allowlist and compact terminal report contract. The pinned CLI must prove the
+effective model-visible skill set after session-only skill, plugin, and MCP
+overrides. Prompt-only isolation is not enforcement; an unprovable allowlist
+blocks before model launch.
 
 ## Escalation guidance
 

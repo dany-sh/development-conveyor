@@ -569,7 +569,7 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 completion["execution_policy"],
                 {
-                    "profile": "generic_or_architectural",
+                    "profile": "bounded_precise",
                     "parent_sessions": 1,
                     "child_sessions": 0,
                 },
@@ -589,7 +589,7 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
                     completion["resolved_execution_profile"]["child_sessions"],
                     completion["policy_source"],
                 ),
-                ("gpt-5.6-sol", "medium", 1, 0, "workflow_fallback"),
+                ("gpt-5.6-terra", "medium", 1, 0, "workflow_fallback"),
             )
             self.assertNotEqual(
                 plan["authenticated_original_diff_fingerprint"],
@@ -658,7 +658,7 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 queue["features"][1]["execution_policy"],
                 {
-                    "profile": "generic_or_architectural",
+                    "profile": "bounded_precise",
                     "parent_sessions": 1,
                     "child_sessions": 0,
                 },
@@ -668,7 +668,7 @@ class PostIntegrationPlanningRecoveryTests(unittest.TestCase):
                 / "docs/features/F072-job-application-detail-workspace.md"
             ).read_text(encoding="utf-8")
             self.assertIn("## Execution policy", specification)
-            self.assertIn("profile: generic_or_architectural", specification)
+            self.assertIn("profile: bounded_precise", specification)
             self.assertEqual((repository / "app.txt").read_bytes(), app_before)
             self.assertEqual(result["current_state"], "feature_ready")
             self.assertEqual(result["selected_feature"], "F072")

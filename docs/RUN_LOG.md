@@ -1731,3 +1731,75 @@ This log records model configuration and deterministic deployment evidence. It n
   `f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0` with no writer lease. No
   application file, commit, branch, build, test, preparation, execution,
   reconciliation, integration, or durable controller state was changed.
+
+### Model execution — 2026-07-27T02:40:28+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `runtime_policy_and_context_discipline`
+- Safety and autonomy contracts unchanged: `true`
+
+### Runtime policy and context discipline — 2026-07-26
+
+- Scope: controller-only implementation on
+  `codex/m1-23-runtime-policy-and-context-discipline` from exact parent
+  `56489e89ab2b9404ca98b8eed132b506d544afab`; one
+  `gpt-5.6-sol`/medium interactive parent and zero child or named-agent
+  sessions.
+- Runtime policy: deterministic work remains zero-model; preparation uses
+  Luna; bounded application implementation defaults to Terra/medium; selected
+  feature policy remains authoritative; generic controller work uses
+  Sol/medium; unavailable exact models and silent fallback fail closed.
+  Child budget defaults to zero and one child requires a strictly cheaper
+  model, materially smaller context, bounded task, compact output, and
+  non-overlapping ownership evidence.
+- Capability and output policy: each model route receives session-only skill,
+  plugin, and MCP restrictions, verified through pinned CLI 0.145.0
+  `debug prompt-input`. Unsupported requested isolation blocks before launch.
+  Workflow-specific context accounting and one compact machine terminal
+  contract preserve failures, changed paths, validation, commit identity,
+  blockers, and recovery instructions.
+- Focused validation: 117 permitted model-policy, execution-profile, launcher,
+  context-pack, capability-policy, compact-output, runtime-audit, M1-021,
+  M1-022, execution-identity, and deterministic-integration tests passed.
+  Changed-module compilation, JSON-compatible config/schema/queue parsing,
+  `validate-config`, the global model-policy validator, and
+  `git diff --check` passed. The complete controller suite and application
+  tests/builds were not run.
+- Baseline exclusions: two documented legacy CLI expectations were not rerun:
+  `test_16_cycle_checkpoint_precedes_session_launch` expects
+  `branch_preparing` rather than the current `feature_preparing`, and
+  `test_22_integration_failure_uses_separate_session_and_precise_gate` expects
+  a legacy exception.
+- Live read-only result: Interview Companion runtime audit passed with exact
+  requested and effective queue-reconciliation capabilities
+  (`core:apply_patch`, `core:shell`, `development-conveyor`,
+  `feature-inventory`). Case Manager failed closed with
+  `capability_isolation_unsupported` because the pinned standalone CLI did not
+  expose the requested SwiftPM, SwiftUI, and test-triage skills. Both audits
+  launched zero models and children and reported zero mutation counters.
+  Interview Companion consistency remained `CONSISTENT`.
+- Isolation evidence: Interview Companion remained clean on
+  `codex/m0-foundation` at
+  `12bee2fc3b3668091474dc288067cd3aced0ee08`; Case Manager remained clean on
+  `codex/p0-foundation` at
+  `f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0`. Their branches, HEADs,
+  worktree-status hashes, absent writer leases, controller ledgers,
+  projections, and absent Interview cycle and compatibility caches were
+  unchanged.
+- Global normalization: `~/.codex/MODEL_POLICY.md` changed from SHA-256
+  `95e2539ce6023c3844d781338eee8e44ce06e55371266b572fcfc3527278fa15`
+  to `1181519af9185c7f8d80293006a5558b7a4dc2994e25df49f15ed608b753d97d`
+  by adding the Development Conveyor Terra/medium row.
+  `~/.codex/scripts/model_policy.py` changed from
+  `8940cbd0d11e468d632537543d63709a226243298315db041f3e3527e94f77be`
+  to `27ce947cc09fedd58de6d4f1ceb1a87ceea1bbde1d9c665ef858cac0b3f2f50f`
+  by adding the matching canonical assignment. `~/.codex/config.toml`
+  remained unchanged at
+  `6efceb0a9686d4b55b905b623999452ba72e3acc647bd087219c95f71d9a671d`
+  with Sol/medium, and the Development Conveyor agent file remained unchanged
+  at
+  `7474751e7af46a3f10fb73b0cd2d57ffb234853c79b787a7a6bc57a0b708da04`.

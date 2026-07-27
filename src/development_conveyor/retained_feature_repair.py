@@ -740,6 +740,7 @@ Exact failed trusted-host evidence:
                     planned_model=self.MODEL,
                     planned_reasoning=self.REASONING,
                     model_plan_source="retained_feature_repair_profile",
+                    selected_profile="multi_module_precise",
                     context_files=tuple(
                         path
                         for path in (
