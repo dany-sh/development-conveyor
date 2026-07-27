@@ -1998,3 +1998,13 @@ This log records model configuration and deterministic deployment evidence. It n
   or child launches. It did not start F079. Both application repositories kept
   their exact baseline branches, HEADs, and clean worktrees; hashes for all 28
   protected controller state, report, and log files were unchanged.
+
+### Model execution — 2026-07-27T08:44:50+00:00
+
+- Agent role: `controller-and-operator-console-writer`
+- Effective model: `gpt-5.6-terra`
+- Effective reasoning effort: `high`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `m1_027_direct_parent_implementation`
+- Safety and autonomy contracts unchanged: `true`

@@ -1,8 +1,26 @@
 # Current Status
 
-Last updated: 2026-07-26
+Last updated: 2026-07-27
 
 ## Summary
+
+Native backlog control operations are implemented on
+`codex/m1-27-backlog-control-plane` from exact parent
+`7e8e24af6fa4260404bbb653bea42b249f26e332`.
+
+Controller queue selection now defaults an absent priority to P2 without
+rewriting the queue, selects ready work by P1/P2/P3 then explicit queue order
+then feature ID, and still requires complete dependencies and all existing
+readiness checks. The `ready`, `backlog`, and expanded `prioritize` commands
+are queue-only metadata controls: they use a short writer lease, launch zero
+models and child sessions, preserve unrelated fields and order, and never
+start execution. Queue JSON now provides the presentation-only Kanban column,
+priority, position, dependency/readiness, execution, Git, specification, and
+terminal-result fields consumed by Factory Desktop.
+
+Focused queue-control coverage (16 tests) passes in disposable synthetic
+repositories. The full controller suite and application tests remain
+intentionally unrun.
 
 Deterministic queue control and project pause are implemented on
 `codex/m1-26-deterministic-queue-control` from exact parent

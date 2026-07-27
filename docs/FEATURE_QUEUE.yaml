@@ -635,6 +635,35 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-027",
+      "title": "Native Conveyor backlog control plane",
+      "status": "review",
+      "priority": "P1",
+      "milestone": "M1",
+      "dependencies": [
+        "M1-026"
+      ],
+      "spec": "docs/features/M1-027-native-backlog-control-plane.md",
+      "acceptance_criteria": [
+        "P1, P2, and P3 select ready features deterministically without bypassing dependencies or blockers",
+        "Ready, backlog, and priority controls change only FEATURE_QUEUE.yaml and launch zero models or children",
+        "Queue JSON exposes the typed presentation evidence required by the native Factory Desktop board",
+        "Focused controller tests, configuration validation, read-only registered-project queue checks, and diff validation pass"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "multi_module_precise",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-27-backlog-control-plane",
+      "integration_base_commit": "7e8e24af6fa4260404bbb653bea42b249f26e332",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

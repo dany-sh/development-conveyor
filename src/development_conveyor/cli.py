@@ -40,6 +40,8 @@ from .queue_control import (
     prioritize as prioritize_queue,
     queue_report,
     set_operator_paused,
+    transition_backlog,
+    transition_ready,
 )
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
@@ -99,9 +101,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     prioritize.add_argument("--project", required=True)
     prioritize.add_argument("--feature", required=True)
-    relative = prioritize.add_mutually_exclusive_group(required=True)
+    relative = prioritize.add_mutually_exclusive_group(required=False)
     relative.add_argument("--before")
     relative.add_argument("--after")
+    prioritize.add_argument("--priority", choices=("P1", "P2", "P3"))
+    ready = subparsers.add_parser("ready", help="mark one eligible proposed feature ready without starting work")
+    ready.add_argument("--project", required=True)
+    ready.add_argument("--feature", required=True)
+    backlog = subparsers.add_parser("backlog", help="move one ready feature back to the proposed backlog")
+    backlog.add_argument("--project", required=True)
+    backlog.add_argument("--feature", required=True)
     pause = subparsers.add_parser(
         "pause", help="prevent a project from starting another controller cycle"
     )
@@ -652,7 +661,20 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
             project,
             feature_id=args.feature,
             relative_id=relative_feature,
-            placement="before" if args.before else "after",
+            placement="before" if args.before else ("after" if args.after else None),
+            priority=args.priority,
+        )
+
+    if args.command in {"ready", "backlog"}:
+        project = registry.get(args.project)
+        projection = engine._authoritative_projection(project)
+        active_transaction = projection.get("active_transaction") if isinstance(projection, dict) else None
+        transition = transition_ready if args.command == "ready" else transition_backlog
+        return transition(
+            configuration,
+            project,
+            feature_id=args.feature,
+            active_transaction=active_transaction,
         )
 
     if args.command in {"pause", "unpause"}:

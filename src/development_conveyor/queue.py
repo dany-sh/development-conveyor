@@ -105,12 +105,25 @@ def normalize_milestone_name(value: str) -> str:
     return normalized
 
 
+PRIORITY_LABELS = ("P1", "P2", "P3")
+
+
+def priority_label(value: Any) -> str:
+    """Return the presentation priority without rewriting legacy queue entries."""
+
+    if value is None:
+        return "P2"
+    if isinstance(value, str) and value.upper() in PRIORITY_LABELS:
+        return value.upper()
+    if isinstance(value, int) and not isinstance(value, bool) and value in {1, 2, 3}:
+        return f"P{value}"
+    # Earlier queues used arbitrary numeric ranks. They remain valid and get the
+    # neutral default until an operator explicitly assigns P1, P2, or P3.
+    return "P2"
+
+
 def _priority(value: Any) -> int:
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    if isinstance(value, str) and value.upper().startswith("P") and value[1:].isdigit():
-        return int(value[1:])
-    return 1_000_000
+    return PRIORITY_LABELS.index(priority_label(value)) + 1
 
 
 @dataclass(frozen=True)
@@ -328,7 +341,7 @@ class FeatureQueue:
             if not self.dependencies_complete(feature) or not self._specified(feature):
                 continue
             candidates.append((feature, index))
-        candidates.sort(key=lambda pair: (pair[1], pair[0]["id"]))
+        candidates.sort(key=lambda pair: (_priority(pair[0].get("priority")), pair[1], pair[0]["id"]))
         return [item for item, _ in candidates]
 
     def select_next(self, milestone_id: str) -> Selection | None:
@@ -337,7 +350,7 @@ class FeatureQueue:
             return None
         feature = ready[0]
         reason = (
-            "Selected deterministically from the active milestone by queue order, "
+            "Selected deterministically from the active milestone by priority, queue order, "
             f"eligible status, completed dependencies, unblocked state, then feature ID; "
             f"dependencies are complete for {feature['id']}."
         )
