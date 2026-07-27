@@ -5,8 +5,8 @@
       "id": "M1",
       "name": "Transactional workflow kernel",
       "status": "active",
-      "base_commit": "eb9a0198f8d1a69db2b7e4099ebd17c3bed9550b",
-      "integration_branch": "codex/development-conveyor",
+      "base_commit": "c8d57157b26e20d8162ac63ae2b4be5950a805cc",
+      "integration_branch": "codex/m1-generic-retained-repair-integration",
       "integrated_features": [
         "M1-001",
         "M1-028"
@@ -43,9 +43,13 @@
       "status": "integration_pending",
       "priority": 2,
       "milestone": "M1",
-      "dependencies": ["M1-001"],
+      "dependencies": [
+        "M1-001"
+      ],
       "spec": "docs/features/M1-002-cost-aware-execution.md",
-      "acceptance_criteria": ["Cost plans, deterministic routing, focused verification, and safe evidence reuse are inspectable before execution"],
+      "acceptance_criteria": [
+        "Cost plans, deterministic routing, focused verification, and safe evidence reuse are inspectable before execution"
+      ],
       "requires_human_decision": false,
       "branch": "codex/m1-2-feature-execution-profiles",
       "integration_base_commit": "2ce0a01cfd2b79e97921eca2a78a4210ec9614a5",
@@ -60,7 +64,9 @@
       "status": "proposed",
       "priority": 3,
       "milestone": "M1",
-      "dependencies": ["M1-002"],
+      "dependencies": [
+        "M1-002"
+      ],
       "spec": "docs/features/M1-003-bounded-feature-scoping.md",
       "acceptance_criteria": [
         "Explicit briefs author only the requested feature specifications and planning metadata",
@@ -86,7 +92,9 @@
       "status": "integration_pending",
       "priority": 5,
       "milestone": "M1",
-      "dependencies": ["M1-001"],
+      "dependencies": [
+        "M1-001"
+      ],
       "spec": "docs/features/M1-005-queue-feature-decision-resolution.md",
       "acceptance_criteria": [
         "A dedicated strict-JSON route resolves exact feature-level decisions without changing the pinned project-gate resolver",
@@ -108,7 +116,9 @@
       "status": "integration_pending",
       "priority": 9,
       "milestone": "M1",
-      "dependencies": ["M1-001"],
+      "dependencies": [
+        "M1-001"
+      ],
       "spec": "docs/features/M1-009-product-plan-reconciliation.md",
       "acceptance_criteria": [
         "An immutable approved brief is identity-bound to one planning-only reconciliation transaction",
@@ -130,7 +140,10 @@
       "status": "integration_pending",
       "priority": 10,
       "milestone": "M1",
-      "dependencies": ["M1-001", "M1-002"],
+      "dependencies": [
+        "M1-001",
+        "M1-002"
+      ],
       "spec": "docs/features/M1-010-continuous-autopilot.md",
       "acceptance_criteria": [
         "Autopilot repeatedly invokes authoritative normal and deterministic recovery routes without duplicating application workflow logic",
@@ -156,7 +169,10 @@
       "status": "review",
       "priority": 11,
       "milestone": "M1",
-      "dependencies": ["M1-001", "M1-010"],
+      "dependencies": [
+        "M1-001",
+        "M1-010"
+      ],
       "spec": "docs/features/M1-011-autopilot-retained-feature-recovery.md",
       "acceptance_criteria": [
         "Consumed selected-feature fields do not override exact transaction, projection-current-feature, session, branch, commit, and queue identity",
@@ -183,7 +199,11 @@
       "status": "review",
       "priority": 12,
       "milestone": "M1",
-      "dependencies": ["M1-001", "M1-010", "M1-011"],
+      "dependencies": [
+        "M1-001",
+        "M1-010",
+        "M1-011"
+      ],
       "spec": "docs/features/M1-012-retained-feature-validation-repair.md",
       "acceptance_criteria": [
         "Exact failed retained-result validation evidence and the retained application diff are authenticated before any model launch",
@@ -698,7 +718,7 @@
     {
       "id": "M1-029",
       "title": "Generic retained repair recovery",
-      "status": "ready",
+      "status": "in_progress",
       "priority": "P1",
       "milestone": "M1",
       "dependencies": [
@@ -720,11 +740,12 @@
         "child_sessions": 0
       },
       "branch": "codex/m1-29-generic-retained-repair-recovery",
-      "integration_base_commit": null,
+      "integration_base_commit": "c8d57157b26e20d8162ac63ae2b4be5950a805cc",
       "accepted_commit": null,
       "integrated_commit": null,
       "integration_status": "pending",
-      "integration_fix_commits": []
+      "integration_fix_commits": [],
+      "updated_at": "2026-07-27T21:09:51+00:00"
     }
   ]
 }

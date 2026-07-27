@@ -2038,3 +2038,12 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `m1_029_inventory_reconciliation`
 - Safety and autonomy contracts unchanged: `true`
+
+## 2026-07-27T21:09:51+00:00 — Prepare M1-029
+
+- Milestone: `M1`
+- Milestone branch: `codex/m1-generic-retained-repair-integration`
+- Feature branch: `codex/m1-29-generic-retained-repair-recovery`
+- Base before preparation: `c8d57157b26e20d8162ac63ae2b4be5950a805cc`
+- Production implementation started: `false`
+- Stop reason: `feature_branch_prepared`

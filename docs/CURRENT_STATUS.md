@@ -766,3 +766,12 @@ planning-finalization, post-integration, status, consistency, and prepared
 feature regressions; Python compilation; configuration and queue validation;
 pinned-CLI prompt-input proof; live read-only status; and `git diff --check`.
 The complete controller suite is excluded.
+
+<!-- FACTORY_INTEGRATION_STATUS_BEGIN -->
+## Prepared feature
+
+- Feature: M1-029
+- Branch: `codex/m1-29-generic-retained-repair-recovery`
+- Milestone branch: `codex/m1-generic-retained-repair-integration`
+- Writer lease required before implementation.
+<!-- FACTORY_INTEGRATION_STATUS_END -->
