@@ -7435,6 +7435,47 @@ class CycleEngine:
             project=project,
         ).apply(evidence)
 
+    def _apply_planned_feature_result_recovery(
+        self, project: Project, plan: dict[str, Any]
+    ) -> dict[str, Any]:
+        evidence = plan.get("feature_result_recovery")
+        if (
+            not isinstance(evidence, dict)
+            or evidence.get("evidence_authenticated") is not True
+        ):
+            raise RecoveryError(
+                "feature result recovery route lacks authenticated evidence"
+            )
+        required = (
+            "feature_id",
+            "original_transaction_id",
+            "original_run_id",
+            "original_session_id",
+            "expected_branch",
+            "expected_head",
+        )
+        missing = [
+            field
+            for field in required
+            if not isinstance(evidence.get(field), str) or not evidence[field]
+        ]
+        if missing:
+            raise RecoveryError(
+                "feature result recovery route lacks exact fields: "
+                + ", ".join(missing)
+            )
+        from .feature_result_recovery import FeatureResultRecovery
+
+        recovery = FeatureResultRecovery(
+            controller_root=self.root,
+            configuration=self.configuration.conveyor,
+            project=project,
+        )
+        inspected = recovery.inspect(**{
+            field: evidence[field] for field in required
+        })
+        return recovery.apply(inspected)
+
     def resume_project(self, project: Project, run_id: str | None = None) -> dict[str, Any]:
         planning_plan = self.project_plan(project)
         planning_recovery = planning_plan.get("planning_finalization_recovery")
@@ -7451,6 +7492,13 @@ class CycleEngine:
             == "feature_prelaunch_recovery"
         ):
             return self._apply_planned_feature_prelaunch_recovery(
+                project, planning_plan
+            )
+        if (
+            planning_plan.get("proposed_next_action")
+            == "feature_result_recovery"
+        ):
+            return self._apply_planned_feature_result_recovery(
                 project, planning_plan
             )
         kernel_recovery = self._kernel_recovery_preflight(project, apply=True)
@@ -10214,6 +10262,15 @@ class CycleEngine:
                 if dry_run:
                     return planning_plan
                 return self._apply_planned_feature_prelaunch_recovery(
+                    project, planning_plan
+                )
+            if (
+                planning_plan.get("proposed_next_action")
+                == "feature_result_recovery"
+            ):
+                if dry_run:
+                    return planning_plan
+                return self._apply_planned_feature_result_recovery(
                     project, planning_plan
                 )
         kernel_recovery = self._kernel_recovery_preflight(

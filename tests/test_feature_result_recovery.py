@@ -17,9 +17,11 @@ from development_conveyor.cycle_engine import CycleEngine
 from development_conveyor.errors import RecoveryError
 from development_conveyor.feature_result_recovery import (
     AUTHENTICATED_FEATURE_SESSION_CHECKPOINT,
+    AUTHENTICATED_PREPARED_FEATURE_BRANCH_CHECKPOINT,
     CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY,
     FeatureResultRecovery,
     LEGACY_RETAINED_RESULT_TOPOLOGY,
+    PREPARED_CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY,
     _authenticate_original_transaction_topology,
     _changed_paths,
 )
@@ -326,8 +328,10 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
         preparation_projection_feature: str | None = None,
         preparation_run_id: str | None = None,
         prelaunch_recovery: bool = False,
+        prelaunch_failure_reference: str = "UnicodeDecodeError",
         malformed_factory_position: bool = False,
         execution_checkpoint_payload: dict | None = None,
+        execution_checkpoint_payloads: tuple[dict, ...] | None = None,
     ):
         repository, project = synthetic_repository(root)
         queue_path = repository / project.queue_location
@@ -624,7 +628,7 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
                         "classification": "FEATURE_VALIDATION_FAILED",
                         "terminal_state": "terminal_failure",
                         "next_state": "validation_failed",
-                        "reference": "UnicodeDecodeError",
+                        "reference": prelaunch_failure_reference,
                         "terminal_snapshot": clean_snapshot,
                     },
                 ),
@@ -643,6 +647,35 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
                     transaction_id=self.FAILED_PRELAUNCH_TRANSACTION,
                     workflow_type=WorkflowType.FEATURE_EXECUTION,
                     payload=payload,
+                )
+            if prelaunch_failure_reference == "SessionError":
+                write_json(
+                    configuration.root
+                    / "reports/failed-prelaunch-run/"
+                    "feature_cycle-launch-failure.json",
+                    {
+                        "schema_version": 1,
+                        "project_id": project.project_id,
+                        "run_id": "failed-prelaunch-run",
+                        "action": "feature_cycle",
+                        "failure_classification": "session_execution_failed",
+                        "exit_classification": "session_execution_failed",
+                        "result_classification": "session_execution_failed",
+                        "exit_status": None,
+                        "argv": [],
+                        "session_id": None,
+                        "launched_model": None,
+                        "terminal_marker_found": False,
+                        "context_pack_evidence": None,
+                        "context_read_failure": None,
+                        "structured_result": None,
+                        "parsed_structured_result": None,
+                        "redacted_stderr": (
+                            "capability_isolation_unsupported: "
+                            "missing requested=example"
+                        ),
+                        "working_directory": str(repository),
+                    },
                 )
             recovery_plan_fingerprint = "9" * 64
             for event_type, payload in (
@@ -800,12 +833,21 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
             workflow_type=WorkflowType.FEATURE_EXECUTION,
             payload={"session_id": self.ORIGINAL_SESSION},
         )
-        if execution_checkpoint_payload is not None:
+        execution_checkpoints = (
+            execution_checkpoint_payloads
+            if execution_checkpoint_payloads is not None
+            else (
+                (execution_checkpoint_payload,)
+                if execution_checkpoint_payload is not None
+                else ()
+            )
+        )
+        for checkpoint_payload in execution_checkpoints:
             ledger.append(
                 event_type="CheckpointRecorded",
                 transaction_id=self.ORIGINAL_TRANSACTION,
                 workflow_type=WorkflowType.FEATURE_EXECUTION,
-                payload=execution_checkpoint_payload,
+                payload=checkpoint_payload,
             )
         gate = bind_human_gate(
             {
@@ -948,11 +990,13 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
         event_types: tuple[str, ...],
         *,
         checkpoint_payload: dict | None = None,
+        checkpoint_payloads: tuple[dict, ...] | None = None,
         checkpoint_transaction: str | None = None,
         broken_chain_at: int | None = None,
     ) -> list[dict]:
         events = []
         previous = "prior-ledger-fingerprint"
+        checkpoint_index = 0
         for index, event_type in enumerate(event_types, start=1):
             payload = {}
             if event_type == "TransactionStarted":
@@ -960,11 +1004,19 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
             elif event_type == "SessionLaunched":
                 payload = {"session_id": self.ORIGINAL_SESSION}
             elif event_type == "CheckpointRecorded":
-                payload = dict(
-                    checkpoint_payload
-                    if checkpoint_payload is not None
-                    else AUTHENTICATED_FEATURE_SESSION_CHECKPOINT
+                selected_checkpoint = (
+                    checkpoint_payloads[checkpoint_index]
+                    if checkpoint_payloads is not None
+                    else (
+                        checkpoint_payload
+                        if checkpoint_payload is not None
+                        else AUTHENTICATED_FEATURE_SESSION_CHECKPOINT
+                    )
                 )
+                payload = dict(
+                    selected_checkpoint
+                )
+                checkpoint_index += 1
             event = {
                 "sequence": index,
                 "fingerprint": f"fingerprint-{index}",
@@ -1014,6 +1066,20 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
         self.assertEqual(
             "m1_017_authenticated_session_checkpoint",
             checkpoint_aware["variant"],
+        )
+        prepared = self._authenticate_topology(
+            self._topology_events(
+                PREPARED_CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY,
+                checkpoint_payloads=(
+                    AUTHENTICATED_PREPARED_FEATURE_BRANCH_CHECKPOINT,
+                    AUTHENTICATED_FEATURE_SESSION_CHECKPOINT,
+                ),
+            )
+        )
+        self.assertTrue(prepared["authenticated"])
+        self.assertEqual(
+            "prepared_branch_and_session_checkpoints",
+            prepared["variant"],
         )
 
     def test_checkpoint_payload_is_exact_and_duplicate_or_misplaced_is_rejected(self):
@@ -1832,6 +1898,103 @@ class GeneralFeatureResultRecoveryTests(unittest.TestCase):
                         expected_diff_fingerprint="0" * 64,
                         expected_paths=changed,
                     )
+        finally:
+            (
+                self.FEATURE,
+                self.BRANCH,
+                self.PREPARATION_TRANSACTION,
+            ) = original_identity
+
+    def test_resume_dispatches_authenticated_feature_result_recovery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            configuration, project, _, _, _ = self._fixture(
+                Path(temporary),
+                prepared=True,
+                execution_checkpoint_payload=(
+                    AUTHENTICATED_FEATURE_SESSION_CHECKPOINT
+                ),
+            )
+            controller_cache = (
+                configuration.root
+                / "state/projects"
+                / f"{project.project_id}.json"
+            )
+            controller_cache.unlink()
+            engine = CycleEngine(configuration, SyntheticLauncher())
+            planned = engine.project_plan(project)
+            self.assertEqual(
+                "feature_result_recovery",
+                planned["proposed_next_action"],
+            )
+            self.assertTrue(
+                planned["feature_result_recovery"][
+                    "evidence_authenticated"
+                ]
+            )
+            expected = {
+                "outcome": "integration_pending",
+                "accepted_feature_commit": "synthetic-accepted",
+            }
+            with mock.patch.object(
+                FeatureResultRecovery, "apply", return_value=expected
+            ) as apply:
+                result = engine.run_project(project, "resume")
+            self.assertEqual(result, expected)
+            apply.assert_called_once()
+            inspected = apply.call_args.args[0]
+            self.assertEqual(inspected["feature_id"], self.FEATURE)
+            self.assertEqual(
+                inspected["original_transaction_id"],
+                self.ORIGINAL_TRANSACTION,
+            )
+
+    def test_capability_prelaunch_and_two_checkpoint_lineage_is_recoverable(self):
+        original_identity = (
+            self.FEATURE,
+            self.BRANCH,
+            self.PREPARATION_TRANSACTION,
+        )
+        self.FEATURE = "F078"
+        self.BRANCH = "codex/F078-session-to-application-linking"
+        self.PREPARATION_TRANSACTION = (
+            "9215fa8c-9509-42de-90b3-828847984528"
+        )
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                configuration, project, head, changed, _ = self._fixture(
+                    Path(temporary),
+                    prepared=True,
+                    preparation_run_id="distinct-preparation-run",
+                    prelaunch_recovery=True,
+                    prelaunch_failure_reference="SessionError",
+                    execution_checkpoint_payloads=(
+                        AUTHENTICATED_PREPARED_FEATURE_BRANCH_CHECKPOINT,
+                        AUTHENTICATED_FEATURE_SESSION_CHECKPOINT,
+                    ),
+                )
+                plan = self._recovery(
+                    configuration, project
+                ).inspect_recorded(
+                    original_run_id=self.ORIGINAL_RUN,
+                    original_session_id=self.ORIGINAL_SESSION,
+                    expected_head=head,
+                    expected_paths=changed,
+                )
+                self.assertEqual(
+                    "prepared_branch_and_session_checkpoints",
+                    plan["original_transaction_topology"]["variant"],
+                )
+                self.assertEqual(
+                    self.PRELAUNCH_TRANSACTION,
+                    plan["prelaunch_recovery_transaction_id"],
+                )
+                self.assertTrue(plan["transaction_lineage"]["continuous"])
+                self.assertTrue(
+                    plan["checks"]["prelaunch_recovery_topology"]
+                )
+                self.assertTrue(
+                    plan["checks"]["queue_in_progress_owned_by_execution"]
+                )
         finally:
             (
                 self.FEATURE,

@@ -28,6 +28,15 @@ feature execution can resume with the exact four-capability allowlist. Both
 ordinary resume dispatch paths now execute the authenticated recovery before
 the raw failed projection's generic consistency fallback.
 
+The corrected F078 feature session launched on Terra/medium with the exact
+four-capability allowlist and produced a retained 10-file implementation diff.
+Its terminal envelope was `structured_output_invalid`; no application commit
+was created and the writer lease was released. Controller status now fully
+authenticates zero-model feature-result recovery across the prepared-branch and
+session checkpoints plus the run-scoped capability-prelaunch lineage, with two
+focused Swift test filters, `swift build`, and `git diff --check` required
+before one accepted commit.
+
 The existing focused capability, routing, runtime-audit, planning, recovery,
 and execution-identity validation passes, plus all eleven feature-prelaunch
 recovery tests. Compilation, configuration and queue validation, the global

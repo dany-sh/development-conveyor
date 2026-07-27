@@ -60,6 +60,10 @@ of allowing its ordinary recovery route.
   `verify_consistency`.
 - Both ordinary `resume` entrypoints dispatch that authenticated plan before
   the raw failed projection can fall back to read-only consistency.
+- Retained-result recovery accepts the current exact two-checkpoint feature
+  transaction topology and continuous run-scoped capability-prelaunch
+  recovery lineage. Ordinary resume dispatches the authenticated zero-model
+  plan before the raw structured-output human gate.
 
 ## Execution policy
 

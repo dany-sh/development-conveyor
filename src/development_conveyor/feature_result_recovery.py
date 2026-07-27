@@ -24,6 +24,9 @@ from .cycle_cache import (
 )
 from .errors import RecoveryError, TransactionError
 from .execution_plan import ExecutionPlan
+from .feature_prelaunch_recovery import (
+    authenticates_run_scoped_capability_isolation_report,
+)
 from .kernel import FeatureExecutionAdapter, WorkflowKernel
 from .ledger import EvidenceLedger
 from .locks import DurableLock, inspect_repository_writer_lock, make_lock_record
@@ -39,7 +42,7 @@ from .workflow_lease import WorkflowWriterLease
 
 CommandRunner = Callable[[list[str], Path], dict[str, Any]]
 FEATURE_RESULT_RECOVERY_CAPABILITY_VERSION = (
-    "checkpoint-aware-original-transaction-v2"
+    "prepared-checkpoint-and-prelaunch-lineage-v3"
 )
 LEGACY_RETAINED_RESULT_TOPOLOGY = (
     "TransactionStarted",
@@ -60,6 +63,22 @@ CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY = (
     "LeaseReleased",
     "ProjectionUpdated",
 )
+PREPARED_CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY = (
+    "TransactionStarted",
+    "LeaseAcquired",
+    "SnapshotCaptured",
+    "SessionLaunched",
+    "CheckpointRecorded",
+    "CheckpointRecorded",
+    "HumanGateRaised",
+    "LeaseReleased",
+    "ProjectionUpdated",
+)
+AUTHENTICATED_PREPARED_FEATURE_BRANCH_CHECKPOINT = {
+    "checkpoint": "authenticated_prepared_feature_branch",
+    "previous_phase": "feature_selected",
+    "next_phase": "branch_preparing",
+}
 AUTHENTICATED_FEATURE_SESSION_CHECKPOINT = {
     "checkpoint": "authenticated_feature_session_launched",
     "previous_phase": "branch_preparing",
@@ -90,20 +109,23 @@ def _authenticate_original_transaction_topology(
     run_id: str,
     session_id: str,
 ) -> dict[str, Any]:
-    """Authenticate only the legacy or M1-017 retained-result topology."""
+    """Authenticate only an exact supported retained-result topology."""
 
     event_types = tuple(
         str(event.get("event_type") or "") for event in transaction_events
     )
     if event_types == LEGACY_RETAINED_RESULT_TOPOLOGY:
         variant = "pre_m1_017"
-        checkpoint = None
+        checkpoints: list[dict[str, Any]] = []
     elif event_types == CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY:
         variant = "m1_017_authenticated_session_checkpoint"
-        checkpoint = transaction_events[4]
+        checkpoints = [transaction_events[4]]
+    elif event_types == PREPARED_CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY:
+        variant = "prepared_branch_and_session_checkpoints"
+        checkpoints = [transaction_events[4], transaction_events[5]]
     else:
         variant = None
-        checkpoint = None
+        checkpoints = []
 
     contiguous_chain = bool(transaction_events) and all(
         int(current.get("sequence", 0)) == int(previous.get("sequence", 0)) + 1
@@ -133,10 +155,20 @@ def _authenticate_original_transaction_topology(
         and transaction_events[3].get("event_type") == "SessionLaunched"
         else {}
     )
-    checkpoint_payload = (
-        checkpoint.get("payload") or {}
-        if isinstance(checkpoint, dict)
-        else None
+    checkpoint_payloads = [
+        checkpoint.get("payload") or {} for checkpoint in checkpoints
+    ]
+    expected_checkpoint_payloads = (
+        []
+        if variant == "pre_m1_017"
+        else (
+            [AUTHENTICATED_FEATURE_SESSION_CHECKPOINT]
+            if variant == "m1_017_authenticated_session_checkpoint"
+            else [
+                AUTHENTICATED_PREPARED_FEATURE_BRANCH_CHECKPOINT,
+                AUTHENTICATED_FEATURE_SESSION_CHECKPOINT,
+            ]
+        )
     )
     checks = {
         "accepted_event_sequence": variant is not None,
@@ -145,11 +177,9 @@ def _authenticate_original_transaction_topology(
         "run_lineage_exact": start_payload.get("run_id") == run_id,
         "session_lineage_exact": launch_payload.get("session_id") == session_id,
         "checkpoint_count_exact": event_types.count("CheckpointRecorded")
-        == (1 if checkpoint is not None else 0),
+        == len(expected_checkpoint_payloads),
         "checkpoint_payload_exact": (
-            checkpoint_payload == AUTHENTICATED_FEATURE_SESSION_CHECKPOINT
-            if checkpoint is not None
-            else True
+            checkpoint_payloads == expected_checkpoint_payloads
         ),
     }
     return {
@@ -160,8 +190,12 @@ def _authenticate_original_transaction_topology(
         "accepted_topologies": [
             list(LEGACY_RETAINED_RESULT_TOPOLOGY),
             list(CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY),
+            list(PREPARED_CHECKPOINT_AWARE_RETAINED_RESULT_TOPOLOGY),
         ],
-        "checkpoint_payload": checkpoint_payload,
+        "checkpoint_payload": (
+            checkpoint_payloads[0] if len(checkpoint_payloads) == 1 else None
+        ),
+        "checkpoint_payloads": checkpoint_payloads,
         "checks": checks,
     }
 
@@ -956,6 +990,39 @@ class FeatureResultRecovery:
             if isinstance(failed_prelaunch_terminal, dict)
             else {}
         )
+        failed_prelaunch_run_id = failed_prelaunch_start_payload.get("run_id")
+        capability_failure_report: dict[str, Any] = {}
+        if isinstance(failed_prelaunch_run_id, str) and failed_prelaunch_run_id:
+            report_root = (self.controller_root / "reports").resolve()
+            capability_report_path = (
+                report_root
+                / failed_prelaunch_run_id
+                / "feature_cycle-launch-failure.json"
+            ).resolve()
+            try:
+                capability_report_path.relative_to(report_root)
+                loaded_capability_report = json.loads(
+                    capability_report_path.read_text(encoding="utf-8")
+                )
+                if isinstance(loaded_capability_report, dict):
+                    capability_failure_report = loaded_capability_report
+            except (ValueError, OSError, json.JSONDecodeError):
+                capability_failure_report = {}
+        capability_isolation_prelaunch = (
+            failed_prelaunch_terminal_payload.get("reference")
+            == "SessionError"
+            and isinstance(failed_prelaunch_run_id, str)
+            and authenticates_run_scoped_capability_isolation_report(
+                capability_failure_report,
+                project_id=self.project.project_id,
+                run_id=failed_prelaunch_run_id,
+                repository=self.project.repository,
+            )
+        )
+        legacy_context_prelaunch = (
+            failed_prelaunch_terminal_payload.get("reference")
+            == "UnicodeDecodeError"
+        )
         start_policy = start_payload.get("allowed_mutation_policy")
         start_policy = start_policy if isinstance(start_policy, dict) else {}
         allowed_paths = set(start_policy.get("allowed_paths") or ())
@@ -1108,16 +1175,17 @@ class FeatureResultRecovery:
             == "FEATURE_VALIDATION_FAILED"
             and failed_prelaunch_terminal_payload.get("next_state")
             == "validation_failed"
-            and failed_prelaunch_terminal_payload.get("reference")
-            == "UnicodeDecodeError"
+            and (
+                legacy_context_prelaunch
+                or capability_isolation_prelaunch
+            )
             and int(failed_prelaunch_start.get("sequence", 0))
             > preparation_terminal_sequence
             and int(failed_prelaunch_terminal.get("sequence", 0))
             < int((prelaunch_start or {}).get("sequence", 0))
         )
         prelaunch_recovery_authenticated = bool(
-            feature_id == "F070"
-            and prelaunch_start
+            prelaunch_start
             and len(prelaunch_recovery_candidates) == 1
             and failed_prelaunch_authenticated
             and prelaunch_start_payload.get("feature_id") == feature_id
@@ -1211,11 +1279,20 @@ class FeatureResultRecovery:
                 same_run_prepared_execution
                 or (
                     prelaunch_recovery_authenticated
-                    and self.project.queue_location in changed_paths
-                    and starting_snapshot.get("queue_fingerprint")
-                    != terminal_snapshot.get("queue_fingerprint")
-                    and terminal_snapshot.get("queue_fingerprint")
-                    == current_snapshot.queue_fingerprint
+                    and (
+                        (
+                            self.project.queue_location in changed_paths
+                            and starting_snapshot.get("queue_fingerprint")
+                            != terminal_snapshot.get("queue_fingerprint")
+                            and terminal_snapshot.get("queue_fingerprint")
+                            == current_snapshot.queue_fingerprint
+                        )
+                        or (
+                            start_payload.get("starting_queue_fingerprint")
+                            == terminal_snapshot.get("queue_fingerprint")
+                            == current_snapshot.queue_fingerprint
+                        )
+                    )
                 )
             )
         )

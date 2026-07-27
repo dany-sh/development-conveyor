@@ -1924,3 +1924,24 @@ This log records model configuration and deterministic deployment evidence. It n
   fingerprinted prelaunch plan before authoritative raw-action dispatch. Two
   dedicated resume regressions pass; the feature-prelaunch suite now contains
   eleven passing tests.
+- Live corrected feature launch: resume created authenticated F078 session
+  `019fa202-08a0-7400-979a-82e0004679fa` with Terra/medium, zero children, and
+  the exact four-capability allowlist. The session retained a 10-file
+  implementation diff but its terminal envelope conflicted on workflow type,
+  so the controller created no commit, released the writer lease, preserved
+  the diff, and raised `structured_output_invalid` with zero attempts consumed.
+- Retained-lineage correction: current feature execution records the exact
+  prepared-branch checkpoint followed by the authenticated-session checkpoint.
+  Feature-result recovery now accepts that topology and generalizes the
+  existing prelaunch lineage proof from the legacy F070 Unicode failure to any
+  exact feature whose failed zero-session transaction has an authenticated
+  run-scoped capability-isolation report. The prepared, recovery, execution,
+  branch, HEAD, queue, report, session, diff, and gate identities must all
+  agree.
+- Retained-result resume: ordinary resume now dispatches only an
+  evidence-authenticated `feature_result_recovery` plan before exposing the raw
+  structured-output gate. Synthetic tests cover the new two-checkpoint
+  topology, exact capability-prelaunch lineage, existing legacy lineage, and
+  resume dispatch. Live read-only F078 status authenticates all 10 paths and
+  requires `PersistentDomainStoreTests`, `SessionLifecycleTests`, `swift
+  build`, and `git diff --check` before one candidate/accepted commit.

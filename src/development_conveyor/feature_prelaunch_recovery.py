@@ -19,6 +19,37 @@ from .repository import RepositoryInspector
 from .workflow_lease import WorkflowWriterLease
 
 
+def authenticates_run_scoped_capability_isolation_report(
+    report: dict[str, Any],
+    *,
+    project_id: str,
+    run_id: str,
+    repository: Path,
+) -> bool:
+    return bool(
+        report.get("run_id") == run_id
+        and report.get("project_id") == project_id
+        and report.get("action") == "feature_cycle"
+        and report.get("failure_classification") == "session_execution_failed"
+        and report.get("exit_classification") == "session_execution_failed"
+        and report.get("result_classification") == "session_execution_failed"
+        and report.get("exit_status") is None
+        and report.get("argv") == []
+        and report.get("session_id") is None
+        and report.get("launched_model") is None
+        and report.get("terminal_marker_found") is False
+        and report.get("context_pack_evidence") is None
+        and report.get("context_read_failure") is None
+        and report.get("structured_result") is None
+        and report.get("parsed_structured_result") is None
+        and str(report.get("redacted_stderr") or "").startswith(
+            "capability_isolation_unsupported:"
+        )
+        and Path(str(report.get("working_directory") or "")).resolve()
+        == repository.resolve()
+    )
+
+
 class FeaturePrelaunchRecovery:
     """Authenticate and recover only an exact clean zero-session prelaunch."""
 
@@ -129,25 +160,12 @@ class FeaturePrelaunchRecovery:
             and blocked.get("reference") == "SessionError"
             and report_kind == "run_scoped_launch_failure"
             and start.get("run_id") == report.get("run_id")
-            and report.get("project_id") == self.project.project_id
-            and report.get("action") == "feature_cycle"
-            and report.get("failure_classification") == "session_execution_failed"
-            and report.get("exit_classification") == "session_execution_failed"
-            and report.get("result_classification") == "session_execution_failed"
-            and report.get("exit_status") is None
-            and report.get("argv") == []
-            and report.get("session_id") is None
-            and report.get("launched_model") is None
-            and report.get("terminal_marker_found") is False
-            and report.get("context_pack_evidence") is None
-            and report.get("context_read_failure") is None
-            and report.get("structured_result") is None
-            and report.get("parsed_structured_result") is None
-            and str(report.get("redacted_stderr") or "").startswith(
-                "capability_isolation_unsupported:"
+            and authenticates_run_scoped_capability_isolation_report(
+                report,
+                project_id=self.project.project_id,
+                run_id=str(start.get("run_id")),
+                repository=self.project.repository,
             )
-            and Path(str(report.get("working_directory") or "")).resolve()
-            == self.project.repository.resolve()
         )
         report_events = report.get("events") if isinstance(report, dict) else []
         authenticated_session_events = [
