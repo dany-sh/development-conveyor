@@ -37,6 +37,16 @@ session checkpoints plus the run-scoped capability-prelaunch lineage, with two
 focused Swift test filters, `swift build`, and `git diff --check` required
 before one accepted commit.
 
+Live retained-result recovery then passed
+`PersistentDomainStoreTests`, `SessionLifecycleTests`, `swift build`, and
+`git diff --check` without another model. It created accepted commit
+`d1a2c00257a5c620109d61a5aacc891444440579`; deterministic milestone
+integration produced `a265d0a49625581bc44b823def804d4f81161a8a` and the
+integration-evidence commit `860769e`. F078 is now `integrated` with
+`integration_status: passed`. Final consistency is `CONSISTENT`, both writer
+leases are absent, and the clean application repository is stopped on
+`codex/m0-foundation` at queue reconciliation without starting F079.
+
 The existing focused capability, routing, runtime-audit, planning, recovery,
 and execution-identity validation passes, plus all eleven feature-prelaunch
 recovery tests. Compilation, configuration and queue validation, the global

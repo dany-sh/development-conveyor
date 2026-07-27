@@ -1945,3 +1945,14 @@ This log records model configuration and deterministic deployment evidence. It n
   resume dispatch. Live read-only F078 status authenticates all 10 paths and
   requires `PersistentDomainStoreTests`, `SessionLifecycleTests`, `swift
   build`, and `git diff --check` before one candidate/accepted commit.
+- Live retained-result acceptance: deterministic recovery transaction
+  `0ebf0b59-03ce-4b6a-867b-1986b5de084c` passed both focused Swift filters,
+  `swift build`, and `git diff --check`, launched zero models and children,
+  resolved the structured-output gate, and created accepted F078 commit
+  `d1a2c00257a5c620109d61a5aacc891444440579`.
+- Live integration: deterministic milestone integration cherry-picked the
+  accepted feature as `a265d0a49625581bc44b823def804d4f81161a8a` and recorded
+  passing integration evidence at `860769e`. F078 is `integrated` with
+  `integration_status: passed`; final consistency is `CONSISTENT`, the
+  milestone worktree is clean, both writer leases are absent, and execution
+  stopped at queue reconciliation without selecting or starting F079.

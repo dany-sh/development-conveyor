@@ -64,6 +64,10 @@ of allowing its ordinary recovery route.
   transaction topology and continuous run-scoped capability-prelaunch
   recovery lineage. Ordinary resume dispatches the authenticated zero-model
   plan before the raw structured-output human gate.
+- Live retained-result recovery passes its two focused Swift filters, build,
+  and diff gate, creates one accepted F078 commit, and deterministic milestone
+  integration records `integration_status: passed` with final consistency
+  `CONSISTENT`.
 
 ## Execution policy
 
