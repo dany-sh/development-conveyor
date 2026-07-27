@@ -58,6 +58,8 @@ of allowing its ordinary recovery route.
 - Live read-only status authenticates the exact F078 run-scoped launch report
   and selects zero-model `feature_prelaunch_recovery` rather than looping on
   `verify_consistency`.
+- Both ordinary `resume` entrypoints dispatch that authenticated plan before
+  the raw failed projection can fall back to read-only consistency.
 
 ## Execution policy
 

@@ -1917,3 +1917,10 @@ This log records model configuration and deterministic deployment evidence. It n
   now selects `feature_prelaunch_recovery` for run
   `db034d5f-8e27-4df7-a81e-881b02bdf22d` on the exact prepared branch and HEAD
   with zero models and zero implementation attempts.
+- Resume dispatch correction: the first committed live attempt proved that
+  `status` recognized the exact technical recovery while `resume` still
+  dispatched the raw projection's generic `verify_consistency` action. Both
+  `run_project(..., "resume")` and `resume_project(...)` now apply the
+  fingerprinted prelaunch plan before authoritative raw-action dispatch. Two
+  dedicated resume regressions pass; the feature-prelaunch suite now contains
+  eleven passing tests.

@@ -344,6 +344,26 @@ class FeaturePrelaunchRecoveryTests(unittest.TestCase):
             result["kernel_projection"]["allowed_next_action"], "feature_cycle"
         )
 
+    def test_resume_dispatches_run_scoped_capability_prelaunch_recovery(self):
+        self._append_capability_isolation_prelaunch_failure()
+        result = CycleEngine(self.configuration).run_project(
+            self.project, "resume"
+        )
+        self.assertEqual(result["outcome"], "prelaunch_recovery_applied")
+        self.assertEqual(result["model_sessions_launched"], 0)
+        self.assertEqual(
+            result["kernel_projection"]["allowed_next_action"], "feature_cycle"
+        )
+
+    def test_resume_project_dispatches_capability_prelaunch_recovery(self):
+        self._append_capability_isolation_prelaunch_failure()
+        result = CycleEngine(self.configuration).resume_project(self.project)
+        self.assertEqual(result["outcome"], "prelaunch_recovery_applied")
+        self.assertEqual(result["model_sessions_launched"], 0)
+        self.assertEqual(
+            result["kernel_projection"]["allowed_next_action"], "feature_cycle"
+        )
+
     def test_run_scoped_capability_failure_rejects_session_or_report_drift(self):
         run_id = self._append_capability_isolation_prelaunch_failure()
         report_path = (

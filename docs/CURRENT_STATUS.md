@@ -24,10 +24,12 @@ or application commits and only the ignored `.factory/conveyor-state.json`
 updated. Consistency reports `CONSISTENT`. Read-only status now authenticates
 the exact run-scoped, zero-session capability failure and selects deterministic
 `feature_prelaunch_recovery`; after that zero-model repair, the existing F078
-feature execution can resume with the exact four-capability allowlist.
+feature execution can resume with the exact four-capability allowlist. Both
+ordinary resume dispatch paths now execute the authenticated recovery before
+the raw failed projection's generic consistency fallback.
 
 The existing focused capability, routing, runtime-audit, planning, recovery,
-and execution-identity validation passes, plus all nine feature-prelaunch
+and execution-identity validation passes, plus all eleven feature-prelaunch
 recovery tests. Compilation, configuration and queue validation, the global
 model-policy validator, pinned-CLI capability proof, runtime audit, and
 `git diff --check` pass.

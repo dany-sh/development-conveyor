@@ -7404,6 +7404,37 @@ class CycleEngine:
         finally:
             reservation.release(run_id)
 
+    def _apply_planned_feature_prelaunch_recovery(
+        self, project: Project, plan: dict[str, Any]
+    ) -> dict[str, Any]:
+        evidence = plan.get("feature_prelaunch_recovery")
+        if not isinstance(evidence, dict):
+            raise RecoveryError(
+                "feature prelaunch recovery route lacks exact evidence"
+            )
+        required = (
+            "feature_id",
+            "autopilot_run_id",
+            "expected_branch",
+            "expected_head",
+            "plan_fingerprint",
+        )
+        missing = [
+            field
+            for field in required
+            if not isinstance(evidence.get(field), str) or not evidence[field]
+        ]
+        if missing:
+            raise RecoveryError(
+                "feature prelaunch recovery route lacks exact fields: "
+                + ", ".join(missing)
+            )
+        return FeaturePrelaunchRecovery(
+            controller_root=self.root,
+            configuration=self.configuration,
+            project=project,
+        ).apply(evidence)
+
     def resume_project(self, project: Project, run_id: str | None = None) -> dict[str, Any]:
         planning_plan = self.project_plan(project)
         planning_recovery = planning_plan.get("planning_finalization_recovery")
@@ -7414,6 +7445,13 @@ class CycleEngine:
             return self._recover_terminal_planning_finalization(
                 project,
                 expected_plan=planning_recovery,
+            )
+        if (
+            planning_plan.get("proposed_next_action")
+            == "feature_prelaunch_recovery"
+        ):
+            return self._apply_planned_feature_prelaunch_recovery(
+                project, planning_plan
             )
         kernel_recovery = self._kernel_recovery_preflight(project, apply=True)
         if kernel_recovery is not None:
@@ -10168,6 +10206,15 @@ class CycleEngine:
                 return self._recover_terminal_planning_finalization(
                     project,
                     expected_plan=planning_recovery,
+                )
+            if (
+                planning_plan.get("proposed_next_action")
+                == "feature_prelaunch_recovery"
+            ):
+                if dry_run:
+                    return planning_plan
+                return self._apply_planned_feature_prelaunch_recovery(
+                    project, planning_plan
                 )
         kernel_recovery = self._kernel_recovery_preflight(
             project, apply=(mode == "resume" and not dry_run)

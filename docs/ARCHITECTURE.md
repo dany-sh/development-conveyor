@@ -100,7 +100,9 @@ identity, no terminal marker, the exact `feature_cycle` action and repository,
 and an unchanged clean prepared branch and HEAD with no lease, ownership,
 reservation, Git operation, feature report, commit, or prior recovery.
 Recovery is deterministic, consumes no implementation attempt, and restores
-the prepared execution route; any evidence drift leaves the failure intact.
+the prepared execution route. Resume dispatch evaluates this authenticated
+technical-recovery plan before the raw failed projection's generic
+`verify_consistency` fallback; any evidence drift leaves the failure intact.
 
 The model-produced feature commit is candidate implementation evidence, not necessarily the immutable accepted commit. After validation, controller-owned deterministic acceptance renders the queue, feature specification, feature catalog, current status, and run log completely in memory before any write, then replaces the validated set transactionally with rollback on a write failure. The current-status transformation resolves exactly one supported feature-state bullet inside `## Factory position`, verifies its feature identity, and normalizes it to the accepted integration-pending representation without changing references elsewhere. The queue uses `accepted_commit: SELF` to avoid a circular SHA dependency. Git plumbing then reconstructs one authoritative accepted commit whose sole parent is the planned milestone start and whose tree combines the validated candidate implementation with those metadata changes; the feature ref moves atomically from candidate to accepted commit. Before any accepted terminal or `integration_ready` projection, the controller runs the same two-ref immutable metadata validation used by milestone integration, proves the exact parent and branch head, and compares implementation-tree fingerprints with the authorized metadata excluded. Candidate and accepted identities, authorized paths, comparison evidence, and ref movement remain separate ledger evidence. A metadata-only child on top of a candidate remains invalid.
 
