@@ -32,6 +32,7 @@ def add_feature(
     feature_id: str = "F002",
     status: str = "ready",
     dependencies: list[str] | None = None,
+    milestone: str = "M0",
 ) -> None:
     spec = f"docs/features/{feature_id}.md"
     (repository / spec).write_text(
@@ -46,7 +47,7 @@ def add_feature(
             "title": f"Synthetic {feature_id}",
             "status": status,
             "priority": 2,
-            "milestone": "M0",
+            "milestone": milestone,
             "dependencies": dependencies or [],
             "spec": spec,
             "acceptance_criteria": [f"{feature_id} is complete"],
@@ -65,6 +66,21 @@ def add_feature(
 
 
 class QueueControlTests(unittest.TestCase):
+    def _add_second_milestone(self, repository: Path, project) -> None:
+        path = repository / project.queue_location
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["milestones"].append({
+            "id": "M1",
+            "name": "Future milestone",
+            "status": "planned",
+            "base_commit": None,
+            "integration_branch": "codex/m1-foundation",
+            "integrated_features": [],
+            "last_validated_commit": None,
+            "human_gate": True,
+        })
+        path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
     def test_queue_listing_is_deterministic_and_read_only(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository, project = synthetic_repository(Path(temporary))
@@ -85,6 +101,58 @@ class QueueControlTests(unittest.TestCase):
             self.assertEqual(0, first["model_sessions_launched"])
             self.assertEqual(before_head, git(repository, "rev-parse", "HEAD"))
             self.assertEqual(before_status, git(repository, "status", "--porcelain=v1"))
+
+    def test_queue_scopes_include_all_features_without_changing_active_execution_scope(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            self._add_second_milestone(repository, project)
+            add_feature(repository, project, feature_id="F002", status="done")
+            add_feature(repository, project, feature_id="F003", status="ready", milestone="M1")
+            add_feature(repository, project, feature_id="F004", status="integrated", milestone="M1")
+            configuration = controller_configuration(Path(temporary), project)
+            before = (repository / project.queue_location).read_bytes()
+
+            active = queue_report(configuration, project, scope="active")
+            unfinished = queue_report(configuration, project, scope="unfinished")
+            all_features = queue_report(configuration, project, scope="all")
+
+            self.assertEqual(["F001", "F002"], [item["feature_id"] for item in active["features"]])
+            self.assertEqual(["F001", "F003"], [item["feature_id"] for item in unfinished["features"]])
+            self.assertEqual(["F001", "F002", "F003", "F004"], [item["feature_id"] for item in all_features["features"]])
+            self.assertEqual("F001", all_features["next_ready_feature"])
+            self.assertEqual(4, all_features["total_feature_count"])
+            self.assertEqual(2, all_features["terminal_feature_count"])
+            self.assertEqual(0, all_features["model_sessions_launched"])
+            self.assertEqual(before, (repository / project.queue_location).read_bytes())
+
+    def test_queue_scope_milestone_filter_and_future_execution_reason_are_read_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            self._add_second_milestone(repository, project)
+            add_feature(repository, project, feature_id="F002", milestone="M1")
+            configuration = controller_configuration(Path(temporary), project)
+            before_head = git(repository, "rev-parse", "HEAD")
+            report = queue_report(configuration, project, scope="all", requested_milestone="M1")
+            feature = report["features"][0]
+
+            self.assertEqual("M1", report["requested_milestone"])
+            self.assertEqual("M1", feature["milestone"])
+            self.assertFalse(feature["active_milestone_member"])
+            self.assertFalse(feature["execution_eligible"])
+            self.assertIn("active milestone M0", feature["execution_ineligible_reason"])
+            self.assertEqual("M1", next(item["milestone_id"] for item in report["milestones"] if item["active"] is False))
+            self.assertEqual(before_head, git(repository, "rev-parse", "HEAD"))
+
+    def test_unknown_milestone_is_a_stable_structured_read_only_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project = synthetic_repository(Path(temporary))
+            report = queue_report(
+                controller_configuration(Path(temporary), project), project,
+                scope="all", requested_milestone="missing",
+            )
+            self.assertEqual("unknown_milestone", report["classification"])
+            self.assertEqual("unknown_milestone", report["error"]["code"])
+            self.assertEqual(0, report["model_sessions_launched"])
 
     def test_priority_then_queue_order_is_the_stable_selection_authority(self):
         with tempfile.TemporaryDirectory() as temporary:

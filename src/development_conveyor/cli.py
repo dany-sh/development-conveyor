@@ -88,9 +88,19 @@ def _parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="show read-only portfolio or project status")
     status.add_argument("--project")
     queue = subparsers.add_parser(
-        "queue", help="inspect one active-milestone feature queue without mutation"
+        "queue", help="inspect a read-only feature queue scope without mutation"
     )
     queue.add_argument("--project", required=True)
+    queue.add_argument(
+        "--scope",
+        choices=("active", "unfinished", "all"),
+        default="active",
+        help="active milestone (default), all unfinished work, or all known features",
+    )
+    queue.add_argument(
+        "--milestone",
+        help="optional read-only milestone filter; unknown IDs return structured JSON",
+    )
     queue.add_argument(
         "--json",
         action="store_true",
@@ -651,6 +661,8 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
             configuration,
             project,
             runtime=engine.project_plan(project),
+            scope=args.scope,
+            requested_milestone=args.milestone,
         )
 
     if args.command == "prioritize":
@@ -871,7 +883,8 @@ def main(arguments: list[str] | None = None) -> int:
             or result.get("classification") == "POLICY_REBIND_REJECTED"
             or result.get("classification") == "AUTOPILOT_FAILED"
             or result.get("classification") in {
-                "HUMAN_DECISION_REQUIRED", "CORRUPT_EVIDENCE", "UNSAFE_REPOSITORY_STATE"
+                "HUMAN_DECISION_REQUIRED", "CORRUPT_EVIDENCE", "UNSAFE_REPOSITORY_STATE",
+                "unknown_milestone",
             }
         ) else 0
     except (ConveyorError, OSError, ValueError) as exc:

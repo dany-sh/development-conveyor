@@ -125,19 +125,67 @@ def queue_report(
     project: Project,
     *,
     runtime: dict[str, Any] | None = None,
+    scope: str = "active",
+    requested_milestone: str | None = None,
 ) -> dict[str, Any]:
+    if scope not in {"active", "unfinished", "all"}:
+        raise QueueError("queue scope must be active, unfinished, or all")
     queue = FeatureQueue.from_location(project.repository, project.queue_location)
     milestone_id = project.active_milestone or ""
-    milestone_features = queue.features_for_milestone(milestone_id)
+    active_milestone = queue.milestone(milestone_id)
+    requested = requested_milestone.strip() if isinstance(requested_milestone, str) else None
+    requested = requested or None
+    requested_resolved = queue.milestone(requested) if requested else None
+    if requested and requested_resolved is None:
+        return {
+            "schema_version": 1,
+            "project_id": project.project_id,
+            "classification": "unknown_milestone",
+            "scope": scope,
+            "requested_milestone": requested,
+            "active_milestone": milestone_id,
+            "error": {
+                "code": "unknown_milestone",
+                "message": f"Unknown milestone: {requested}",
+                "milestone": requested,
+            },
+            "read_only": True,
+            "model_sessions_launched": 0,
+            "child_sessions_launched": 0,
+        }
+
+    if scope == "active":
+        scoped_features = queue.features_for_milestone(milestone_id)
+    elif scope == "unfinished":
+        scoped_features = [feature for feature in queue.features if feature["status"] not in COMPLETE_STATUSES]
+    else:
+        scoped_features = list(queue.features)
+    visible_features = scoped_features
+    if requested_resolved is not None:
+        visible_features = [
+            feature for feature in scoped_features
+            if feature["milestone"] == requested_resolved["id"]
+        ]
     runtime = runtime or {}
     current = runtime.get("current_feature")
     selected = runtime.get("selected_next_feature")
     if selected is None:
         selected = runtime.get("selected_feature")
     rows: list[dict[str, Any]] = []
-    for position, feature in enumerate(milestone_features, start=1):
+    queue_positions = {feature["id"]: position for position, feature in enumerate(queue.features, start=1)}
+    for feature in visible_features:
         readiness = queue.readiness(feature)
         ready_transition_reason = _ready_transition_reason(queue, feature)
+        active_member = feature["milestone"] == (active_milestone or {}).get("id")
+        execution_eligible = bool(active_member and readiness["ready"])
+        if not active_member:
+            execution_reason = (
+                f"Feature is in milestone {feature['milestone']}; execution is restricted to "
+                f"active milestone {milestone_id}."
+            )
+            ready_transition_reason = execution_reason
+        else:
+            execution_reason = readiness["blocked_reason"]
         profile = resolve_execution_profile(
             workflow="application_feature",
             deterministic=False,
@@ -149,20 +197,25 @@ def queue_report(
             {
                 "feature_id": feature["id"],
                 "title": feature["title"],
+                "milestone": feature["milestone"],
                 "status": feature["status"],
                 "description": feature.get("description") or feature.get("summary") or "",
                 "specification_path": str(
                     project.repository / str(feature.get("spec") or feature.get("specification") or "")
                 ) if (feature.get("spec") or feature.get("specification")) else None,
+                "derived_column": _kanban_column(feature, readiness, current=current),
                 "kanban_column": _kanban_column(feature, readiness, current=current),
                 "priority": priority_label(feature.get("priority")),
-                "queue_position": position,
+                "queue_position": queue_positions[feature["id"]],
                 "dependencies": list(feature.get("dependencies", [])),
                 "dependencies_complete": readiness["dependencies_complete"],
                 "readiness": "ready" if readiness["ready"] else "not_ready",
                 "blocked_reason": readiness["blocked_reason"],
-                "ready_transition_eligible": ready_transition_reason is None,
+                "ready_transition_eligible": active_member and ready_transition_reason is None,
                 "ready_transition_reason": ready_transition_reason,
+                "active_milestone_member": active_member,
+                "execution_eligible": execution_eligible,
+                "execution_ineligible_reason": None if execution_eligible else execution_reason,
                 "selected": feature["id"] == selected,
                 "current": feature["id"] == current,
                 "execution_profile": profile.to_dict(),
@@ -171,13 +224,31 @@ def queue_report(
                 "branch": feature.get("branch"),
                 "commit": feature.get("integrated_commit") or feature.get("accepted_commit"),
                 "latest_terminal_result": _latest_terminal_result(runtime, feature["id"]),
-                "priority_position": position,
+                "priority_position": queue_positions[feature["id"]],
             }
         )
     next_feature = queue.select_next(milestone_id)
+    milestones = []
+    for milestone in queue.milestones:
+        milestone_features = queue.features_for_milestone(milestone["id"])
+        milestones.append({
+            "milestone_id": milestone["id"],
+            "title": milestone.get("title") or milestone.get("name"),
+            "total_count": len(milestone_features),
+            "unfinished_count": sum(feature["status"] not in COMPLETE_STATUSES for feature in milestone_features),
+            "ready_count": sum(queue.readiness(feature)["ready"] for feature in milestone_features),
+            "blocked_count": sum(
+                _kanban_column(feature, queue.readiness(feature), current=current) == "Blocked"
+                for feature in milestone_features
+            ),
+            "completed_count": sum(feature["status"] in COMPLETE_STATUSES for feature in milestone_features),
+            "active": milestone["id"] == (active_milestone or {}).get("id"),
+        })
     return {
         "schema_version": 1,
         "project_id": project.project_id,
+        "scope": scope,
+        "requested_milestone": requested_resolved["id"] if requested_resolved else None,
         "active_milestone": milestone_id,
         "paused": operator_paused(configuration, project),
         "active_feature": current,
@@ -191,6 +262,11 @@ def queue_report(
         "classification": "ready_work" if next_feature else "no_ready_work",
         "no_ready_reasons": [] if next_feature else queue.no_ready_reasons(milestone_id),
         "features": rows,
+        "total_feature_count": len(queue.features),
+        "scoped_feature_count": len(scoped_features),
+        "visible_nonterminal_count": sum(feature["status"] not in COMPLETE_STATUSES for feature in visible_features),
+        "terminal_feature_count": sum(feature["status"] in COMPLETE_STATUSES for feature in scoped_features),
+        "milestones": milestones,
         "queue_path": str(resolve_queue_path(project.repository, project.queue_location)),
         "read_only": True,
         "model_sessions_launched": 0,
