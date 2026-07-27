@@ -16,6 +16,7 @@ from .execution_profiles import validate_feature_execution_policy
 
 COMPLETE_STATUSES = {"integrated", "done"}
 ACTIVE_STATUSES = {"in_progress", "review", "accepted", "integration_pending", "integrating"}
+BLOCKED_STATUSES = {"blocked", "human_decision_required", "deferred", "rejected", "failed"}
 SUPPORTED_STATUSES = {
     "proposed", "ready", "in_progress", "review", "accepted", "integration_pending",
     "integrating", "integrated", "failed", "human_decision_required", "blocked", "done",
@@ -318,7 +319,7 @@ class FeatureQueue:
         return resolved.is_file() and isinstance(criteria, list) and bool(criteria)
 
     def ready(self, milestone_id: str) -> list[dict[str, Any]]:
-        candidates = []
+        candidates: list[tuple[dict[str, Any], int]] = []
         for index, feature in enumerate(self.features_for_milestone(milestone_id)):
             if feature.get("status") != "ready":
                 continue
@@ -327,7 +328,7 @@ class FeatureQueue:
             if not self.dependencies_complete(feature) or not self._specified(feature):
                 continue
             candidates.append((feature, index))
-        candidates.sort(key=lambda pair: (_priority(pair[0].get("priority")), -len(pair[0].get("dependencies", [])), pair[1], pair[0]["id"]))
+        candidates.sort(key=lambda pair: (pair[1], pair[0]["id"]))
         return [item for item, _ in candidates]
 
     def select_next(self, milestone_id: str) -> Selection | None:
@@ -336,10 +337,90 @@ class FeatureQueue:
             return None
         feature = ready[0]
         reason = (
-            "Selected deterministically by repository priority, dependency depth, queue order, "
-            f"then feature ID; dependencies are complete for {feature['id']}."
+            "Selected deterministically from the active milestone by queue order, "
+            f"eligible status, completed dependencies, unblocked state, then feature ID; "
+            f"dependencies are complete for {feature['id']}."
         )
         return Selection(feature_id=feature["id"], title=feature["title"], reason=reason, feature=feature)
+
+    def readiness(self, feature: dict[str, Any]) -> dict[str, Any]:
+        """Return deterministic eligibility and an exact non-eligibility reason."""
+
+        dependencies_complete = self.dependencies_complete(feature)
+        status = str(feature.get("status"))
+        blocked_reason = None
+        ready = True
+        if status in COMPLETE_STATUSES:
+            ready = False
+            blocked_reason = f"feature status is {status}"
+        elif status in BLOCKED_STATUSES:
+            ready = False
+            blocked_reason = str(
+                feature.get("blocked_reason")
+                or feature.get("blocking_reason")
+                or f"feature status is {status}"
+            )
+        elif status != "ready":
+            ready = False
+            blocked_reason = f"feature status is {status}; expected ready"
+        elif feature.get("requires_human_decision") is True:
+            ready = False
+            blocked_reason = "feature requires a human decision"
+        elif not dependencies_complete:
+            incomplete = [
+                dependency_id
+                for dependency_id in feature.get("dependencies", [])
+                if not self.dependencies_complete(
+                    {"dependencies": [dependency_id]}
+                )
+            ]
+            ready = False
+            blocked_reason = "dependencies incomplete: " + ", ".join(incomplete)
+        elif not self._specified(feature):
+            ready = False
+            blocked_reason = "feature specification or acceptance criteria are incomplete"
+        return {
+            "ready": ready,
+            "dependencies_complete": dependencies_complete,
+            "blocked_reason": blocked_reason,
+        }
+
+    def select_exact(self, milestone_id: str, feature_id: str) -> Selection:
+        feature = self.feature(feature_id)
+        if feature is None:
+            raise QueueError(f"unknown feature: {feature_id}")
+        milestone = self.milestone(milestone_id)
+        if milestone is None or feature.get("milestone") != milestone.get("id"):
+            raise QueueError(
+                f"feature {feature_id} is not in active milestone {milestone_id}"
+            )
+        readiness = self.readiness(feature)
+        if not readiness["ready"]:
+            raise QueueError(
+                f"feature {feature_id} is ineligible: {readiness['blocked_reason']}"
+            )
+        return Selection(
+            feature_id=feature["id"],
+            title=feature["title"],
+            reason=(
+                f"Selected exact requested feature {feature_id} without changing "
+                "queue order; status, dependencies, blocked state, and specification are eligible."
+            ),
+            feature=feature,
+        )
+
+    def no_ready_reasons(self, milestone_id: str) -> list[dict[str, str]]:
+        reasons: list[dict[str, str]] = []
+        for feature in self.features_for_milestone(milestone_id):
+            readiness = self.readiness(feature)
+            if not readiness["ready"]:
+                reasons.append(
+                    {
+                        "feature_id": feature["id"],
+                        "reason": str(readiness["blocked_reason"]),
+                    }
+                )
+        return reasons
 
     def integration_candidates(self, milestone_id: str) -> list[dict[str, Any]]:
         """Return accepted work awaiting integration before any new ready work."""

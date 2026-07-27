@@ -219,7 +219,11 @@ def bind_projection_to_queue(
     if action not in {"feature_cycle", "queue_reconciliation"} and not terminal_candidate:
         return projection
 
-    selected = queue.select_next(milestone_id)
+    selected = (
+        queue.select_exact(milestone_id, str(candidate))
+        if action == "feature_cycle" and candidate
+        else queue.select_next(milestone_id)
+    )
     bound = dict(projection)
     bound.update(
         {
@@ -291,7 +295,12 @@ def integrated_feature_execution_checks(
         ),
         "projected_selection_matches_queue": (
             projection.get("allowed_next_action") != "feature_cycle"
-            or projected == summary["selected_feature"]
+            or (
+                isinstance(projected, str)
+                and (projected_feature := queue.feature(projected)) is not None
+                and projected_feature.get("milestone") == milestone_id
+                and queue.readiness(projected_feature)["ready"]
+            )
         ),
         "historical_accepted_commit_not_reused": not (
             executable_feature_workflow

@@ -4,6 +4,34 @@ Last updated: 2026-07-26
 
 ## Summary
 
+Deterministic queue control and project pause are implemented on
+`codex/m1-26-deterministic-queue-control` from exact parent
+`5dff933769374943dcad003eb42039c98d2472da`.
+
+`queue` now reports the active milestone in file order with exact readiness,
+dependency, blocking, current/selected, execution-profile, and priority
+evidence. Routine validated-queue selection uses queue order and eligibility
+without a planning model; explicit selection proves exact feature eligibility
+and model/capability availability before mutation. `prioritize` atomically
+changes only queue entry order, while `pause` and `unpause` update one flag in
+the existing project runtime authority without adding a workflow state or
+starting work.
+
+All 19 focused M1-026 queue, pause, and CLI tests pass. All 140 focused
+M1-024/M1-025 planning, capability, recovery, cache-binding, and projection
+regressions pass. Changed-module compilation, JSON-compatible parsing,
+`validate-config`, and `git diff --check` pass. The complete controller suite
+and application tests were intentionally not run.
+
+The single permitted live `queue --project interview-companion` inspection
+reported `no_ready_work`, `paused: false`, no current or selected feature, and
+zero model or child launches. It did not start F079. Interview Companion
+remains clean on `codex/m0-foundation` at
+`860769e814c6d3a8c07cd7e84fad06a3eefe50ee`; Case Manager remains clean on
+`codex/p0-foundation` at `f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0`.
+All 28 protected controller state, report, and log files remained
+byte-for-byte unchanged during the live check.
+
 Explicit capability selection and failed-resume recovery are implemented on
 `codex/m1-25-capability-selection-and-resume-recovery` from exact parent
 `b03469dc11294c49d53be7d5665fa02c647d60dc`.

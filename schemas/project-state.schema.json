@@ -12,6 +12,7 @@
     "current_state": {"type": "string"},
     "active_milestone": {"type": ["string", "null"]},
     "current_feature": {"type": ["string", "null"]},
+    "operator_paused": {"type": "boolean"},
     "last_checkpoint": {"type": ["string", "null"]},
     "stop_reason": {"type": ["string", "null"]},
     "human_decision_required": {"type": ["object", "null"]},

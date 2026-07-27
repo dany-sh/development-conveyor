@@ -270,6 +270,27 @@ cache hash before replacing only `.factory/conveyor-state.json`.
 - No workflow may merge the default branch, push, tag, publish, deploy, release, or notarize.
 - Cache state never overrides ledger state; corrupt evidence is not auto-repaired.
 
+## Deterministic queue control
+
+`FEATURE_QUEUE.yaml` is the sole backlog and ordering authority. For a valid
+active milestone, the controller derives readiness from queue order, feature
+status, dependency completion, blocked state, and feature ID as the stable
+final tie-breaker. Routine queue selection launches no model. Exact feature
+selection authenticates eligibility and its execution profile before creating
+a transaction, acquiring an application writer lease, changing branches, or
+mutating application files.
+
+Reprioritization acquires the repository writer lease and atomically changes
+only feature order in `FEATURE_QUEUE.yaml`; it cannot change status,
+dependencies, specifications, or other product documents. Queue inspection and
+status remain read-only diagnostics.
+
+The existing per-project controller state carries one `operator_paused`
+boolean. It is an operator control, not a workflow state or independent queue
+authority. A paused idle project cannot start reconciliation, preparation,
+execution, or integration; a pause requested during a transaction takes effect
+at the next safe cycle boundary. Clearing the flag starts no work.
+
 ## Decisions
 
 See `docs/adr/0001-append-only-phase-evidence.md`.

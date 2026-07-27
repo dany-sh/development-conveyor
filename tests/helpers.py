@@ -174,6 +174,33 @@ class SyntheticLauncher:
     def __init__(self):
         self.actions: list[str] = []
 
+    def plan(self, request):
+        return SessionPlan(
+            argv=("codex", "exec"),
+            cwd=request.project.repository,
+            prompt="synthetic preflight",
+            prompt_sha256="0" * 64,
+            sandbox="workspace-write",
+            effective_model=request.planned_model,
+            effective_reasoning=request.planned_reasoning,
+            codex_executable="codex",
+            compatibility={"classification": "compatible", "compatible": True},
+            planned_model=request.planned_model,
+            planned_reasoning=request.planned_reasoning,
+            launched_model=request.planned_model,
+            launched_reasoning=request.planned_reasoning,
+            collaboration_tools_removed=request.child_session_budget == 0,
+            selected_profile=request.selected_profile,
+            policy_source=request.model_plan_source,
+            parent_session_budget=request.parent_session_budget,
+            child_session_budget=request.child_session_budget,
+            capability_policy={
+                "capability_isolation_supported": True,
+                "classification": "capability_isolation_enforced",
+            },
+            compact_output_contract_present=True,
+        )
+
     def launch(self, request, on_session_started=None):
         self.actions.append(request.action)
         session_id = f"session-{len(self.actions)}"

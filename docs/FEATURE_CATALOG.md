@@ -23,3 +23,4 @@
 | M1-023 | Runtime policy and context discipline | review | M1 | `docs/features/M1-023-runtime-policy-and-context-discipline.md` |
 | M1-024 | Atomic checkpoint-tolerant planning finalization | review | M1 | `docs/features/M1-024-atomic-planning-finalization.md` |
 | M1-025 | Explicit capability selection and failed-resume recovery | review | M1 | `docs/features/M1-025-explicit-capability-selection-and-resume-recovery.md` |
+| M1-026 | Deterministic queue control and project pause | review | M1 | `docs/features/M1-026-deterministic-queue-control-and-project-pause.md` |

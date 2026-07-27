@@ -63,6 +63,7 @@ from .planning import (
 from .logging import EventLogger, JsonStateStore, atomic_write_bytes, atomic_write_json, run_event, utc_now
 from .human_resolution import evaluate_human_resolution, gate_fingerprint, resolution_fingerprint
 from .queue import FeatureQueue, resolve_queue_path
+from .queue_control import operator_paused, project_authority_lock
 from .recovery import (
     StartupReconciliation,
     assess_durable_integration_success,
@@ -1854,14 +1855,15 @@ class CycleEngine:
                         "prepared feature execution requires a clean repository "
                         "without an active Git operation or writer lease"
                     )
-                selection = queue.select_next(project.active_milestone or "")
-                planned_branch = (
-                    canonical_feature_branch(project, selection.feature)
-                    if selection is not None else None
+                selection = queue.select_exact(
+                    project.active_milestone or "",
+                    str(executable.feature_id or ""),
+                )
+                planned_branch = canonical_feature_branch(
+                    project, selection.feature
                 )
                 if (
-                    selection is None
-                    or selection.feature_id != executable.feature_id
+                    selection.feature_id != executable.feature_id
                     or planned_branch != executable.feature_branch
                 ):
                     raise ProjectionError(
@@ -1958,6 +1960,7 @@ class CycleEngine:
             ),
             "human_decision_history": [],
             "state_evidence": None,
+            "operator_paused": False,
             "created_at": stamp,
             "updated_at": stamp,
         }
@@ -2003,7 +2006,7 @@ class CycleEngine:
             "updated_at": utc_now(),
         })
         if kernel_owned:
-            self.project_store.write(self.project_state_path(project), document)
+            self._write_project_state_preserving_pause(project, document)
         else:
             adapter = LegacyTransitionAdapter(
                 controller_root=self.root,
@@ -2049,7 +2052,9 @@ class CycleEngine:
                 previous_state=transition.previous,
                 next_state=transition.current,
                 checkpoint=checkpoint,
-                mutate=lambda: self.project_store.write(self.project_state_path(project), document),
+                mutate=lambda: self._write_project_state_preserving_pause(
+                    project, document
+                ),
                 terminal_evidence=legacy_terminal_evidence,
                 projection_facts=(
                     {
@@ -2082,6 +2087,17 @@ class CycleEngine:
         ))
         return document
 
+    def _write_project_state_preserving_pause(
+        self, project: Project, document: dict[str, Any]
+    ) -> None:
+        with project_authority_lock(self.configuration, project):
+            latest = self.load_project_state(project)
+            if isinstance(latest, dict):
+                document["operator_paused"] = bool(
+                    latest.get("operator_paused") is True
+                )
+            self.project_store.write(self.project_state_path(project), document)
+
     @staticmethod
     def _reconciliation_fields(assessment: StartupReconciliation) -> dict[str, Any]:
         execution_path = list(assessment.transition_path)
@@ -2104,7 +2120,24 @@ class CycleEngine:
         }
 
     def project_plan(self, project: Project) -> dict[str, Any]:
-        return self._project_plan(project, allow_cache_binding_recovery=True)
+        plan = self._project_plan(project, allow_cache_binding_recovery=True)
+        paused = operator_paused(self.configuration, project)
+        plan["paused"] = paused
+        plan["operator_paused"] = paused
+        if paused:
+            plan["unpaused_proposed_next_action"] = plan.get(
+                "proposed_next_action"
+            )
+            plan["proposed_next_action"] = "project_paused"
+            plan["next_action"] = "project_paused"
+            plan["expected_stop_condition"] = (
+                "Operator pause prevents a new controller cycle from starting."
+            )
+            plan["model_sessions_that_would_launch"] = []
+            plan["child_sessions_that_would_launch"] = []
+            plan["sessions_that_would_launch"] = []
+            plan["execution"] = {"models_planned": 0}
+        return plan
 
     def _feature_result_recovery_plan(
         self, project: Project, projection: dict[str, Any]
@@ -2889,7 +2922,7 @@ class CycleEngine:
             return existing, False
         document.update(desired)
         document["updated_at"] = stamp
-        self.project_store.write(path, document)
+        self._write_project_state_preserving_pause(project, document)
         return document, True
 
     def _compatibility_snapshot(
@@ -4872,9 +4905,9 @@ class CycleEngine:
                     "feature preflight requires the clean configured milestone HEAD and no writer lease"
                 )
             queue = FeatureQueue.from_location(project.repository, project.queue_location)
-            selection = queue.select_next(project.active_milestone or "")
-            if selection is None:
-                raise QueueError("no dependency-ready feature exists after queue reconciliation")
+            selection = queue.select_exact(
+                project.active_milestone or "", bound_feature_id
+            )
             if selection.feature_id != bound_feature_id:
                 raise ProjectionError(
                     "queue selection disagrees with the authoritative feature identity"
@@ -5719,6 +5752,416 @@ class CycleEngine:
                 cost_plan=cost_plan,
             )
         except (ConveyorError, ValueError) as exc:
+            self._terminalize_handled_kernel_failure(kernel, adapter, exc)
+            raise
+        finally:
+            reservation.release(run_id)
+
+    def _preflight_selected_feature(
+        self,
+        project: Project,
+        *,
+        feature_id: str,
+        mode: str,
+        inspector: RepositoryInspector,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Prove exact model and capability availability without mutation."""
+
+        cost_plan = build_run_plan(
+            {
+                "proposed_next_action": "feature_cycle",
+                "selected_feature": feature_id,
+                "application_mutation_expected": True,
+            },
+            self.root,
+            project=project,
+            profile_configuration=self.configuration.execution_profiles or None,
+            override_profile=self.execution_profile_override,
+        )
+        if (
+            cost_plan["execution"]["models_planned"] < 1
+            or cost_plan["execution"]["models_planned"]
+            != cost_plan["parent_session_budget"]
+            or not cost_plan.get("selected_model")
+            or not cost_plan.get("selected_reasoning_effort")
+        ):
+            raise SessionError(
+                "explicit feature execution requires one exact model execution profile"
+            )
+        tracked_paths = tuple(
+            sorted(
+                path
+                for path in inspector.git(["ls-files", "-z"]).stdout.split("\0")
+                if path
+            )
+        )
+        denied_paths = {
+            project.autonomy_contract_location,
+            project.validation_source,
+            ".factory/approved-content.yaml",
+            ".factory/conveyor-state.json",
+            ".factory/locks/writer.json",
+        }
+        allowed_paths = tuple(
+            path
+            for path in tracked_paths
+            if path not in denied_paths
+            and path != ".factory"
+            and not path.startswith(".factory/")
+            and path != "factory-integration"
+            and not path.startswith("factory-integration/")
+        )
+        identity = inspector.identity()
+        request = SessionRequest(
+            action="feature_cycle",
+            project=project,
+            run_id=f"preflight-{uuid.uuid4()}",
+            mode="dry-run-validation",
+            feature=feature_id,
+            transaction_id=f"preflight-{uuid.uuid4()}",
+            repository_identity=identity["repository_id"],
+            starting_branch=inspector.current_branch,
+            starting_commit=inspector.head,
+            allowed_paths=allowed_paths,
+            parent_session_budget=int(cost_plan["parent_session_budget"]),
+            child_session_budget=int(cost_plan["child_session_budget"]),
+            planned_model=str(cost_plan["selected_model"]),
+            planned_reasoning=str(cost_plan["selected_reasoning_effort"]),
+            model_plan_source=str(cost_plan["profile_resolution_source"]),
+            selected_profile=str(cost_plan["profile"]),
+            child_delegation=cost_plan.get("child_agent_justification"),
+            relevant_macos_skills=tuple(
+                cost_plan.get("relevant_macos_skills") or ()
+            ),
+            context_files=tuple(cost_plan["context_pack"]["files"]),
+        )
+        planner = getattr(self.launcher, "plan", None)
+        if callable(planner):
+            planned = planner(request)
+            capability = planned.capability_policy
+            runtime_policy = self.configuration.conveyor.get("runtime_policy")
+            capability_required = bool(
+                isinstance(runtime_policy, dict)
+                and runtime_policy.get("capability_isolation_required") is True
+            )
+            if capability_required and (
+                not isinstance(capability, dict)
+                or capability.get("capability_isolation_supported") is not True
+            ):
+                raise SessionError(
+                    "exact feature capability preflight did not prove isolation"
+                )
+            if (
+                planned.planned_model != cost_plan["selected_model"]
+                or planned.planned_reasoning
+                != cost_plan["selected_reasoning_effort"]
+                or planned.launched_model != cost_plan["selected_model"]
+                or planned.launched_reasoning
+                != cost_plan["selected_reasoning_effort"]
+            ):
+                raise SessionError(
+                    "feature preflight model binding differs from the execution profile"
+                )
+            return cost_plan, {
+                "verified": True,
+                "model": planned.planned_model,
+                "reasoning": planned.planned_reasoning,
+                "profile": planned.selected_profile,
+                "policy_source": planned.policy_source,
+                "capability_policy": capability,
+                "collaboration_tools_removed": planned.collaboration_tools_removed,
+                "model_sessions_launched": 0,
+                "child_sessions_launched": 0,
+            }
+        compatibility = self._compatibility_snapshot(
+            project, "feature_cycle", execution_profile=cost_plan
+        )
+        if compatibility is not None and compatibility.get("compatible") is not True:
+            raise SessionError(
+                "exact feature model compatibility preflight failed: "
+                + str(compatibility.get("classification"))
+            )
+        return cost_plan, {
+            "verified": compatibility is not None,
+            "model": cost_plan["selected_model"],
+            "reasoning": cost_plan["selected_reasoning_effort"],
+            "profile": cost_plan["profile"],
+            "policy_source": cost_plan["profile_resolution_source"],
+            "compatibility": compatibility,
+            "capability_policy": None,
+            "model_sessions_launched": 0,
+            "child_sessions_launched": 0,
+        }
+
+    def _deterministic_queue_selection(
+        self,
+        project: Project,
+        *,
+        mode: str,
+        requested_feature: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Select validated ready work using the queue only; launch no model."""
+
+        inspector = RepositoryInspector(project.repository)
+        if not inspector.is_clean:
+            raise ConveyorError(
+                "deterministic queue selection requires a clean repository"
+            )
+        if any(inspector.git_operation_state().values()):
+            raise ConveyorError(
+                "deterministic queue selection is unavailable during a Git operation"
+            )
+        milestone_head = inspector.rev_parse(
+            project.milestone_branch or "", check=False
+        )
+        if (
+            inspector.current_branch != project.milestone_branch
+            or milestone_head is None
+            or inspector.head != milestone_head
+        ):
+            raise ConveyorError(
+                "deterministic queue selection requires the configured milestone branch and HEAD"
+            )
+        writer = inspect_repository_writer_lock(
+            inspector.writer_lock_path(
+                self.configuration.conveyor["lock_policy"][
+                    "writer_lock_relative_path"
+                ]
+            ),
+            project.repository,
+        )
+        if writer.exists:
+            raise LockError(
+                "deterministic queue selection is unavailable while a writer lease exists"
+            )
+        projection = self._authoritative_projection(project)
+        if projection is not None and projection.get("active_transaction") is not None:
+            raise TransactionError(
+                "deterministic queue selection is unavailable during an active transaction"
+            )
+        queue = FeatureQueue.from_location(project.repository, project.queue_location)
+        milestone_id = project.active_milestone or ""
+        selection = (
+            queue.select_exact(milestone_id, requested_feature)
+            if requested_feature
+            else queue.select_next(milestone_id)
+        )
+        if selection is None:
+            return {
+                "schema_version": 1,
+                "project_id": project.project_id,
+                "outcome": "no_ready_work",
+                "classification": "no_ready_work",
+                "next_state": "queue_reconciliation",
+                "selected_feature": None,
+                "deterministic_selection_reason": (
+                    "No active-milestone feature satisfies queue status, dependency, "
+                    "blocked-state, and specification readiness."
+                ),
+                "reasons": queue.no_ready_reasons(milestone_id),
+                "model_sessions_launched": 0,
+                "child_sessions_launched": 0,
+                "transaction_started": False,
+                "application_repository_written": False,
+                "controller_state_written": False,
+            }
+        cost_plan, preflight = self._preflight_selected_feature(
+            project,
+            feature_id=selection.feature_id,
+            mode=mode,
+            inspector=inspector,
+        )
+        if preflight.get("verified") is not True:
+            raise SessionError(
+                "exact model and capability preflight could not be proven"
+            )
+        plan_fingerprint = fingerprint(
+            {
+                "project_id": project.project_id,
+                "milestone": milestone_id,
+                "feature_id": selection.feature_id,
+                "queue_fingerprint": hashlib.sha256(
+                    resolve_queue_path(
+                        project.repository, project.queue_location
+                    ).read_bytes()
+                ).hexdigest(),
+                "branch": inspector.current_branch,
+                "head": inspector.head,
+                "execution_profile": cost_plan["execution_profile"],
+                "requested_feature": requested_feature,
+            }
+        )
+        result = {
+            "schema_version": 1,
+            "project_id": project.project_id,
+            "outcome": "feature_ready",
+            "classification": "deterministic_feature_selected",
+            "selected_feature": selection.feature_id,
+            "next_state": "feature_ready",
+            "deterministic_selection_reason": selection.reason,
+            "explicit_feature": requested_feature is not None,
+            "queue_reordered": False,
+            "execution_profile": cost_plan["execution_profile"],
+            "preflight": preflight,
+            "selection_plan_fingerprint": plan_fingerprint,
+            "model_sessions_launched": 0,
+            "child_sessions_launched": 0,
+        }
+        if dry_run:
+            return {
+                **result,
+                "dry_run": True,
+                "transaction_started": False,
+                "application_repository_written": False,
+                "controller_state_written": False,
+            }
+
+        run_id = str(uuid.uuid4())
+        reservation = self._launch_lock(project, inspector)
+        reservation.acquire(
+            make_lock_record(
+                project_id=project.project_id,
+                repository_identity=inspector.identity()["repository_id"],
+                run_id=run_id,
+                current_feature=selection.feature_id,
+                current_phase="deterministic_queue_selection",
+            )
+        )
+        state_root = self.root / "state/projects" / project.project_id
+        identity = inspector.identity()
+        ledger = EvidenceLedger(
+            state_root / "evidence-ledger.jsonl",
+            project_id=project.project_id,
+            repository_identity=identity["repository_id"],
+            repository_path_fingerprint=identity["path_fingerprint"],
+        )
+        projection_engine = ProjectionEngine(
+            ledger, state_root / "projection-cache.json"
+        )
+        lease = WorkflowWriterLease(
+            inspector.writer_lock_path(
+                self.configuration.conveyor["lock_policy"][
+                    "writer_lock_relative_path"
+                ]
+            )
+        )
+        adapter = QueueReconciliationAdapter(
+            allowed_paths=(),
+            commit_subject=None,
+            next_state="feature_ready",
+        )
+        kernel = WorkflowKernel(
+            project=project,
+            ledger=ledger,
+            projection=projection_engine,
+            lease=lease,
+            interruption_hook=self._kernel_interruption,
+        )
+        try:
+            inspector.ensure_runtime_ignored()
+            reserved_queue = FeatureQueue.from_location(
+                project.repository, project.queue_location
+            )
+            reserved_selection = (
+                reserved_queue.select_exact(milestone_id, selection.feature_id)
+                if requested_feature is not None
+                else reserved_queue.select_next(milestone_id)
+            )
+            if (
+                reserved_selection is None
+                or reserved_selection.feature_id != selection.feature_id
+                or reserved_selection.reason != selection.reason
+            ):
+                raise QueueError(
+                    "deterministic queue selection changed under reservation"
+                )
+            transaction = kernel.begin(
+                workflow_type=WorkflowType.QUEUE_RECONCILIATION,
+                milestone=milestone_id,
+                feature_id=selection.feature_id,
+                run_id=run_id,
+                policy=adapter.policy,
+                expected_starting_branch=project.milestone_branch,
+                expected_starting_head=milestone_head,
+                start_evidence={
+                    "command": "deterministic_queue_selection",
+                    "selection_plan_fingerprint": plan_fingerprint,
+                    "explicit_feature": requested_feature is not None,
+                },
+            )
+            kernel.acquire_lease()
+            kernel.capture_snapshot()
+            kernel.finalize_deterministic_planning(
+                changed_paths=(),
+                plan_fingerprint=plan_fingerprint,
+                validation_evidence={
+                    "commands": [],
+                    "warnings": [],
+                    "checks": {
+                        "queue_valid": True,
+                        "active_milestone": True,
+                        "feature_status": True,
+                        "dependencies_complete": True,
+                        "feature_unblocked": True,
+                        "execution_profile_valid": True,
+                        "model_and_capability_preflight": preflight.get(
+                            "verified"
+                        )
+                        is True,
+                    },
+                },
+                selected_feature=selection.feature_id,
+                execution_mode="deterministic_queue_selection",
+            )
+            kernel.finalize()
+            terminal = kernel.complete(
+                classification="RECONCILED_READY_WORK",
+                evidence={
+                    "planning_status": "passed",
+                    "selected_feature": selection.feature_id,
+                    "selected_feature_starting_commit": milestone_head,
+                    "selection_plan_fingerprint": plan_fingerprint,
+                    "explicit_feature": requested_feature is not None,
+                    "queue_reordered": False,
+                    "model_sessions_launched": 0,
+                    "child_sessions_launched": 0,
+                },
+            )
+            current_state = (
+                projection.get("current_state")
+                if isinstance(projection, dict)
+                else project.current_state
+            )
+            effective = replace(project, current_state=str(current_state))
+            project_state = self._project_document(
+                effective, run_id, identity["path_fingerprint"]
+            )
+            project_state["current_state"] = effective.current_state
+            self._transition_project(
+                effective,
+                project_state,
+                "feature_ready",
+                run_id=run_id,
+                checkpoint="deterministic_feature_selected",
+                feature=selection.feature_id,
+                state_evidence={
+                    "selection_plan_fingerprint": plan_fingerprint,
+                    "explicit_feature": requested_feature is not None,
+                },
+                kernel_owned=True,
+                kernel_projection=terminal["projection"],
+            )
+            return {
+                **result,
+                "dry_run": False,
+                "transaction_id": transaction.transaction_id,
+                "transaction_started": True,
+                "application_repository_written": False,
+                "controller_state_written": True,
+                "kernel_projection": terminal["projection"],
+            }
+        except (ConveyorError, OSError, ValueError) as exc:
             self._terminalize_handled_kernel_failure(kernel, adapter, exc)
             raise
         finally:
@@ -10232,7 +10675,32 @@ class CycleEngine:
         finally:
             reservation.release(resolution_id)
 
-    def run_project(self, project: Project, mode: str, *, dry_run: bool = False) -> dict[str, Any]:
+    def run_project(
+        self,
+        project: Project,
+        mode: str,
+        *,
+        dry_run: bool = False,
+        feature_id: str | None = None,
+    ) -> dict[str, Any]:
+        if operator_paused(self.configuration, project):
+            projection = self._authoritative_projection(project)
+            return {
+                "schema_version": 1,
+                "project_id": project.project_id,
+                "outcome": "project_paused",
+                "classification": "project_paused",
+                "paused": True,
+                "active_transaction": (
+                    projection.get("active_transaction")
+                    if isinstance(projection, dict)
+                    else None
+                ),
+                "application_repository_written": False,
+                "controller_state_written": False,
+                "model_sessions_launched": 0,
+                "child_sessions_launched": 0,
+            }
         cache_recovery = (
             self._cache_binding_recovery_plan(project, allow_missing=True)
             if mode in {"resume", "audit"}
@@ -10299,6 +10767,54 @@ class CycleEngine:
                     project, str(uuid.uuid4()), finalization_recovery
                 )
         context = self._authoritative_execution_context(project)
+        if feature_id is not None and context is not None:
+            authoritative, _, _ = context
+            action = authoritative.get("allowed_next_action")
+            selected = authoritative.get("current_feature") or authoritative.get(
+                "selected_next_feature"
+            )
+            if action == "feature_cycle" and selected != feature_id:
+                raise QueueError(
+                    f"requested feature {feature_id} conflicts with selected feature {selected}"
+                )
+            if action == "feature_cycle":
+                _, explicit_preflight = self._preflight_selected_feature(
+                    project,
+                    feature_id=feature_id,
+                    mode=mode,
+                    inspector=RepositoryInspector(project.repository),
+                )
+                if explicit_preflight.get("verified") is not True:
+                    raise SessionError(
+                        "exact model and capability preflight could not be proven"
+                    )
+            if action not in {"queue_reconciliation", "feature_cycle"}:
+                raise QueueError(
+                    f"requested feature {feature_id} is unavailable while next action is {action}"
+                )
+        if (
+            context is not None
+            and context[0].get("allowed_next_action") == "queue_reconciliation"
+        ):
+            if dry_run or mode == "audit":
+                return self.project_plan(project)
+            selected = self._deterministic_queue_selection(
+                project,
+                mode=mode,
+                requested_feature=feature_id,
+                dry_run=False,
+            )
+            if (
+                mode == "resume"
+                or selected.get("outcome") == "no_ready_work"
+            ):
+                return selected
+            return self.run_project(
+                project,
+                mode,
+                dry_run=False,
+                feature_id=feature_id,
+            )
         if context is not None and not dry_run and mode != "audit":
             authoritative, executable, _ = context
             if authoritative.get("active_transaction") is not None:
@@ -10349,16 +10865,9 @@ class CycleEngine:
                     **evidence,
                 }
             if action == "queue_reconciliation":
-                return {
-                    "project_id": project.project_id,
-                    **self._execute_queue_reconciliation(
-                        effective,
-                        mode,
-                        run_id,
-                        project_state,
-                        expected_execution_plan=executable,
-                    ),
-                }
+                raise ProjectionError(
+                    "validated queue reconciliation must use deterministic selection"
+                )
             if action == "milestone_gate":
                 return {
                     "project_id": project.project_id,
@@ -10388,6 +10897,18 @@ class CycleEngine:
             plan = self.project_plan(project)
             if dry_run:
                 return plan
+            if (
+                self.effective_project(project).current_state
+                == "queue_reconciliation"
+                and plan.get("proposed_next_action")
+                in {"queue_reconciliation", "feature_cycle"}
+            ):
+                return self._deterministic_queue_selection(
+                    project,
+                    mode=mode,
+                    requested_feature=feature_id,
+                    dry_run=False,
+                )
             effective = self.effective_project(project)
             persisted = self.load_project_state(project)
             assessment = assess_startup_reconciliation(effective, persisted, plan)
@@ -10459,8 +10980,28 @@ class CycleEngine:
             return self.resume_project(self.effective_project(project))
         effective = self.effective_project(project)
         plan = self.project_plan(project)
+        needs_deterministic_selection = (
+            effective.current_state == "queue_reconciliation"
+            and plan.get("proposed_next_action")
+            in {"queue_reconciliation", "feature_cycle"}
+        )
         if dry_run or mode == "audit":
             return plan
+        if needs_deterministic_selection:
+            selected = self._deterministic_queue_selection(
+                project,
+                mode=mode,
+                requested_feature=feature_id,
+                dry_run=False,
+            )
+            if mode == "resume" or selected.get("outcome") == "no_ready_work":
+                return selected
+            return self.run_project(
+                project,
+                mode,
+                dry_run=False,
+                feature_id=feature_id,
+            )
         if plan["proposed_next_action"] == "planning_finalization":
             kernel_recovery = plan.get("planning_finalization_recovery")
             if isinstance(kernel_recovery, dict):
@@ -10506,14 +11047,36 @@ class CycleEngine:
             effective = replace(effective, current_state=project_state["current_state"])
             plan = build_project_plan(effective, self.configuration.conveyor, self.root)
             action = plan["proposed_next_action"]
+            if operator_paused(self.configuration, project):
+                return {
+                    "project_id": project.project_id,
+                    "outcome": "project_paused",
+                    "classification": "project_paused",
+                    "paused": True,
+                    "completed_features": completed_features,
+                    "application_repository_written": False,
+                    "model_sessions_launched": 0,
+                    "child_sessions_launched": 0,
+                }
             if action == "resume":
                 return self.resume_project(effective)
             if action == "milestone_integration":
                 return self.resume_project(effective, run_id=run_id)
             if action == "queue_reconciliation":
-                self._execute_queue_reconciliation(effective, mode, run_id, project_state)
-                if mode == "one_feature":
-                    continue
+                selected = self._deterministic_queue_selection(
+                    project,
+                    mode=mode,
+                    requested_feature=feature_id,
+                    dry_run=False,
+                )
+                if selected.get("outcome") == "no_ready_work" or mode == "resume":
+                    return selected
+                return self.run_project(
+                    project,
+                    mode,
+                    dry_run=False,
+                    feature_id=feature_id,
+                )
             elif action == "feature_cycle":
                 cycle_reservation = self._launch_lock(effective, inspector)
                 cycle_reservation.acquire(make_lock_record(

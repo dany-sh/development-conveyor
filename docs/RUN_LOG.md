@@ -1956,3 +1956,45 @@ This log records model configuration and deterministic deployment evidence. It n
   `integration_status: passed`; final consistency is `CONSISTENT`, the
   milestone worktree is clean, both writer leases are absent, and execution
   stopped at queue reconciliation without selecting or starting F079.
+
+### Model execution — 2026-07-27T06:41:31+00:00
+
+- Agent role: `direct-parent-implementation`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `m1_026_deterministic_queue_control`
+- Safety and autonomy contracts unchanged: `true`
+
+### Deterministic queue control and project pause — 2026-07-26
+
+- Scope: controller-only M1-026 implementation on
+  `codex/m1-26-deterministic-queue-control` from exact parent
+  `5dff933769374943dcad003eb42039c98d2472da`; one
+  `gpt-5.6-sol`/medium direct parent and zero child sessions.
+- Queue authority: `FEATURE_QUEUE.yaml` remains the sole backlog and ordering
+  authority. Inspection reports active-milestone entries in file order,
+  deterministic readiness evidence, current/selected identity, execution
+  profile, and priority position with zero model or child launches.
+- Selection: ordinary validated-queue selection uses active milestone, queue
+  order, eligible status, dependency completion, blocked state, and feature ID.
+  Exact selection does not reorder the queue and proves its execution profile,
+  exact model binding, and capability isolation before transaction or
+  application mutation.
+- Operator controls: reprioritization atomically changes only queue order under
+  the repository writer lease. Pause and unpause update one boolean in the
+  existing per-project state; pause is not a workflow state, and unpause starts
+  no cycle.
+- Focused validation: 19 queue, pause, CLI, and legacy queue tests passed. All
+  140 selected M1-024/M1-025 planning, capability, recovery, cache-binding, and
+  projection regressions passed in disposable repositories. Changed-module
+  compilation, JSON-compatible fixture parsing, `validate-config`, and
+  `git diff --check` passed. The complete controller suite and application
+  tests were not run.
+- Live read-only result: the only live application command,
+  `scripts/conveyor queue --project interview-companion`, reported
+  `no_ready_work`, `paused: false`, null active/selected feature, and zero model
+  or child launches. It did not start F079. Both application repositories kept
+  their exact baseline branches, HEADs, and clean worktrees; hashes for all 28
+  protected controller state, report, and log files were unchanged.

@@ -36,6 +36,11 @@ from .autopilot import Autopilot, autopilot_status, request_stop
 from .feature_prelaunch_recovery import FeaturePrelaunchRecovery
 from .policy_rebind import ReadyFeaturePolicyRebinder
 from .runtime_audit import RuntimeAuditor
+from .queue_control import (
+    prioritize as prioritize_queue,
+    queue_report,
+    set_operator_paused,
+)
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
 
@@ -80,6 +85,31 @@ def _parser() -> argparse.ArgumentParser:
 
     status = subparsers.add_parser("status", help="show read-only portfolio or project status")
     status.add_argument("--project")
+    queue = subparsers.add_parser(
+        "queue", help="inspect one active-milestone feature queue without mutation"
+    )
+    queue.add_argument("--project", required=True)
+    queue.add_argument(
+        "--json",
+        action="store_true",
+        help="emit machine-readable JSON (the default output format)",
+    )
+    prioritize = subparsers.add_parser(
+        "prioritize", help="move one feature before or after another queue entry"
+    )
+    prioritize.add_argument("--project", required=True)
+    prioritize.add_argument("--feature", required=True)
+    relative = prioritize.add_mutually_exclusive_group(required=True)
+    relative.add_argument("--before")
+    relative.add_argument("--after")
+    pause = subparsers.add_parser(
+        "pause", help="prevent a project from starting another controller cycle"
+    )
+    pause.add_argument("--project", required=True)
+    unpause = subparsers.add_parser(
+        "unpause", help="clear only the project operator-pause flag"
+    )
+    unpause.add_argument("--project", required=True)
     audit_runtime = subparsers.add_parser(
         "audit-runtime",
         help="audit effective model, capability, context, and output policy without launching a model",
@@ -96,6 +126,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--mode", choices=MODES, default=None)
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--execution-profile", choices=PROFILE_NAMES)
+    run.add_argument("--feature")
 
     resume = subparsers.add_parser("resume", help="resume a persisted active cycle")
     resume.add_argument("--project", required=True)
@@ -605,6 +636,39 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
             "projects": projects,
         }
 
+    if args.command == "queue":
+        project = registry.get(args.project)
+        return queue_report(
+            configuration,
+            project,
+            runtime=engine.project_plan(project),
+        )
+
+    if args.command == "prioritize":
+        project = registry.get(args.project)
+        relative_feature = args.before or args.after
+        return prioritize_queue(
+            configuration,
+            project,
+            feature_id=args.feature,
+            relative_id=relative_feature,
+            placement="before" if args.before else "after",
+        )
+
+    if args.command in {"pause", "unpause"}:
+        project = registry.get(args.project)
+        projection = engine._authoritative_projection(project)
+        return set_operator_paused(
+            configuration,
+            project,
+            paused=args.command == "pause",
+            active_transaction=(
+                projection.get("active_transaction")
+                if isinstance(projection, dict)
+                else None
+            ),
+        )
+
     if args.command == "verify-consistency":
         project = registry.get(args.project)
         return ConsistencyChecker(
@@ -760,10 +824,17 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
         if mode == "portfolio":
             if args.project:
                 raise ConveyorError("--project cannot be combined with --mode portfolio")
+            if args.feature:
+                raise ConveyorError("--feature cannot be combined with --mode portfolio")
             return _portfolio_run(engine, registry, mode, args.dry_run)
         if not args.project:
             raise ConveyorError("--project is required unless --mode portfolio is used")
-        return engine.run_project(registry.get(args.project), mode, dry_run=args.dry_run)
+        return engine.run_project(
+            registry.get(args.project),
+            mode,
+            dry_run=args.dry_run,
+            feature_id=args.feature,
+        )
     raise ConveyorError(f"unsupported command: {args.command}")
 
 

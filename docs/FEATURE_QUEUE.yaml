@@ -605,6 +605,36 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-026",
+      "title": "Deterministic queue control and project pause",
+      "status": "review",
+      "priority": 26,
+      "milestone": "M1",
+      "dependencies": [
+        "M1-025"
+      ],
+      "spec": "docs/features/M1-026-deterministic-queue-control-and-project-pause.md",
+      "acceptance_criteria": [
+        "Queue inspection and ordinary next-feature selection are deterministic, read-only where applicable, and launch zero models and child sessions",
+        "Exact feature selection proves active-milestone eligibility, dependencies, blocked state, pause, transaction safety, execution profile, exact model, and capabilities before mutation",
+        "Reprioritization atomically changes only FEATURE_QUEUE.yaml entry order and cannot change feature status, dependencies, specifications, or other product documents",
+        "Pause prevents new cycles at safe boundaries, unpause starts no work, and status remains read-only without a new workflow state or authority",
+        "Focused queue, pause, CLI, M1-024, and M1-025 regressions pass while live application repositories and protected controller state remain unchanged"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-26-deterministic-queue-control",
+      "integration_base_commit": "5dff933769374943dcad003eb42039c98d2472da",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

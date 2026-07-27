@@ -16,6 +16,12 @@ planning-only one-parent/zero-child session, exact semantic validation, one
 planning commit, transactional cache finalization, and zero-model retained-diff
 recovery.
 
+M1-026 makes ordinary validated-queue selection deterministic and adds
+read-only queue inspection, queue-only reprioritization, exact eligible feature
+selection, and an operator pause flag in the existing project runtime
+authority. Exceptional model-backed product-plan reconciliation remains
+explicit rather than part of routine run or resume.
+
 ## Later milestones
 
 - M2 may simplify or remove compatibility caches after all registered repositories have migrated.
