@@ -573,6 +573,36 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-025",
+      "title": "Explicit capability selection and failed-resume recovery",
+      "status": "review",
+      "priority": 25,
+      "milestone": "M1",
+      "dependencies": [
+        "M1-023",
+        "M1-024"
+      ],
+      "spec": "docs/features/M1-025-explicit-capability-selection-and-resume-recovery.md",
+      "acceptance_criteria": [
+        "Swift source discovery alone does not require unavailable build-macos-apps skills; exact feature-contract declarations remain authoritative and fail closed when unavailable",
+        "The pinned CLI proves the minimal feature requested and effective allowlists are identical before model launch",
+        "A later feature failure cannot be intercepted by an unrelated historical planning or integration finalization recovery",
+        "The live F078 state routes first through deterministic cache rebinding and then to the exact prepared feature execution plan"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-25-capability-selection-and-resume-recovery",
+      "integration_base_commit": "b03469dc11294c49d53be7d5665fa02c647d60dc",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

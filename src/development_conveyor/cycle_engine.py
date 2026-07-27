@@ -838,6 +838,29 @@ class CycleEngine:
             }
         ):
             return None
+        latest_overall = max(
+            projection.get("transactions") or [],
+            key=lambda item: int(item.get("last_sequence") or 0),
+            default={},
+        )
+        latest_is_selected_planning_failure = (
+            latest_overall.get("transaction_id") == latest.get("transaction_id")
+        )
+        latest_may_be_supported_failed_recovery = (
+            projection.get("current_state") == "human_decision_required"
+            and latest_overall.get("workflow_type") == WorkflowType.RECOVERY.value
+            and latest_overall.get("state") == "terminal_failure"
+            and latest_overall.get("terminal_classification")
+            == "TERMINAL_RECOVERY_FAILURE"
+        )
+        if not (
+            latest_is_selected_planning_failure
+            or latest_may_be_supported_failed_recovery
+        ):
+            # A later feature, integration, gate, or unrelated recovery failure
+            # owns the current projection. Historical planning failures must not
+            # intercept that workflow's ordinary retry or recovery route.
+            return None
         original_transaction_id = latest.get("transaction_id")
         run_id = latest.get("run_id")
         if not isinstance(original_transaction_id, str) or not isinstance(run_id, str):
@@ -6786,6 +6809,18 @@ class CycleEngine:
     ) -> dict[str, Any] | None:
         projection = self._authoritative_projection(project)
         if not isinstance(projection, dict) or projection.get("current_state") != "validation_failed":
+            return None
+        latest = max(
+            projection.get("transactions") or [],
+            key=lambda item: int(item.get("last_sequence") or 0),
+            default={},
+        )
+        if (
+            latest.get("workflow_type")
+            != WorkflowType.MILESTONE_INTEGRATION.value
+            or latest.get("state") != "terminal_failure"
+            or latest.get("terminal_classification") != "VALIDATION_FAILED"
+        ):
             return None
         planning_recovery = self._planning_finalization_recovery_plan(
             self.effective_project(project),

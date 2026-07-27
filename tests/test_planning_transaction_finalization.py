@@ -1321,6 +1321,80 @@ class PlanningTransactionTests(unittest.TestCase):
             self.assertFalse(plan["milestone_integrator_would_launch"])
             self.assertFalse(plan["planning_content_regeneration_would_run"])
 
+    def test_21a_later_feature_failure_does_not_reopen_historical_planning_recovery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, project, engine, _, ledger, _ = (
+                self._terminal_kernel_recovery_fixture(root)
+            )
+            projection = engine._authoritative_projection(project)
+            self.assertIsNotNone(projection)
+            projection = dict(projection)
+            projection["current_state"] = "validation_failed"
+            projection["current_feature"] = "P0-003"
+            projection["transactions"] = [
+                *(projection.get("transactions") or []),
+                {
+                    "transaction_id": "later-feature-failure",
+                    "workflow_type": "feature_execution",
+                    "state": "terminal_failure",
+                    "terminal_classification": "FEATURE_VALIDATION_FAILED",
+                    "last_sequence": ledger.verify().sequence + 1,
+                },
+            ]
+            ledger_before = ledger.path.read_bytes()
+            status_before = git(
+                repository, "status", "--porcelain=v1", "--branch"
+            )
+
+            self.assertIsNone(
+                engine._planning_finalization_recovery_plan(project, projection)
+            )
+            self.assertEqual(ledger.path.read_bytes(), ledger_before)
+            self.assertEqual(
+                git(repository, "status", "--porcelain=v1", "--branch"),
+                status_before,
+            )
+
+    def test_21b_later_feature_failure_does_not_reopen_historical_integration_recovery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, project = self._engine_fixture(root)
+            engine = CycleEngine(controller_configuration(root, project))
+            projection = {
+                "current_state": "validation_failed",
+                "transactions": [
+                    {
+                        "transaction_id": "historical-integration-failure",
+                        "workflow_type": "milestone_integration",
+                        "state": "terminal_failure",
+                        "terminal_classification": "VALIDATION_FAILED",
+                        "last_sequence": 10,
+                    },
+                    {
+                        "transaction_id": "later-feature-failure",
+                        "workflow_type": "feature_execution",
+                        "state": "terminal_failure",
+                        "terminal_classification": "FEATURE_VALIDATION_FAILED",
+                        "last_sequence": 20,
+                    },
+                ],
+            }
+            with (
+                patch.object(
+                    engine, "_authoritative_projection", return_value=projection
+                ),
+                patch(
+                    "development_conveyor.cycle_engine."
+                    "inspect_integration_finalization_recovery"
+                ) as inspect_recovery,
+            ):
+                self.assertIsNone(
+                    engine._integration_finalization_recovery_context(project)
+                )
+            inspect_recovery.assert_not_called()
+            self.assertTrue(RepositoryInspector(repository).is_clean)
+
     def test_22_terminal_planning_topology_rejects_branch_head_path_and_production_drift(self):
         mutations = {
             "branch": lambda repository, project: replace(project, milestone_branch="codex/other"),

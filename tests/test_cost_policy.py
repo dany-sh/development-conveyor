@@ -64,6 +64,16 @@ class CostPolicyTests(unittest.TestCase):
         self.assertIsNone(deterministic["selected_model"])
         self.assertEqual(deterministic["execution"]["models_planned"], 0)
 
+    def test_cache_binding_recovery_is_deterministic(self):
+        plan = build_run_plan(
+            {"proposed_next_action": "cache_binding_recovery"},
+            Path.cwd(),
+        )
+        self.assertIsNone(plan["selected_model"])
+        self.assertEqual(plan["execution"]["models_planned"], 0)
+        self.assertEqual(plan["parent_session_budget"], 0)
+        self.assertEqual(plan["child_session_budget"], 0)
+
     def test_f003_feature_plan_is_application_focused(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository, project = synthetic_repository(Path(temporary))
@@ -567,6 +577,35 @@ class CostPolicyTests(unittest.TestCase):
             self.assertIn(
                 ["./script/build_and_run.sh", "--verify"],
                 plan["final_feature_acceptance_gates"],
+            )
+            self.assertEqual(plan["relevant_macos_skills"], [])
+            self.assertNotIn(
+                "build-macos-apps:swiftpm-macos",
+                plan["requested_capability_allowlist"],
+            )
+
+            (repository / "docs/features/F004.md").write_text(
+                "Use `WorkspaceRouter` and `AppPaths`.\n\n"
+                "Required Conveyor capability: "
+                "`build-macos-apps:swiftui-patterns`.\n",
+                encoding="utf-8",
+            )
+            declared_plan = build_run_plan(
+                {
+                    "proposed_next_action": "feature_cycle",
+                    "selected_feature": "F004",
+                    "application_mutation_expected": True,
+                },
+                REPOSITORY_ROOT,
+                project=project,
+            )
+            self.assertEqual(
+                declared_plan["relevant_macos_skills"],
+                ["build-macos-apps:swiftui-patterns"],
+            )
+            self.assertIn(
+                "build-macos-apps:swiftui-patterns",
+                declared_plan["requested_capability_allowlist"],
             )
             launcher = SessionLauncher(
                 REPOSITORY_ROOT,

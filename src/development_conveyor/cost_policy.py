@@ -382,10 +382,21 @@ def _application_feature_context_pack(project: Any, feature: dict[str, Any]) -> 
         "included_reasons": reasons,
         "source_files": source_files,
         "test_files": test_files,
+        "declared_macos_skills": list(_declared_macos_skills(contract)),
         "excluded_categories": ["unrelated feature specifications", "unrelated milestones", "full Git history", "global memory", "unrelated skills/plugins", "full test logs"],
         "truncation": "none; bounded to the selected feature and direct contracts",
         "evidence": context.evidence,
     }
+
+
+def _declared_macos_skills(contract: str) -> tuple[str, ...]:
+    """Return only exact build-macos skills explicitly named by the feature."""
+
+    return tuple(
+        dict.fromkeys(
+            re.findall(r"\bbuild-macos-apps:[a-z0-9]+(?:-[a-z0-9]+)*\b", contract)
+        )
+    )
 
 
 def build_run_plan(
@@ -400,7 +411,12 @@ def build_run_plan(
     ready_feature = plan.get("selected_feature")
     deterministic_queue_selection = action == "queue_reconciliation" and isinstance(ready_feature, str) and bool(ready_feature)
     semantic_queue_reconciliation = action == "queue_reconciliation" and not deterministic_queue_selection
-    deterministic_actions = {"verify_consistency", "milestone_integration", "planning_finalization"}
+    deterministic_actions = {
+        "verify_consistency",
+        "milestone_integration",
+        "planning_finalization",
+        "cache_binding_recovery",
+    }
     application_feature = action == "feature_cycle" and project is not None and isinstance(ready_feature, str)
     task = (
         "application_feature" if application_feature
@@ -452,15 +468,11 @@ def build_run_plan(
     )
     parent_sessions_planned = resolved.parent_sessions if resolved.model is not None else 0
     child_sessions_planned = resolved.child_sessions if resolved.model is not None else 0
-    macos_skills: tuple[str, ...] = ()
-    if application_feature and any(
-        str(path).endswith(".swift") for path in pack.get("files", [])
-    ):
-        macos_skills = (
-            "build-macos-apps:swiftpm-macos",
-            "build-macos-apps:swiftui-patterns",
-            "build-macos-apps:test-triage",
-        )
+    macos_skills = (
+        tuple(pack.get("declared_macos_skills") or ())
+        if application_feature
+        else ()
+    )
     requested_capabilities = requested_capability_allowlist(
         action,
         relevant_macos_skills=macos_skills,

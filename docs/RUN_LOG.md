@@ -1850,3 +1850,48 @@ This log records model configuration and deterministic deployment evidence. It n
   Companion ledger, projection, reports, recovery lock, and cycle state; and
   Case Manager cycle state were byte-for-byte unchanged across the final
   dry-run.
+
+### Model execution — 2026-07-27T04:56:10+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `global_default`
+- Event: `start`
+- Reason code: `capability_selection_resume_recovery`
+- Safety and autonomy contracts unchanged: `true`
+
+### Explicit capability selection and failed-resume recovery — 2026-07-26
+
+- Scope: controller-only M1-025 implementation on
+  `codex/m1-25-capability-selection-and-resume-recovery` from exact parent
+  `b03469dc11294c49d53be7d5665fa02c647d60dc`; one
+  `gpt-5.6-sol`/medium interactive parent and zero child or named-agent
+  sessions.
+- Observed failure: Interview Companion run
+  `db034d5f-8e27-4df7-a81e-881b02bdf22d` prepared F078 deterministically, then
+  failed closed before model launch because three build-macos-apps skills were
+  inferred from Swift source but were absent from pinned CLI 0.145.0. The
+  application remained clean at `98590888` with no writer lease.
+- Capability repair: feature execution always requires the Conveyor and
+  Feature Factory core. A build-macos-apps skill is requested only when the
+  selected feature contract names its exact identifier. An explicit missing
+  skill continues to fail closed. The pinned CLI proved requested and
+  effective F078-compatible allowlists containing only `core:apply_patch`,
+  `core:shell`, `development-conveyor`, and `feature-factory`.
+- Recovery repair: historical planning and integration failures no longer
+  intercept a later feature failure solely because all project to
+  `validation_failed`. The latest projected terminal transaction must own the
+  recovery route, while the existing authenticated failed-planning-recovery
+  supersession remains supported.
+- Focused validation: 71 capability, cost-policy, runtime-audit, planning,
+  committed-planning, post-integration, and execution-identity tests passed.
+  Changed-module compilation, JSON-compatible queue parsing,
+  `validate-config`, the global model-policy validator, live read-only status,
+  pinned-CLI capability proof, runtime audit, and `git diff --check` passed.
+  The complete controller suite was not run.
+- Live read-only result: status now selects deterministic
+  `cache_binding_recovery` for the ignored application compatibility cache.
+  Runtime audit reports exact zero-model and zero-child routing, empty
+  capability allowlists, and zero mutation counters. No application or
+  authoritative controller state was changed during inspection.

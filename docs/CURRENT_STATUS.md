@@ -4,6 +4,26 @@ Last updated: 2026-07-26
 
 ## Summary
 
+Explicit capability selection and failed-resume recovery are implemented on
+`codex/m1-25-capability-selection-and-resume-recovery` from exact parent
+`b03469dc11294c49d53be7d5665fa02c647d60dc`.
+
+Swift source discovery no longer makes cached build-macos-apps plugin skills
+mandatory. Feature execution requests the proven Conveyor and Feature Factory
+core; additional macOS skills are required only when the selected feature
+contract names their exact identifier. Historical planning and integration
+failures no longer intercept a later feature failure.
+
+The live F078 repository remains clean on
+`codex/F078-session-to-application-linking` at `98590888`. Read-only status
+now selects deterministic `cache_binding_recovery` with zero model and child
+sessions instead of raising an unrelated historical recovery error.
+
+Seventy-one focused capability, routing, runtime-audit, planning, recovery,
+and execution-identity tests pass. Compilation, configuration and queue
+validation, the global model-policy validator, pinned-CLI capability proof,
+runtime audit, and `git diff --check` pass.
+
 Atomic checkpoint-tolerant planning finalization is implemented on
 `codex/m1-24-atomic-planning-finalization` from exact parent
 `95f30353424aee165616d62d4d1e9a1605ff6914`.
@@ -640,22 +660,19 @@ M1 — Transactional workflow kernel
 
 ## Active controller repair
 
-Runtime policy and context discipline (`review`)
+Explicit capability selection and failed-resume recovery (`review`)
 
 ## Next boundary
 
-Commit the controller repair. Do not run a real Conveyor resume, queue
-reconciliation, feature cycle, milestone integration, Autopilot, application
-build, or application test; do not merge, push, tag, publish, deploy, or
-release.
+Commit the controller repair, apply only the deterministic F078 cache rebind,
+verify the exact feature capability allowlist, then resume the existing F078
+cycle. Do not create another feature, merge a default branch, push, tag,
+publish, deploy, or release.
 
 ## Validation scope
 
-Validation is limited to focused transition, session-result, retained-result
-recovery, Autopilot, projection, cycle-cache, status, consistency,
-binary-context, and prepared-feature regressions; Python compilation;
-configuration and queue validation; command help/mode checks; the exact
-Interview Companion F070 retained-result dry-run; and `git diff --check`.
-Application tests/builds, the complete controller suite, recovery apply,
-Autopilot restart, ordinary resume, queue reconciliation, feature work, and
-milestone integration are intentionally excluded.
+Validation is limited to focused capability, cost-policy, runtime-audit,
+planning-finalization, post-integration, status, consistency, and prepared
+feature regressions; Python compilation; configuration and queue validation;
+pinned-CLI prompt-input proof; live read-only status; and `git diff --check`.
+The complete controller suite is excluded.

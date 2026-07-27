@@ -22,3 +22,4 @@
 | M1-022 | Post-integration planning baseline binding | review | M1 | `docs/features/M1-022-post-integration-planning-baseline-binding.md` |
 | M1-023 | Runtime policy and context discipline | review | M1 | `docs/features/M1-023-runtime-policy-and-context-discipline.md` |
 | M1-024 | Atomic checkpoint-tolerant planning finalization | review | M1 | `docs/features/M1-024-atomic-planning-finalization.md` |
+| M1-025 | Explicit capability selection and failed-resume recovery | review | M1 | `docs/features/M1-025-explicit-capability-selection-and-resume-recovery.md` |
