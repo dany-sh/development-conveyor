@@ -95,6 +95,15 @@ class MutatingLauncher:
         self.mutation(request.project.repository, request.project.queue_location)
         queue = json.loads((request.project.repository / request.project.queue_location).read_text())
         value, output = assistant_result("reconciled_ready_work", len(queue["features"]))
+        ready = [
+            str(feature["id"])
+            for feature in queue["features"]
+            if feature.get("status") == "ready"
+        ]
+        value["queue_validation"]["ready_features"] = ready
+        value["queue_validation"]["selected_feature"] = (
+            ready[0] if len(ready) == 1 else None
+        )
         structured = {
             "schema_version": 1,
             "workflow_type": "queue_reconciliation",
@@ -242,6 +251,20 @@ class PlanningTransactionTests(unittest.TestCase):
         configuration = controller_configuration(root, project)
         engine = CycleEngine(configuration)
         value, output = assistant_result("reconciled_ready_work", 14)
+        if apply_changes:
+            value["queue_validation"].update({
+                "selected_feature": "P0-003",
+                "ready_features": ["P0-003"],
+                "dependencies_complete": True,
+            })
+            output = json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": "CONVEYOR_RESULT="
+                    + json.dumps(value, separators=(",", ":")),
+                },
+            })
         report = {
             "schema_version": 1,
             "project_id": project.project_id,
@@ -259,7 +282,12 @@ class PlanningTransactionTests(unittest.TestCase):
         inspector = RepositoryInspector(repository)
         return repository, project, engine, starting_head, inspector.planning_diff_fingerprint()
 
-    def _terminal_kernel_recovery_fixture(self, root: Path):
+    def _terminal_kernel_recovery_fixture(
+        self,
+        root: Path,
+        *,
+        normalized_semantic_failure: bool = False,
+    ):
         repository, project, engine, starting_head, _ = self._case_recovery_fixture(
             root, apply_changes=False
         )
@@ -350,6 +378,29 @@ class PlanningTransactionTests(unittest.TestCase):
         self._apply_case_reconciliation(repository)
         changed_paths = sorted(inspector.tracked_changed_paths())
         diff_fingerprint = inspector.planning_diff_fingerprint()
+        selected_specification = (
+            "docs/features/P0-003-versioned-application-registry.md"
+        )
+        source_paths = (
+            [
+                path
+                for path in changed_paths
+                if path != selected_specification
+            ]
+            if normalized_semantic_failure
+            else changed_paths
+        )
+        if normalized_semantic_failure:
+            kernel.checkpoint(
+                "arbitrary-policy-metadata",
+                {
+                    "source_paths": source_paths,
+                    "normalization_paths": [selected_specification],
+                    "final_paths": changed_paths,
+                    "final_diff_fingerprint": diff_fingerprint,
+                    "model_session_launched": False,
+                },
+            )
         evidence = {
             "schema_version": 1,
             "classification": "reconciled_ready_work",
@@ -361,7 +412,9 @@ class PlanningTransactionTests(unittest.TestCase):
                 "feature_count": 14,
                 "global_feature_count": 14,
                 "global_milestone_count": 1,
-                "warning_count": 1,
+                "warning_count": (
+                    0 if normalized_semantic_failure else 1
+                ),
                 "selected_feature": "P0-003",
                 "ready_features": ["P0-003"],
                 "dependencies_complete": True,
@@ -382,7 +435,7 @@ class PlanningTransactionTests(unittest.TestCase):
             "starting_commit": starting_head,
             "current_commit": starting_head,
             "feature_id": None,
-            "changed_paths": changed_paths,
+            "changed_paths": source_paths,
             "evidence": evidence,
             "next_state": "feature_ready",
         }
@@ -413,15 +466,25 @@ class PlanningTransactionTests(unittest.TestCase):
             "planning_start_commit": starting_head,
             "changed_paths": changed_paths,
             "changed_path_count": len(changed_paths),
-            "diff_fingerprint": diff_fingerprint,
+            "diff_fingerprint": (
+                "3" * 64
+                if normalized_semantic_failure
+                else diff_fingerprint
+            ),
             "result_classification": "RECONCILED_READY_WORK",
             "reconciliation_report": str(report_path),
-            "error": "deterministic inventory validation failed: " + json.dumps({
-                "exit_code": 0,
-                "errors": [],
-                "warnings": warnings,
-                "blocking_warnings": [],
-            }, sort_keys=True),
+            "error": (
+                "planning semantic agreement failed for "
+                f"{selected_specification}: selected feature readiness is absent"
+                if normalized_semantic_failure
+                else "deterministic inventory validation failed: "
+                + json.dumps({
+                    "exit_code": 0,
+                    "errors": [],
+                    "warnings": warnings,
+                    "blocking_warnings": [],
+                }, sort_keys=True)
+            ),
         }
         write_json(
             engine.root / "reports" / RUN_ID / "planning-transaction.json",
@@ -938,6 +1001,58 @@ class PlanningTransactionTests(unittest.TestCase):
             result = engine._execute_queue_reconciliation(project, "one_feature", RUN_ID, state)
             self.assertIn("semantic agreement", result["failed_validator"])
 
+    def test_semantic_failure_precedes_controller_policy_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, project = self._engine_fixture(root)
+            status_path = repository / "docs/CURRENT_STATUS.md"
+            status_path.write_text("F001 proposed.\n", encoding="utf-8")
+            git(repository, "add", "docs/CURRENT_STATUS.md")
+            git(repository, "commit", "-m", "status baseline")
+
+            def mutate(repo, queue_location):
+                queue_path = repo / queue_location
+                queue = json.loads(queue_path.read_text(encoding="utf-8"))
+                queue["features"][0]["status"] = "ready"
+                queue["features"][0].pop("execution_policy", None)
+                write_json(queue_path, queue)
+                status_path.write_text(
+                    "F001 remains proposed.\n",
+                    encoding="utf-8",
+                )
+
+            specification = repository / "docs/features/F001.md"
+            specification_before = specification.read_bytes()
+            engine = CycleEngine(
+                controller_configuration(root, project),
+                MutatingLauncher(mutate),
+            )
+            state = engine._project_document(
+                project,
+                RUN_ID,
+                RepositoryInspector(repository).identity()[
+                    "path_fingerprint"
+                ],
+            )
+            result = engine._execute_queue_reconciliation(
+                project,
+                "one_feature",
+                RUN_ID,
+                state,
+            )
+            queue_after = json.loads(
+                (
+                    repository / project.queue_location
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(result["outcome"], "planning_validation_failed")
+            self.assertIn("semantic agreement", result["failed_validator"])
+            self.assertNotIn(
+                "execution_policy",
+                queue_after["features"][0],
+            )
+            self.assertEqual(specification.read_bytes(), specification_before)
+
     def test_06_planning_lease_identity_mismatch_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository, _ = synthetic_repository(Path(temporary))
@@ -1319,6 +1434,69 @@ class PlanningTransactionTests(unittest.TestCase):
             )
             self.assertNotIn("planning_finalization_recovery", subsequent)
 
+    def test_checkpoint_normalized_retained_ready_result_authenticates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                repository,
+                project,
+                engine,
+                starting_head,
+                ledger,
+                _,
+            ) = self._terminal_kernel_recovery_fixture(
+                Path(temporary),
+                normalized_semantic_failure=True,
+            )
+            inspector = RepositoryInspector(repository)
+            arguments = {
+                "project": project,
+                "run_id": RUN_ID,
+                "expected_starting_head": starting_head,
+                "expected_diff_fingerprint": (
+                    inspector.planning_diff_fingerprint()
+                ),
+                "expected_changed_paths": SEVEN_PATHS,
+                "expected_session_id": SESSION_ID,
+                "dry_run": True,
+            }
+            ledger_before = ledger.path.read_bytes()
+            worktree_before = git(
+                repository,
+                "status",
+                "--porcelain=v2",
+            )
+            first = engine.recover_planning_transaction(**arguments)
+            second = engine.recover_planning_transaction(**arguments)
+            self.assertEqual(first["outcome"], "recovery_ready")
+            self.assertEqual(first["selected_feature"], "P0-003")
+            self.assertEqual(
+                first["final_projected_state"],
+                "feature_ready",
+            )
+            self.assertEqual(
+                first["candidate_commits_that_would_be_created"],
+                1,
+            )
+            self.assertEqual(
+                first["planning_finalization_recovery"][
+                    "checkpoint_evidence"
+                ]["count"],
+                2,
+            )
+            self.assertEqual(
+                first["planning_finalization_recovery"][
+                    "plan_fingerprint"
+                ],
+                second["planning_finalization_recovery"][
+                    "plan_fingerprint"
+                ],
+            )
+            self.assertEqual(ledger.path.read_bytes(), ledger_before)
+            self.assertEqual(
+                git(repository, "status", "--porcelain=v2"),
+                worktree_before,
+            )
+
     def test_24_milestone_local_and_global_counts_are_distinct(self):
         with tempfile.TemporaryDirectory() as temporary:
             (
@@ -1415,7 +1593,7 @@ class PlanningTransactionTests(unittest.TestCase):
                 expected_session_id=SESSION_ID,
                 dry_run=True,
             )
-            self.assertEqual(result["outcome"], "planning_recovery_validated")
+            self.assertEqual(result["outcome"], "recovery_ready")
             self.assertEqual(
                 result["planning_finalization_recovery"]["selected_feature"], None
             )

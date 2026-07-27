@@ -5968,6 +5968,24 @@ class CycleEngine:
                             "Codex compatibility validation"
                         )
                 if planned_policy_completion.get("required") is True:
+                    # Validate the model-produced planning result before the
+                    # controller materializes deterministic policy metadata.
+                    # The missing policy is the only temporarily recoverable
+                    # field; identity, queue/dependency evidence, inventory,
+                    # paths, diff, and document semantics must already pass.
+                    validate_planning_changes(
+                        project,
+                        inspector,
+                        report,
+                        run_id=run_id,
+                        starting_head=planning_start[
+                            "planning_start_commit"
+                        ],
+                        expected_session_id=result.session_id,
+                        recoverable_missing_execution_policy_feature=str(
+                            planned_policy_completion["feature_id"]
+                        ),
+                    )
                     allowed_normalization_paths = sorted(
                         set(inspector.tracked_changed_paths())
                         | set(inspector.untracked_file_hashes())
@@ -7774,11 +7792,7 @@ class CycleEngine:
         adapter = RecoveryAdapter(
             allowed_paths=expected_paths,
             allow_untracked=False,
-            commit_subject=(
-                str(expected_plan["commit_subject"])
-                if committed_recovery
-                else planning_commit_subject(effective, selected_feature)
-            ),
+            commit_subject=str(expected_plan["commit_subject"]),
             next_state=next_state,
             require_clean_start=committed_recovery,
         )
@@ -8306,10 +8320,20 @@ class CycleEngine:
             if dry_run:
                 return {
                     "project_id": project.project_id,
-                    "outcome": "planning_recovery_validated",
+                    "outcome": "recovery_ready",
                     "applied": False,
                     "checks": checks,
                     "planning_finalization_recovery": plan,
+                    "selected_feature": plan.get("selected_feature"),
+                    "final_projected_state": plan.get(
+                        "expected_final_state"
+                    ),
+                    "candidate_commits_that_would_be_created": plan.get(
+                        "planning_commits_that_would_be_created"
+                    ),
+                    "commit_subject": plan.get("commit_subject"),
+                    "models_that_would_launch": 0,
+                    "children_that_would_launch": 0,
                     "model_sessions_that_would_launch": [],
                     "child_sessions_that_would_launch": [],
                     "feature_factory_would_launch": False,
@@ -8487,9 +8511,18 @@ class CycleEngine:
         if dry_run:
             return {
                 "project_id": project.project_id,
-                "outcome": "planning_recovery_validated",
+                "outcome": "recovery_ready",
                 "applied": False,
                 "planning_transaction": recovery,
+                "selected_feature": recovery.get("selected_feature"),
+                "final_projected_state": recovery.get("next_state"),
+                "candidate_commits_that_would_be_created": 1,
+                "commit_subject": planning_commit_subject(
+                    effective,
+                    recovery.get("selected_feature"),
+                ),
+                "models_that_would_launch": 0,
+                "children_that_would_launch": 0,
                 "feature_factory_would_launch": False,
                 "milestone_integrator_would_launch": False,
                 "application_source_written": False,

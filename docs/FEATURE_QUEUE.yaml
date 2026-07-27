@@ -542,6 +542,37 @@
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": []
+    },
+    {
+      "id": "M1-024",
+      "title": "Atomic checkpoint-tolerant planning finalization",
+      "status": "review",
+      "priority": 24,
+      "milestone": "M1",
+      "dependencies": [
+        "M1-021",
+        "M1-022",
+        "M1-023"
+      ],
+      "spec": "docs/features/M1-024-atomic-planning-finalization.md",
+      "acceptance_criteria": [
+        "Planning recovery treats any number of non-authoritative checkpoints as transparent metadata only after their workflow identity, paths, fingerprints, sessions, lease ownership, and mutation authority agree with the retained transaction",
+        "RECONCILED_READY_WORK uses an explicit non-empty selected_feature when present or derives one only from exactly one corroborated ready feature with complete authoritative dependency evidence",
+        "New reconciliation completes semantic validation before deterministic policy normalization changes planning files, so semantic failure preserves the model-produced worktree exactly",
+        "The retained Interview Companion F078 result authenticates in a zero-write dry-run as recovery_ready, predicts feature_ready and one factory: reconcile M0 queue commit, and launches zero models and children"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m1-24-atomic-planning-finalization",
+      "integration_base_commit": "95f30353424aee165616d62d4d1e9a1605ff6914",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

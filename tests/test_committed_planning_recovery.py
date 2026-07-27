@@ -46,7 +46,12 @@ WARNINGS = ["M1 warning", "M2 warning"]
 
 
 class CommittedPlanningRecoveryTests(unittest.TestCase):
-    def _fixture(self, root: Path) -> dict:
+    def _fixture(
+        self,
+        root: Path,
+        *,
+        checkpoints: list[dict] | None = None,
+    ) -> dict:
         repository, project = synthetic_repository(
             root,
             controller_project_id="synthetic",
@@ -317,6 +322,14 @@ class CommittedPlanningRecoveryTests(unittest.TestCase):
             **terminal_snapshot,
             "head": planning_commit,
         }
+        checkpoint_payloads = (
+            [
+                {"checkpoint": "runtime_ignore_verified"},
+                {"checkpoint": "planning_session_reserved"},
+            ]
+            if checkpoints is None
+            else checkpoints
+        )
         planning_events = [
             ("TransactionStarted", {
                 "run_id": RUN_ID,
@@ -334,9 +347,15 @@ class CommittedPlanningRecoveryTests(unittest.TestCase):
                 "lease_type": "planning_writer",
             }),
             ("SnapshotCaptured", {"snapshot": terminal_snapshot}),
-            ("CheckpointRecorded", {"checkpoint": "runtime_ignore_verified"}),
+            *[
+                ("CheckpointRecorded", payload)
+                for payload in checkpoint_payloads[:1]
+            ],
             ("SessionLaunched", {"session_id": SESSION_ID}),
-            ("CheckpointRecorded", {"checkpoint": "planning_session_reserved"}),
+            *[
+                ("CheckpointRecorded", payload)
+                for payload in checkpoint_payloads[1:]
+            ],
             ("SessionResultAccepted", {
                 "classification": "RECONCILED_READY_WORK",
                 "next_state": "feature_ready",
@@ -389,6 +408,143 @@ class CommittedPlanningRecoveryTests(unittest.TestCase):
             "diff_fingerprint": diff_fingerprint,
             "inventory": inventory,
         }
+
+    def test_checkpoint_metadata_is_optional_and_repeatable(self):
+        variants = (
+            [],
+            [{"checkpoint": "one"}],
+            [
+                {"checkpoint": "one"},
+                {"checkpoint": "two"},
+                {"checkpoint": "three"},
+            ],
+        )
+        for checkpoints in variants:
+            with self.subTest(count=len(checkpoints)):
+                with tempfile.TemporaryDirectory() as temporary:
+                    fixture = self._fixture(
+                        Path(temporary),
+                        checkpoints=checkpoints,
+                    )
+                    with patch(
+                        "development_conveyor.planning._inventory_validation",
+                        return_value=fixture["inventory"],
+                    ):
+                        result = fixture[
+                            "engine"
+                        ].recover_planning_transaction(
+                            **self._arguments(fixture),
+                            dry_run=True,
+                        )
+                    evidence = result["planning_finalization_recovery"][
+                        "checkpoint_evidence"
+                    ]
+                    self.assertEqual(evidence["count"], len(checkpoints))
+                    self.assertTrue(evidence["transparent"])
+
+    def test_conflicting_checkpoint_identity_is_rejected(self):
+        conflicts = {
+            "identity": {"run_id": "conflicting-run"},
+            "paths": {"final_paths": ["docs/not-authorized.md"]},
+            "fingerprint": {"diff_fingerprint": "0" * 64},
+            "session": {"session_ids": ["conflicting-session"]},
+            "authority": {"allowed_paths": ["docs/not-authorized.md"]},
+            "session_count": {"model_session_count": 2},
+        }
+        for name, conflict in conflicts.items():
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    fixture = self._fixture(
+                        Path(temporary),
+                        checkpoints=[
+                            {
+                                "checkpoint": "arbitrary-name",
+                                **conflict,
+                            }
+                        ],
+                    )
+                    with patch(
+                        "development_conveyor.planning._inventory_validation",
+                        return_value=fixture["inventory"],
+                    ):
+                        with self.assertRaisesRegex(
+                            RecoveryError,
+                            "planning checkpoint",
+                        ):
+                            fixture[
+                                "engine"
+                            ].recover_planning_transaction(
+                                **self._arguments(fixture),
+                                dry_run=True,
+                            )
+
+    def test_singleton_ready_feature_is_derived_when_selection_is_omitted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self._fixture(Path(temporary))
+            report_path = (
+                fixture["engine"].root
+                / "reports"
+                / RUN_ID
+                / "queue_reconciliation.json"
+            )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["structured_result"]["evidence"][
+                "queue_validation"
+            ].pop("selected_feature", None)
+            report["parsed_structured_result"] = report["structured_result"]
+            write_json(report_path, report)
+            with patch(
+                "development_conveyor.planning._inventory_validation",
+                return_value=fixture["inventory"],
+            ):
+                result = fixture["engine"].recover_planning_transaction(
+                    **self._arguments(fixture),
+                    dry_run=True,
+                )
+            self.assertEqual(
+                result["planning_finalization_recovery"]["selected_feature"],
+                "F073",
+            )
+
+    def test_empty_or_multiple_ready_identity_is_rejected(self):
+        variants = (
+            {"selected_feature": ""},
+            {"ready_features": ["F073", "F999"]},
+        )
+        for mutation in variants:
+            with self.subTest(mutation=mutation):
+                with tempfile.TemporaryDirectory() as temporary:
+                    fixture = self._fixture(Path(temporary))
+                    report_path = (
+                        fixture["engine"].root
+                        / "reports"
+                        / RUN_ID
+                        / "queue_reconciliation.json"
+                    )
+                    report = json.loads(
+                        report_path.read_text(encoding="utf-8")
+                    )
+                    report["structured_result"]["evidence"][
+                        "queue_validation"
+                    ].update(mutation)
+                    report["parsed_structured_result"] = report[
+                        "structured_result"
+                    ]
+                    write_json(report_path, report)
+                    with patch(
+                        "development_conveyor.planning._inventory_validation",
+                        return_value=fixture["inventory"],
+                    ):
+                        with self.assertRaisesRegex(
+                            RecoveryError,
+                            "selected-feature|ready|selection",
+                        ):
+                            fixture[
+                                "engine"
+                            ].recover_planning_transaction(
+                                **self._arguments(fixture),
+                                dry_run=True,
+                            )
 
     @staticmethod
     def _arguments(fixture: dict) -> dict:

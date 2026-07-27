@@ -1803,3 +1803,50 @@ This log records model configuration and deterministic deployment evidence. It n
   with Sol/medium, and the Development Conveyor agent file remained unchanged
   at
   `7474751e7af46a3f10fb73b0cd2d57ffb234853c79b787a7a6bc57a0b708da04`.
+
+### Model execution — 2026-07-27T04:17:38+00:00
+
+- Agent role: `interactive_parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `atomic_planning_finalization`
+- Safety and autonomy contracts unchanged: `true`
+
+### Atomic checkpoint-tolerant planning finalization — 2026-07-26
+
+- Scope: controller-only M1-024 implementation on
+  `codex/m1-24-atomic-planning-finalization` from exact parent
+  `95f30353424aee165616d62d4d1e9a1605ff6914`; one
+  `gpt-5.6-sol`/medium interactive parent and zero child or named-agent
+  sessions.
+- Recovery topology: checkpoint events are removed before authoritative
+  protocol matching and then independently checked for transaction/workflow,
+  run/session, branch/HEAD, lease, mutation authority, paths, retained
+  fingerprint, selected-feature, and model/child authority. Names, positions,
+  and counts are non-authoritative.
+- Selection and atomicity: a matching explicit non-empty selected feature is
+  preserved; otherwise exactly one structured and deterministic ready feature
+  with complete dependencies is required. Normal reconciliation performs
+  semantic validation before deterministic execution-policy materialization.
+- Focused validation: 101/101 M1-021, M1-022, M1-023, and M1-024 planning,
+  recovery, execution-identity, post-integration, runtime-policy,
+  runtime-audit, context, capability, and compact-output tests passed. Python
+  compilation, `validate-config`, JSON-compatible configuration and queue
+  parsing, and `git diff --check` passed. The complete controller suite and
+  all application builds/tests were intentionally excluded.
+- Live retained result: the Interview Companion dry-run authenticated run
+  `940611fd-48c5-49ab-b641-3fd3d6535cee`, session
+  `019fa19f-1e02-7523-a4ec-f81793723d06`, transaction
+  `c08f3fb3-ac92-4490-8fca-c19f777f3ced`, starting HEAD
+  `12bee2fc3b3668091474dc288067cd3aced0ee08`, and retained fingerprint
+  `a53f0e984d93dd2220e3e2e6852c71dead900c79f7c26d8b9eb48536d2b529e3`.
+  It returned `recovery_ready`, selected F078, projected `feature_ready`,
+  predicted one `factory: reconcile M0 queue` commit, and launched zero
+  models and children. Apply was not run.
+- Isolation: the Interview Companion and Case Manager branch, HEAD, refs,
+  worktree status, and diff fingerprints; absent writer leases; Interview
+  Companion ledger, projection, reports, recovery lock, and cycle state; and
+  Case Manager cycle state were byte-for-byte unchanged across the final
+  dry-run.

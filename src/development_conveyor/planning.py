@@ -945,6 +945,223 @@ def _selected_feature_evidence(
     }
 
 
+def _resolve_reported_feature_identity(
+    result_queue: dict[str, Any],
+    selection: dict[str, Any],
+    classification: str,
+) -> str | None:
+    """Corroborate an explicit selection or derive one sole ready feature."""
+
+    ready = result_queue.get("ready_features", result_queue.get("ready"))
+    if not isinstance(ready, list) or not all(
+        isinstance(item, str) and item for item in ready
+    ):
+        raise RecoveryError("session queue readiness evidence is malformed")
+    if len(ready) != len(set(ready)):
+        raise RecoveryError("session queue readiness evidence contains duplicates")
+    deterministic_ready = list(selection.get("ready_features") or [])
+    if sorted(ready) != sorted(deterministic_ready):
+        raise RecoveryError(
+            "session queue evidence disagrees with deterministic recovery selection"
+        )
+
+    explicit = result_queue.get("selected_feature")
+    explicit_present = "selected_feature" in result_queue and explicit is not None
+    if explicit_present and (
+        not isinstance(explicit, str) or not explicit.strip()
+    ):
+        raise RecoveryError("session selected-feature evidence is empty or malformed")
+
+    selected = selection.get("selected_feature")
+    if classification == "reconciled_ready_work":
+        if len(ready) != 1 or len(deterministic_ready) != 1 or selected != ready[0]:
+            raise RecoveryError(
+                "RECONCILED_READY_WORK requires exactly one corroborated ready feature"
+            )
+        if explicit_present and explicit != selected:
+            raise RecoveryError(
+                "session selected-feature evidence conflicts with ready queue evidence"
+            )
+        return str(selected)
+
+    if explicit_present and explicit != selected:
+        raise RecoveryError(
+            "session selected-feature evidence conflicts with deterministic queue evidence"
+        )
+    return selected
+
+
+def _validate_transparent_planning_checkpoints(
+    *,
+    checkpoints: list[dict[str, Any]],
+    transaction_id: str,
+    workflow_type: str,
+    run_id: str,
+    session_id: str,
+    starting_branch: str,
+    starting_head: str,
+    lease_payload: dict[str, Any],
+    mutation_policy: dict[str, Any],
+    source_paths: list[str],
+    retained_paths: list[str],
+    retained_diff_fingerprint: str,
+    selected_feature: str | None,
+) -> dict[str, Any]:
+    """Authenticate checkpoint metadata without assigning protocol meaning to names."""
+
+    allowed_paths = set(mutation_policy.get("allowed_paths") or [])
+    allowed_prefixes = tuple(
+        str(item).rstrip("/")
+        for item in (mutation_policy.get("allowed_prefixes") or [])
+    )
+
+    def path_authorized(path: str) -> bool:
+        return path in allowed_paths or any(
+            path == prefix or path.startswith(prefix + "/")
+            for prefix in allowed_prefixes
+        )
+
+    for event in checkpoints:
+        if (
+            event.get("transaction_id") != transaction_id
+            or event.get("workflow_type") != workflow_type
+        ):
+            raise RecoveryError("planning checkpoint workflow identity conflicts")
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            raise RecoveryError("planning checkpoint payload is malformed")
+        scalar_expectations = {
+            "transaction_id": transaction_id,
+            "run_id": run_id,
+            "session_id": session_id,
+            "starting_branch": starting_branch,
+            "branch": starting_branch,
+            "starting_head": starting_head,
+            "starting_commit": starting_head,
+            "head": starting_head,
+            "current_commit": starting_head,
+            "selected_feature": selected_feature,
+        }
+        for key, expected in scalar_expectations.items():
+            if key in payload and payload.get(key) != expected:
+                raise RecoveryError(
+                    f"planning checkpoint {key} conflicts with authoritative identity"
+                )
+        for key in ("lease_id", "lease_type", "owner_pid", "owner_process_start"):
+            if key in payload and payload.get(key) != lease_payload.get(key):
+                raise RecoveryError(
+                    f"planning checkpoint {key} conflicts with lease ownership"
+                )
+        if (
+            "allowed_mutation_policy" in payload
+            and payload.get("allowed_mutation_policy") != mutation_policy
+        ):
+            raise RecoveryError("planning checkpoint mutation authority conflicts")
+        for key in ("mutation_authority", "authority"):
+            if key in payload and payload.get(key) != mutation_policy:
+                raise RecoveryError(
+                    f"planning checkpoint {key} conflicts with mutation authority"
+                )
+        for key in (
+            "allowed_paths",
+            "authorized_paths",
+            "allowed_prefixes",
+            "denied_paths",
+            "denied_prefixes",
+            "allow_untracked",
+            "commit_subject",
+        ):
+            policy_key = "allowed_paths" if key == "authorized_paths" else key
+            if key in payload and payload.get(key) != mutation_policy.get(policy_key):
+                raise RecoveryError(
+                    f"planning checkpoint {key} conflicts with mutation authority"
+                )
+
+        path_expectations = {
+            "source_paths": sorted(source_paths),
+            "changed_paths": sorted(retained_paths),
+            "final_paths": sorted(retained_paths),
+        }
+        for key, expected in path_expectations.items():
+            if key in payload:
+                value = payload.get(key)
+                if not isinstance(value, list) or sorted(value) != expected:
+                    raise RecoveryError(
+                        f"planning checkpoint {key} conflicts with retained paths"
+                    )
+        if "normalization_paths" in payload:
+            normalization = payload.get("normalization_paths")
+            if (
+                not isinstance(normalization, list)
+                or not all(isinstance(path, str) for path in normalization)
+                or len(normalization) != len(set(normalization))
+                or not set(normalization).issubset(retained_paths)
+                or not all(path_authorized(path) for path in normalization)
+            ):
+                raise RecoveryError(
+                    "planning checkpoint normalization paths conflict with authority"
+                )
+        for key in (
+            "diff_fingerprint",
+            "final_diff_fingerprint",
+            "tracked_diff_fingerprint",
+            "retained_diff_fingerprint",
+        ):
+            if key in payload and payload.get(key) != retained_diff_fingerprint:
+                raise RecoveryError(
+                    f"planning checkpoint {key} conflicts with retained fingerprint"
+                )
+        if "session_ids" in payload and payload.get("session_ids") != [session_id]:
+            raise RecoveryError("planning checkpoint session list conflicts")
+        for key in (
+            "models_planned",
+            "model_sessions_planned",
+            "model_session_count",
+            "parent_sessions",
+            "parent_sessions_used",
+        ):
+            if key in payload and payload.get(key) != 1:
+                raise RecoveryError(
+                    f"planning checkpoint {key} changes model-session identity"
+                )
+        for key in (
+            "children_planned",
+            "child_sessions_planned",
+            "child_sessions",
+            "child_sessions_used",
+        ):
+            if key in payload and payload.get(key) != 0:
+                raise RecoveryError(
+                    f"planning checkpoint {key} changes child-session authority"
+                )
+        if (
+            "model_session_launched" in payload
+            and not isinstance(payload.get("model_session_launched"), bool)
+        ):
+            raise RecoveryError("planning checkpoint model-session flag is malformed")
+        if (
+            "model_sessions_launched" in payload
+            and payload.get("model_sessions_launched")
+            not in ([], [session_id])
+        ):
+            raise RecoveryError(
+                "planning checkpoint model session list conflicts"
+            )
+        if (
+            "child_sessions_launched" in payload
+            and payload.get("child_sessions_launched") != []
+        ):
+            raise RecoveryError(
+                "planning checkpoint child session list conflicts"
+            )
+
+    return {
+        "count": len(checkpoints),
+        "transparent": True,
+        "sequences": [event.get("sequence") for event in checkpoints],
+    }
+
+
 def _recoverable_planning_validation_failure(transaction: dict[str, Any]) -> dict[str, Any]:
     message = transaction.get("error")
     prefix = "deterministic inventory validation failed: "
@@ -1031,6 +1248,25 @@ def _recoverable_planning_validation_failure(transaction: dict[str, Any]) -> dic
             "errors": [],
             "warnings": [],
             "historical_disagreements": disagreements,
+        }
+    selected_spec_prefix = "planning semantic agreement failed for docs/features/"
+    selected_spec_suffix = ": selected feature readiness is absent"
+    if (
+        isinstance(message, str)
+        and message.startswith(selected_spec_prefix)
+        and message.endswith(selected_spec_suffix)
+    ):
+        relative = message[
+            len("planning semantic agreement failed for "):
+            -len(selected_spec_suffix)
+        ]
+        return {
+            "classification": "obsolete_selected_spec_readiness_check",
+            "exit_code": 0,
+            "errors": [],
+            "warnings": [],
+            "historical_disagreements": [],
+            "selected_specification_path": relative,
         }
     if message == LEGACY_WARNING_SUMMARY_COMPATIBILITY["error"]:
         return {
@@ -1494,7 +1730,8 @@ def _completed_integration_parent_evidence(
 
 def _inspect_committed_planning_finalization_recovery(
     project: Project, inspector: RepositoryInspector, *, ledger_events: list[dict[str, Any]],
-    transaction_events: list[dict[str, Any]], projection: dict[str, Any],
+    transaction_events: list[dict[str, Any]], checkpoints: list[dict[str, Any]],
+    projection: dict[str, Any],
     original_transaction_id: str, planning_transaction: dict[str, Any],
     session_report: dict[str, Any], writer_lease_exists: bool,
 ) -> dict[str, Any]:
@@ -1540,6 +1777,17 @@ def _inspect_committed_planning_finalization_recovery(
         project, queue, report_evidence["classification"]
     )
     selected_feature = selection.get("selected_feature")
+    result_queue = (
+        (report_evidence.get("structured_result") or {}).get(
+            "queue_validation"
+        )
+        or {}
+    )
+    _resolve_reported_feature_identity(
+        result_queue,
+        selection,
+        report_evidence["classification"],
+    )
     current_queue_fingerprint = queue_fingerprint(project)
     expected_subjects = {
         planning_commit_subject(project, None),
@@ -1598,6 +1846,25 @@ def _inspect_committed_planning_finalization_recovery(
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
         raise RecoveryError("committed planning finalization topology disagrees: " + ", ".join(failed))
+    checkpoint_evidence = _validate_transparent_planning_checkpoints(
+        checkpoints=checkpoints,
+        transaction_id=original_transaction_id,
+        workflow_type=str(start.get("workflow_type") or ""),
+        run_id=str(run_id),
+        session_id=str(session_id),
+        starting_branch=str(starting_branch),
+        starting_head=str(starting_head),
+        lease_payload=next(
+            event.get("payload") or {}
+            for event in transaction_events
+            if event.get("event_type") == "LeaseAcquired"
+        ),
+        mutation_policy=start_payload.get("allowed_mutation_policy") or {},
+        source_paths=sorted(envelope.get("changed_paths") or []),
+        retained_paths=paths,
+        retained_diff_fingerprint=str(final_payload.get("diff_fingerprint") or ""),
+        selected_feature=selected_feature,
+    )
     newly_policy_bound = _require_new_ready_execution_policies(
         project, inspector, starting_head, queue
     )
@@ -1637,6 +1904,7 @@ def _inspect_committed_planning_finalization_recovery(
         "result_classification": report_evidence["terminal_classification"],
         "selected_feature": selected_feature,
         "ready_features": selection["ready_features"], "checks": checks,
+        "checkpoint_evidence": checkpoint_evidence,
         "expected_final_state": "feature_ready",
         "expected_final_current_feature": selected_feature,
         "expected_final_selected_next_feature": selected_feature,
@@ -1674,26 +1942,27 @@ def inspect_planning_finalization_recovery(
         event for event in ledger_events
         if event.get("transaction_id") == original_transaction_id
     ]
-    event_types = [event.get("event_type") for event in transaction_events]
+    checkpoints = [
+        event
+        for event in transaction_events
+        if event.get("event_type") == "CheckpointRecorded"
+    ]
+    protocol_events = [
+        event
+        for event in transaction_events
+        if event.get("event_type") != "CheckpointRecorded"
+    ]
+    event_types = [event.get("event_type") for event in protocol_events]
     committed_event_types = [
-        "TransactionStarted", "LeaseAcquired", "SnapshotCaptured", "CheckpointRecorded", "SessionLaunched",
+        "TransactionStarted", "LeaseAcquired", "SnapshotCaptured", "SessionLaunched",
         "SessionResultAccepted", "ChangesDetected", "ValidationStarted", "ValidationPassed", "CommitFinalized",
         "TransactionBlocked", "LeaseReleased", "ProjectionUpdated",
     ]
-    checkpointed_committed_event_types = [
-        "TransactionStarted", "LeaseAcquired", "SnapshotCaptured",
-        "CheckpointRecorded", "SessionLaunched", "CheckpointRecorded",
-        "SessionResultAccepted", "ChangesDetected", "ValidationStarted",
-        "ValidationPassed", "CommitFinalized", "TransactionBlocked",
-        "LeaseReleased", "ProjectionUpdated",
-    ]
-    if tuple(event_types) in {
-        tuple(committed_event_types),
-        tuple(checkpointed_committed_event_types),
-    }:
+    if event_types == committed_event_types:
         return _inspect_committed_planning_finalization_recovery(
             project, inspector, ledger_events=ledger_events,
-            transaction_events=transaction_events, projection=projection,
+            transaction_events=protocol_events, checkpoints=checkpoints,
+            projection=projection,
             original_transaction_id=original_transaction_id, planning_transaction=planning_transaction,
             session_report=session_report, writer_lease_exists=writer_lease_exists,
         )
@@ -1701,7 +1970,6 @@ def inspect_planning_finalization_recovery(
         "TransactionStarted",
         "LeaseAcquired",
         "SnapshotCaptured",
-        "CheckpointRecorded",
         "SessionLaunched",
         "TransactionBlocked",
         "LeaseReleased",
@@ -1709,10 +1977,11 @@ def inspect_planning_finalization_recovery(
     ]
     if event_types != expected_event_types:
         raise RecoveryError("blocked planning transaction does not match the finalization topology")
-    start = transaction_events[0]
-    session_event = transaction_events[4]
-    blocked = transaction_events[5]
-    projected = transaction_events[7]
+    start = protocol_events[0]
+    lease_event = protocol_events[1]
+    session_event = protocol_events[3]
+    blocked = protocol_events[4]
+    projected = protocol_events[6]
     start_payload = start.get("payload") or {}
     blocked_payload = blocked.get("payload") or {}
     terminal_snapshot = blocked_payload.get("terminal_snapshot") or {}
@@ -1768,12 +2037,33 @@ def inspect_planning_finalization_recovery(
         )
     )
     policy = start_payload.get("allowed_mutation_policy") or {}
+    commit_subject = policy.get("commit_subject")
     allowed_paths = set(policy.get("allowed_paths") or [])
     allowed_prefixes = tuple(str(item).rstrip("/") for item in policy.get("allowed_prefixes") or [])
     policy_authorized = all(
         path in allowed_paths
         or any(path == prefix or path.startswith(prefix + "/") for prefix in allowed_prefixes)
         for path in current_paths
+    )
+    checkpoint_normalization_binding = any(
+        isinstance(event.get("payload"), dict)
+        and sorted((event.get("payload") or {}).get("source_paths") or [])
+        == envelope_paths
+        and sorted((event.get("payload") or {}).get("final_paths") or [])
+        == current_paths
+        and (
+            set(envelope_paths)
+            | set(
+                (event.get("payload") or {}).get(
+                    "normalization_paths"
+                )
+                or []
+            )
+        )
+        == set(current_paths)
+        and (event.get("payload") or {}).get("final_diff_fingerprint")
+        == mutation_fingerprint
+        for event in checkpoints
     )
     latest_transaction = max(
         projection.get("transactions") or [],
@@ -1827,9 +2117,18 @@ def inspect_planning_finalization_recovery(
             bool(value)
             for value in (terminal_snapshot.get("git_operations") or {}).values()
         ),
-        "changed_paths": current_paths == recorded_paths == planning_paths == envelope_paths,
+        "changed_paths": (
+            current_paths == recorded_paths == planning_paths
+            and (
+                envelope_paths == current_paths
+                or checkpoint_normalization_binding
+            )
+        ),
         "planning_paths_only": bool(current_paths) and all(allowed_planning_path(path) for path in current_paths),
         "original_policy_authorizes_paths": policy_authorized,
+        "original_commit_subject": (
+            isinstance(commit_subject, str) and bool(commit_subject)
+        ),
         "no_production_or_test_paths": not any(
             path.startswith(("src/", "Sources/", "tests/", "Tests/")) for path in current_paths
         ),
@@ -1837,7 +2136,11 @@ def inspect_planning_finalization_recovery(
         "mutation_fingerprint": (
             mutation_fingerprint
             == terminal_snapshot.get("tracked_diff_fingerprint")
-            == planning_transaction.get("diff_fingerprint")
+            and (
+                planning_transaction.get("diff_fingerprint")
+                == mutation_fingerprint
+                or checkpoint_normalization_binding
+            )
         ),
         "planning_transaction_identity": (
             planning_transaction.get("status")
@@ -1901,6 +2204,13 @@ def inspect_planning_finalization_recovery(
     queue = FeatureQueue.from_location(project.repository, project.queue_location)
     selection = _selected_feature_evidence(project, queue, report_evidence["classification"])
     selected = selection.get("selected_feature")
+    if commit_subject not in {
+        planning_commit_subject(project, None),
+        planning_commit_subject(project, selected),
+    }:
+        raise RecoveryError(
+            "planning commit subject conflicts with original mutation authority"
+        )
     missing_policy_feature = recoverable_failure.get(
         "missing_execution_policy_feature"
     )
@@ -1938,6 +2248,11 @@ def inspect_planning_finalization_recovery(
             recoverable_missing_policy_feature=missing_policy_feature,
         )
     result_queue = (report_evidence.get("structured_result") or {}).get("queue_validation") or {}
+    _resolve_reported_feature_identity(
+        result_queue,
+        selection,
+        report_evidence["classification"],
+    )
     if missing_policy_feature is not None and (
         result_queue.get("ok", result_queue.get("valid")) is not True
         or result_queue.get("errors", []) != []
@@ -1988,48 +2303,51 @@ def inspect_planning_finalization_recovery(
     )
     reported_ready = result_queue.get("ready_features", result_queue.get("ready"))
     if (
-        (
-            result_queue.get("selected_feature") != selected
-            and not (
-                historical_warning_compatibility
-                and "selected_feature" not in result_queue
-            )
-            and not (
-                compatible_terminal_recovered
-                and "selected_feature" not in result_queue
-            )
-            and not (
-                post_integration_role_failure is not None
-                and "selected_feature" not in result_queue
-            )
-            and not (
-                missing_policy_feature is not None
-                and "selected_feature" not in result_queue
-            )
-        )
-        or list(reported_ready or []) != selection["ready_features"]
+        list(reported_ready or []) != selection["ready_features"]
         or (
             selected is not None
+            and "dependencies_complete" in result_queue
             and result_queue.get("dependencies_complete") is not True
-            and not (
-                historical_warning_compatibility
-                and "dependencies_complete" not in result_queue
-            )
-            and not (
-                compatible_terminal_recovered
-                and "dependencies_complete" not in result_queue
-            )
-            and not (
-                post_integration_role_failure is not None
-                and "dependencies_complete" not in result_queue
-            )
-            and not (
-                missing_policy_feature is not None
-                and "dependencies_complete" not in result_queue
-            )
         )
     ):
         raise RecoveryError("session queue evidence disagrees with deterministic recovery selection")
+
+    checkpoint_evidence = _validate_transparent_planning_checkpoints(
+        checkpoints=checkpoints,
+        transaction_id=original_transaction_id,
+        workflow_type=str(start.get("workflow_type") or ""),
+        run_id=str(run_id),
+        session_id=str(session_id),
+        starting_branch=str(starting_branch),
+        starting_head=str(starting_head),
+        lease_payload=lease_event.get("payload") or {},
+        mutation_policy=policy,
+        source_paths=envelope_paths,
+        retained_paths=current_paths,
+        retained_diff_fingerprint=mutation_fingerprint,
+        selected_feature=selected,
+    )
+    obsolete_specification = recoverable_failure.get(
+        "selected_specification_path"
+    )
+    if obsolete_specification is not None:
+        expected_specification = (queue.feature(str(selected)) or {}).get("spec")
+        normalized_paths = {
+            path
+            for event in checkpoints
+            for path in (
+                (event.get("payload") or {}).get("normalization_paths") or []
+            )
+            if isinstance(path, str)
+        }
+        if (
+            obsolete_specification != expected_specification
+            or obsolete_specification not in normalized_paths
+            or obsolete_specification in envelope_paths
+        ):
+            raise RecoveryError(
+                "obsolete selected-spec readiness failure lacks exact normalization identity"
+            )
 
     baseline_queue: FeatureQueue | None = None
     if selected is not None:
@@ -2085,11 +2403,13 @@ def inspect_planning_finalization_recovery(
         "original_session_id": session_id,
         "starting_branch": starting_branch,
         "starting_commit": starting_head,
+        "commit_subject": commit_subject,
         "existing_planning_changes": {"count": len(current_paths), "paths": current_paths},
         "mutation_fingerprint": mutation_fingerprint,
         "result_classification": report_evidence["terminal_classification"],
         "selected_feature": selected,
         "ready_features": selection["ready_features"],
+        "checkpoint_evidence": checkpoint_evidence,
         "expected_final_state": (
             "feature_ready" if selected is not None else "paused"
         ),
@@ -2182,21 +2502,16 @@ def _semantic_document_agreement(
         "docs/CURRENT_STATUS.md",
         "docs/FEATURE_CATALOG.md",
         "docs/ROADMAP.md",
-        f"docs/features/{selected_feature}.md",
     ):
-        candidates = [relative]
-        if relative.startswith("docs/features/"):
-            candidates = [path for path in changed_paths if path.startswith("docs/features/") and selected_feature in path]
-        for candidate in candidates:
-            path = project.repository / candidate
-            if candidate not in changed_paths or not path.is_file():
-                continue
-            text = path.read_text(encoding="utf-8").lower()
-            if selected_feature.lower() not in text or "ready" not in text:
-                raise RecoveryError(
-                    f"planning semantic agreement failed for {candidate}: selected feature readiness is absent"
-                )
-            checked.append(candidate)
+        path = project.repository / relative
+        if relative not in changed_paths or not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8").lower()
+        if selected_feature.lower() not in text or "ready" not in text:
+            raise RecoveryError(
+                f"planning semantic agreement failed for {relative}: selected feature readiness is absent"
+            )
+        checked.append(relative)
     return {"ok": True, "checked_paths": sorted(checked)}
 
 
@@ -2293,9 +2608,20 @@ def validate_planning_changes(
     )
     classification = report_evidence["classification"]
     selection = _selected_feature_evidence(project, queue, classification)
+    result_queue = (
+        (report_evidence.get("structured_result") or {}).get(
+            "queue_validation"
+        )
+        or {}
+    )
+    _resolve_reported_feature_identity(
+        result_queue,
+        selection,
+        classification,
+    )
     inventory = _inventory_validation(project)
     queue_comparison = compare_queue_validation_evidence(
-        (report_evidence.get("structured_result") or {}).get("queue_validation") or {},
+        result_queue,
         inventory,
     )
     diff_check = _diff_check(project)
@@ -2368,9 +2694,20 @@ def validate_planning_noop(
     selection = _selected_feature_evidence(
         project, queue, report_evidence["classification"]
     )
+    result_queue = (
+        (report_evidence.get("structured_result") or {}).get(
+            "queue_validation"
+        )
+        or {}
+    )
+    _resolve_reported_feature_identity(
+        result_queue,
+        selection,
+        report_evidence["classification"],
+    )
     inventory = _inventory_validation(project)
     queue_comparison = compare_queue_validation_evidence(
-        (report_evidence.get("structured_result") or {}).get("queue_validation") or {},
+        result_queue,
         inventory,
     )
     return {

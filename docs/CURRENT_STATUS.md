@@ -4,6 +4,39 @@ Last updated: 2026-07-26
 
 ## Summary
 
+Atomic checkpoint-tolerant planning finalization is implemented on
+`codex/m1-24-atomic-planning-finalization` from exact parent
+`95f30353424aee165616d62d4d1e9a1605ff6914`.
+
+Planning recovery now treats zero or more `CheckpointRecorded` events as
+transparent audit metadata after independently authenticating their
+transaction/workflow, run/session, branch/HEAD, lease, mutation authority,
+paths, retained fingerprint, selected feature, and model/child authority.
+Checkpoint names and positions do not define a recovery protocol. A
+checkpoint-bound normalization may distinguish source and final paths only
+when their authorized union exactly covers the retained result.
+
+`RECONCILED_READY_WORK` uses a matching explicit non-empty selected feature or
+derives one only from a sole corroborated ready feature with complete
+dependency evidence. New reconciliation validates the model-produced diff
+semantically before deterministic execution-policy metadata is materialized,
+so a semantic failure adds no controller mutation.
+
+The live Interview Companion recovery dry-run authenticates run
+`940611fd-48c5-49ab-b641-3fd3d6535cee`, session
+`019fa19f-1e02-7523-a4ec-f81793723d06`, transaction
+`c08f3fb3-ac92-4490-8fca-c19f777f3ced`, starting HEAD `12bee2fc`, and retained
+diff `a53f0e984d93dd2220e3e2e6852c71dead900c79f7c26d8b9eb48536d2b529e3`.
+It returns `recovery_ready`, derives F078, predicts `feature_ready`, one
+`factory: reconcile M0 queue` commit, and zero model or child launches. Apply
+was not run. Both application repositories and protected controller state
+remain byte-for-byte unchanged.
+
+One hundred one focused M1-021, M1-022, M1-023, and M1-024 regressions pass.
+Python compilation, `validate-config`, JSON-compatible configuration and queue
+parsing, and `git diff --check` pass. The complete controller suite and all
+application builds/tests remain intentionally unexecuted.
+
 Post-integration planning baseline binding is implemented on
 `codex/m1-22-post-integration-planning-baseline-binding` from exact parent
 `6d5210eefce3dad5c957787b4692ba4d0fa33683`.
