@@ -27,4 +27,4 @@
 | M1-027 | Native Conveyor backlog control plane | review | M1 | `docs/features/M1-027-native-backlog-control-plane.md` |
 | M1-028 | Complete queue browsing scopes | integrated | M1 | `docs/features/M1-028-complete-queue-browsing-scopes.md` |
 | M1-029 | Generic retained repair recovery | ready | M1 | `docs/features/M1-029-generic-retained-repair-recovery.md` |
-| M2-000 | Conveyor simplification and validation reduction | accepted | M2 | `docs/features/M2-000-conveyor-simplification.md` |
+| M2-000 | Conveyor simplification and validation reduction | integrated | M2 | `docs/features/M2-000-conveyor-simplification.md` |

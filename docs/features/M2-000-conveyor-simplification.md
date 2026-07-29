@@ -2,14 +2,18 @@
 
 ## Status
 
-- Factory status: Accepted by one-time operator bootstrap; milestone integration pending
+- Factory status: Integrated by one-time operator bootstrap
 - Accepted implementation branch: `codex/m2-000-accepted-implementation`
 - Historical bootstrap metadata branch:
   `codex/m2-000-conveyor-simplification-final-v2`
 - Prepared parent: `abf511f7381cc9042958691485966e055070ac4a`
 - Accepted implementation: `e9b9e9aca00352fbd0fa137511d342803d7951a4`
   (tree `90ba7e397b3ac43edd7279bbd1f9ec1ba538572c`)
-- Integration status: pending; no integration is authorized in this feature run.
+- Integration target prior head:
+  `abf511f7381cc9042958691485966e055070ac4a`
+- Fast-forwarded control head:
+  `b98ffaae48a2911f7c43475657f1f55d30c45515`
+- Integration status: completed; M2-001 was not started.
 
 ## Objective
 

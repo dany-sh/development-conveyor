@@ -2400,3 +2400,34 @@ This log records model configuration and deterministic deployment evidence. It n
   release validation, complete suite, milestone validation, integration,
   M2-001 work, push, publication, deployment, tag, or release was performed
   during normalization.
+
+## 2026-07-29 — M2-000 one-time bootstrap integration
+
+- Authorization: one non-reusable operator bootstrap for the exact accepted
+  implementation `e9b9e9aca00352fbd0fa137511d342803d7951a4`, control metadata
+  `b98ffaae48a2911f7c43475657f1f55d30c45515`, and target
+  `codex/m2-validation-simplification-integration` at prior head
+  `abf511f7381cc9042958691485966e055070ac4a`.
+- Dependency proof: M1-028 is recorded integrated in M1 at
+  `b7ac3641564c9827e426bc08b8cfe131917faa74`; that commit is an ancestor of
+  target prior head `abf511f7381cc9042958691485966e055070ac4a`.
+  M2-000 has no other dependency.
+- Legacy limitation: supported discovery saw the sole accepted pending M2-000
+  but rejected M1-028 because the pre-M2 integrator checked only active-M2
+  `integrated_features` instead of previously integrated milestones.
+- Integration operation: the dedicated target worktree fast-forwarded only
+  from `abf511f7381cc9042958691485966e055070ac4a` to
+  `b98ffaae48a2911f7c43475657f1f55d30c45515` with `git merge --ff-only`.
+  No cherry-pick, rebase, squash, or merge commit was created.
+- Preserved release evidence: external invocation
+  `8289d8335400407cb6100d9263740471`; internal execution
+  `b4e80527738c4e498933e8fbeeee7693`; validated implementation tree
+  `90ba7e397b3ac43edd7279bbd1f9ec1ba538572c`.
+- Final metadata: M2-000 is integrated, integration status is completed,
+  accepted/integrated implementation remains
+  `e9b9e9aca00352fbd0fa137511d342803d7951a4`, and the integration metadata
+  commit is `SELF`.
+- Validation boundary: bounded metadata parsing and `git diff --check` only.
+  Tests, builds, release validation, feature validation, milestone validation,
+  baseline equivalence, application commands, complete-suite discovery, and
+  M2-001 work were not run.

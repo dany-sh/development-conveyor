@@ -4,7 +4,7 @@ Last updated: 2026-07-29
 
 ## Factory position
 
-- Active feature: M2-000 — Conveyor simplification and validation reduction (accepted; milestone integration pending)
+- Active feature: M2-000 — Conveyor simplification and validation reduction (integrated by one-time operator bootstrap)
 - Accepted implementation: `e9b9e9aca00352fbd0fa137511d342803d7951a4`;
   tree `90ba7e397b3ac43edd7279bbd1f9ec1ba538572c`.
 - Integration authority: exact implementation ref
@@ -16,7 +16,16 @@ Last updated: 2026-07-29
   identities with 20 failures and 17 errors.
 - Acceptance mode: explicitly authorized, non-reusable operator bootstrap
   because the pre-M2 interface could not consume tiered release evidence.
-- Next action: milestone integration; not performed by this bootstrap.
+- Integration result: target `codex/m2-validation-simplification-integration`
+  fast-forwarded from `abf511f7381cc9042958691485966e055070ac4a` to control head
+  `b98ffaae48a2911f7c43475657f1f55d30c45515`; final integration metadata is
+  committed separately.
+- Dependency finding: M1-028 was integrated in M1 as
+  `b7ac3641564c9827e426bc08b8cfe131917faa74` and is reachable from the target's
+  prior head. The pre-M2 integrator failed because it checked only active-M2
+  `integrated_features`.
+- Next action: human review of the integrated M2 milestone. M2-001 was not
+  started.
 
 ## Historical M2 reconstruction and review evidence
 

@@ -20,7 +20,9 @@
       "status": "active",
       "base_commit": "abf511f7381cc9042958691485966e055070ac4a",
       "integration_branch": "codex/m2-validation-simplification-integration",
-      "integrated_features": [],
+      "integrated_features": [
+        "M2-000"
+      ],
       "last_validated_commit": "abf511f7381cc9042958691485966e055070ac4a",
       "human_gate": true
     }
@@ -760,7 +762,7 @@
     {
       "id": "M2-000",
       "title": "Conveyor simplification and validation reduction",
-      "status": "accepted",
+      "status": "integrated",
       "priority": "P1",
       "milestone": "M2",
       "dependencies": [
@@ -784,11 +786,11 @@
       "integration_base_commit": "abf511f7381cc9042958691485966e055070ac4a",
       "accepted_commit": "e9b9e9aca00352fbd0fa137511d342803d7951a4",
       "accepted_implementation_tree": "90ba7e397b3ac43edd7279bbd1f9ec1ba538572c",
-      "integrated_commit": null,
-      "integration_status": "pending",
+      "integrated_commit": "e9b9e9aca00352fbd0fa137511d342803d7951a4",
+      "integration_status": "completed",
       "integration_fix_commits": [],
       "implementation_status": "Completed",
-      "updated_at": "2026-07-28T22:24:00-07:00",
+      "updated_at": "2026-07-28T22:41:00-07:00",
       "acceptance": {
         "tests_passed": true,
         "review_passed": true,
@@ -806,6 +808,19 @@
         "candidate_failures": 20,
         "candidate_errors": 17,
         "provenance_valid": true,
+        "non_reusable": true
+      },
+      "integration_evidence": {
+        "mode": "one_time_operator_bootstrap",
+        "target_branch": "codex/m2-validation-simplification-integration",
+        "target_prior_head": "abf511f7381cc9042958691485966e055070ac4a",
+        "fast_forwarded_control_head": "b98ffaae48a2911f7c43475657f1f55d30c45515",
+        "accepted_implementation": "e9b9e9aca00352fbd0fa137511d342803d7951a4",
+        "dependency": "M1-028",
+        "dependency_integrated_commit": "b7ac3641564c9827e426bc08b8cfe131917faa74",
+        "dependency_reachable_from_target_prior_head": true,
+        "legacy_discovery_limitation": "The pre-M2 integrator resolved dependencies only against the active milestone instead of previously integrated milestones.",
+        "tests_run": 0,
         "non_reusable": true
       }
     }
