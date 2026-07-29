@@ -83,6 +83,30 @@
       ]
     ]
   },
+  "validation_tiers": {
+    "feature": [
+      [
+        "scripts/conveyor",
+        "validate-feature",
+        "--spec",
+        "docs/features/M2-000-conveyor-simplification.md"
+      ]
+    ],
+    "milestone": [
+      [
+        "scripts/conveyor",
+        "validate-milestone",
+        "--spec",
+        "docs/features/M2-000-conveyor-simplification.md"
+      ]
+    ],
+    "release": [
+      [
+        "scripts/conveyor",
+        "validate-release"
+      ]
+    ]
+  },
   "factory": {
     "feature_queue": "docs/FEATURE_QUEUE.yaml",
     "feature_specs": "docs/features",

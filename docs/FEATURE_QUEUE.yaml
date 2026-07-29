@@ -4,7 +4,7 @@
     {
       "id": "M1",
       "name": "Transactional workflow kernel",
-      "status": "active",
+      "status": "paused",
       "base_commit": "c8d57157b26e20d8162ac63ae2b4be5950a805cc",
       "integration_branch": "codex/m1-generic-retained-repair-integration",
       "integrated_features": [
@@ -12,6 +12,16 @@
         "M1-028"
       ],
       "last_validated_commit": "b7ac3641564c9827e426bc08b8cfe131917faa74",
+      "human_gate": true
+    },
+    {
+      "id": "M2",
+      "name": "Validation topology simplification",
+      "status": "active",
+      "base_commit": "abf511f7381cc9042958691485966e055070ac4a",
+      "integration_branch": "codex/m2-validation-simplification-integration",
+      "integrated_features": [],
+      "last_validated_commit": "abf511f7381cc9042958691485966e055070ac4a",
       "human_gate": true
     }
   ],
@@ -746,6 +756,43 @@
       "integration_status": "pending",
       "integration_fix_commits": [],
       "updated_at": "2026-07-27T21:09:51+00:00"
+    },
+    {
+      "id": "M2-000",
+      "title": "Conveyor simplification and validation reduction",
+      "status": "review",
+      "priority": "P1",
+      "milestone": "M2",
+      "dependencies": [
+        "M1-028"
+      ],
+      "spec": "docs/features/M2-000-conveyor-simplification.md",
+      "acceptance_criteria": [
+        "Feature validation selects affected tests and six fixed invariants without complete discovery and completes in under three minutes",
+        "Milestone validation covers combined controller and integration behavior without complete discovery and completes in under ten minutes",
+        "Release validation owns complete discovery, exact visible debt reconciliation, and only explicitly requested repeats",
+        "Cycle, retained finalization, integration, recovery, and session consumers use the correct tier while legacy adapters preserve flat behavior",
+        "Lease, path, prohibited-action, repository/ref, candidate, compare-and-swap, and application-isolation protections remain unchanged or stricter"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "ambiguous_or_authoritative",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m2-000-conveyor-simplification-final-v2",
+      "integration_base_commit": "abf511f7381cc9042958691485966e055070ac4a",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": [],
+      "implementation_status": "In review",
+      "updated_at": "2026-07-27T23:52:00-07:00",
+      "acceptance": {
+        "tests_passed": false,
+        "review_passed": false,
+        "documentation_current": false
+      }
     }
   ]
 }

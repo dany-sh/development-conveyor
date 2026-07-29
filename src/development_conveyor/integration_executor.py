@@ -13,12 +13,13 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .contracts import fingerprint
-from .errors import IntegrationPlanError, LockError
+from .errors import ConveyorError, IntegrationPlanError, LockError
 from .logging import utc_now
 from .queue import COMPLETE_STATUSES, FeatureQueue
 from .redaction import redact_text
 from .repository import RepositoryInspector
 from .validation import SafetyPolicy
+from .validation_tiers import adapter_commands
 from .workflow_lease import WorkflowWriterLease
 
 
@@ -30,7 +31,14 @@ RUNTIME_DESCENDANTS = (
     ".factory/runtime/milestone-integration/latest.json",
     ".factory/runtime/milestone-integration/F005-plan.json",
 )
-VALIDATION_GROUPS = ("build", "test", "lint", "package", "validate")
+VALIDATION_GROUPS = (
+    "build",
+    "test",
+    "lint",
+    "package",
+    "validate",
+    "validation_tiers.milestone",
+)
 LEASE_IDENTITY_FIELDS = (
     "lease_id",
     "lease_type",
@@ -177,28 +185,10 @@ def _json_at(root: Path, commit: str, relative: str) -> tuple[dict[str, Any], by
 
 
 def _commands_from_adapter(adapter: dict[str, Any]) -> list[dict[str, Any]]:
-    commands = adapter.get("commands")
-    if not isinstance(commands, dict):
-        raise IntegrationPlanError("accepted adapter commands must be an object")
-    values: list[dict[str, Any]] = []
-    seen: set[tuple[str, ...]] = set()
-    for group in VALIDATION_GROUPS:
-        entries = commands.get(group, [])
-        if not isinstance(entries, list):
-            raise IntegrationPlanError(f"accepted adapter commands.{group} must be an array")
-        for entry in entries:
-            if (
-                not isinstance(entry, list)
-                or not entry
-                or not all(isinstance(item, str) and item for item in entry)
-            ):
-                raise IntegrationPlanError(
-                    f"accepted adapter commands.{group} contains an invalid argument array"
-                )
-            argv = tuple(entry)
-            if argv not in seen:
-                seen.add(argv)
-                values.append({"group": group, "argv": list(argv)})
+    try:
+        values, _ = adapter_commands(adapter, "milestone")
+    except ConveyorError as exc:
+        raise IntegrationPlanError(str(exc)) from exc
     return values
 
 
@@ -965,6 +955,11 @@ def _mark_integrating(root: Path, plan: dict[str, Any]) -> str:
 def _run_validation(root: Path, plan: dict[str, Any]) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     blockers: list[str] = []
+    environment = os.environ.copy()
+    environment["CONVEYOR_PREPARED_PARENT"] = plan["pre_integration_head"]
+    environment["CONVEYOR_CANDIDATE"] = _git_output(
+        root, "rev-parse", "HEAD"
+    )
     for item in plan["validation_commands"]:
         argv = list(item["argv"])
         SafetyPolicy.validate_configured_command(
@@ -979,6 +974,7 @@ def _run_validation(root: Path, plan: dict[str, Any]) -> dict[str, Any]:
                 stderr=subprocess.PIPE,
                 check=False,
                 timeout=1800,
+                env=environment,
             )
             exit_code = result.returncode
             diagnostic = redact_text(

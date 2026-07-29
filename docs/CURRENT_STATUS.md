@@ -1,6 +1,103 @@
 # Current Status
 
-Last updated: 2026-07-27
+Last updated: 2026-07-28
+
+## Authoritative M2 reconstruction
+
+M2-000 is in review on
+`codex/m2-000-conveyor-simplification-final-v2` from pristine parent
+`abf511f7381cc9042958691485966e055070ac4a`. M1 is paused for this isolated
+reconstruction, and the existing M1-029 feature entry remains unchanged and
+in progress under that paused milestone.
+
+The M2 implementation adds explicit feature, milestone, and release validation
+tiers with caller-level legacy fallback. Feature and milestone routes construct
+no complete discovery command; release owns the one complete-suite observation
+and any explicit repeats.
+
+The authenticated release execution
+`0b90e31ee17a46eaacf0ff8d2fca1f64` is bound to implementation commit
+`029d0a08b1b00c151840e6f268a3c66103c1aae4` and tree
+`ea0d11135f7e81dff1d6cc7b6edbbc9978fa8e11`. It observed 748 tests, 20
+failures, 17 errors, and the exact 37 catalog identities. Offline
+reconciliation preserves the historical 21-failure/16-error baseline and
+reports one explicitly permitted classification shift:
+`test_post_transition_cycle_cache_repair.PostTransitionCycleCacheRepairTests.test_unrelated_branch_and_changed_hash_fail_closed`,
+from baseline `failure` to candidate `error`, because the authenticated
+worktree intentionally omits the excluded generated evidence-ledger fixture.
+The other 36 records remain classification-exact, with zero missing, added,
+duplicate, pending, or unparseable identities.
+
+The immutable reconciliation artifact has SHA-256
+`df95608b65baf709c55083ee0e2d8612ef68801ced00bdce9552b8c58450ecd6`
+and binds the unchanged raw artifacts, external release JSON, implementation
+commit/tree, catalog, reconciliation code, and exact shift. No release suite
+was repeated.
+
+M2-000 remains in review pending one explicit human acceptance decision. The
+supported deterministic accepted-commit finalizer requires the candidate to be
+the exact direct child of the configured milestone base; it cannot represent
+the authenticated implementation at `029d0a08` plus a direct reconciliation-
+only child without changing integration authority or rewriting history.
+Integration remains prohibited.
+
+The review repairs now parse real unittest summary and parenthesized-subtest
+headings into canonical catalog identities, reject unparseable or duplicate
+normalized failure/error identities, and redact persisted subprocess tails
+without changing raw output hashes or raw debt parsing. The prepared-parent
+artifact parses to exactly 37 unique records with 21 failures and 16 errors.
+A separate synthetic candidate preserves all 37 identities and changes only
+the documented excluded-fixture record, producing 20 failures and 17 errors.
+
+Post-repair pre-release gates pass: the validation-tier module passed 28 tests;
+feature validation passed 25 selected tests across four commands in 4.411
+seconds; milestone validation passed 39 main tests plus exactly one 20-test
+observation per ref in 132.344 seconds. Both tiers invoked complete discovery
+zero times. These are new repair-validation results and do not replace the
+earlier supplied 21-test feature and 35-test milestone evidence. The final
+release observation was then reserved for the orchestrator; the authenticated
+execution and offline reconciliation above supersede that pre-release state.
+
+A later user-supplied manual execution reported 748 tests in 945.536 seconds,
+20 failures, 17 errors, and exit code 1. Its raw output was overwritten, so the
+result is historical unauthenticated context only and cannot support
+acceptance. M2-000 remains in review and unaccepted.
+
+The bounded follow-up now canonicalizes Python 3.9 verbose
+`display_method (module.Class) ... FAIL|ERROR` headings without duplicating a
+method already present in the identity. Release children now create unique,
+exclusive, mode-`0600` raw stdout/stderr artifacts and independently durable
+metadata before launch, after child completion, and after parser success or
+failure. No complete suite was run to exercise this repair; only short
+synthetic child commands were used.
+
+Current post-manual validation passes: 28 focused tests in 4.759 seconds;
+25 feature tests across four commands in 4.630 seconds; and 39 milestone main
+tests plus one 20-test observation per ref in 125.273 seconds. Feature and
+milestone complete-suite invocation counts remain zero.
+
+Final candidate evidence supersedes those timing snapshots where they differ:
+five exact parser/debt/redaction checks passed; the validation-tier module
+passed all 28 discovered tests; feature validation passed 25 tests across four
+commands in 5.318 seconds with zero complete suites; milestone validation
+passed 79 total tests (39 main plus one 20-test observation per ref) in 125.273
+seconds with zero complete suites. The final adversarial review reports zero
+unresolved Critical, High, or Medium findings. The parser-only repair added
+zero discovered test IDs.
+
+Release-count history is 745 tests in the rejected isolated JSON followed by
+the user-supplied 748-test manual result. The three-test increase predates the
+final parser-only repair, but its exact identities and cause are unresolved:
+the later raw output was overwritten and its final capture is empty. The
+manual result remains historical unauthenticated context. The later
+authenticated release evidence is reconciled above. M2-000 remains in review
+only because the supported accepted-commit path cannot bind the implementation
+commit plus its reconciliation-only child without a human authority decision.
+
+This section supersedes any later planning statement that describes M1-029 as
+the currently selected controller work. No integration, default-branch merge,
+push, publish, deploy, external release, or application-repository mutation is
+part of the M2 feature run.
 
 ## Summary
 

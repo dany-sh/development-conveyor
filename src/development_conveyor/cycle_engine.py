@@ -130,6 +130,7 @@ from .cycle_cache import (
 from .consistency import ConsistencyChecker
 from .workflow_recovery import RecoveryPlanner
 from .validation import SafetyPolicy
+from .validation_tiers import adapter_command_tuples
 from .cost_policy import build_run_plan
 from .context_pack import ContextReadError
 from .feature_branches import canonical_feature_branch
@@ -334,7 +335,18 @@ class CycleEngine:
                         "kernel_recovery": applied,
                     }
                 if recovered.current_state == TransactionState.VALIDATING:
-                    authority, commands = self._kernel_required_commands(project)
+                    tier = (
+                        "milestone"
+                        if recovered.workflow_type
+                        in {
+                            WorkflowType.MILESTONE_INTEGRATION,
+                            WorkflowType.MILESTONE_GATE,
+                        }
+                        else "feature"
+                    )
+                    authority, commands = self._kernel_required_commands(
+                        project, tier=tier
+                    )
                     kernel.validate(
                         authority=authority, command_results=commands,
                         semantic_validator=adapter.semantic_validate,
@@ -398,25 +410,18 @@ class CycleEngine:
         }
 
     @staticmethod
-    def _configured_kernel_commands(project: Project) -> tuple[tuple[str, ...], ...]:
+    def _configured_kernel_commands(
+        project: Project, *, tier: str = "feature"
+    ) -> tuple[tuple[str, ...], ...]:
         adapter_path = project.repository / ".factory/project.yaml"
         try:
             adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RecoveryError(f"factory adapter is unreadable for kernel validation: {exc}") from exc
-        commands: list[tuple[str, ...]] = []
-        configured = adapter.get("commands") if isinstance(adapter, dict) else None
-        for category in ("build", "test", "lint", "package", "validate"):
-            values = (configured or {}).get(category, []) if isinstance(configured, dict) else []
-            if not isinstance(values, list):
-                raise RecoveryError(f"adapter command category {category} is not an array")
-            for value in values:
-                if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
-                    raise RecoveryError(f"adapter command category {category} contains an invalid argument array")
-                command = tuple(value)
-                if command not in commands:
-                    commands.append(command)
-        return tuple(commands)
+        try:
+            return adapter_command_tuples(adapter, tier)
+        except ConveyorError as exc:
+            raise RecoveryError(str(exc)) from exc
 
     @staticmethod
     def _execute_kernel_commands(
@@ -440,9 +445,9 @@ class CycleEngine:
         return authority, records
 
     def _kernel_required_commands(
-        self, project: Project
+        self, project: Project, *, tier: str = "feature"
     ) -> tuple[CommandAuthority, list[Any]]:
-        commands = self._configured_kernel_commands(project)
+        commands = self._configured_kernel_commands(project, tier=tier)
         for command in commands:
             self._observe_lifecycle("between_validation_tiers", {
                 "project_id": project.project_id,
@@ -6843,7 +6848,9 @@ class CycleEngine:
             )
             kernel.acquire_lease()
             kernel.capture_snapshot()
-            pinned_commands = self._configured_kernel_commands(project)
+            pinned_commands = self._configured_kernel_commands(
+                project, tier="milestone"
+            )
             pinned_command_fingerprint = fingerprint([list(item) for item in pinned_commands])
             adapter_bytes = inspector.safe_worktree_file_bytes(".factory/project.yaml")
             if adapter_bytes is None:

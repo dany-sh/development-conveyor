@@ -22,7 +22,7 @@ from .cycle_cache import (
     build_canonical_cycle_cache,
     write_terminal_cycle_cache,
 )
-from .errors import RecoveryError, TransactionError
+from .errors import ConveyorError, RecoveryError, TransactionError
 from .execution_plan import ExecutionPlan
 from .feature_prelaunch_recovery import (
     authenticates_run_scoped_capability_isolation_report,
@@ -38,6 +38,7 @@ from .registry import Project
 from .repository import RepositoryInspector
 from .snapshots import capture_repository_snapshot
 from .workflow_lease import WorkflowWriterLease
+from .validation_tiers import adapter_command_tuples
 
 
 CommandRunner = Callable[[list[str], Path], dict[str, Any]]
@@ -636,6 +637,22 @@ class FeatureResultRecovery:
     def _validation_commands(
         self, *, tracked_paths: tuple[str, ...], untracked_paths: tuple[str, ...]
     ) -> list[list[str]]:
+        try:
+            adapter = json.loads(
+                (
+                    self.project.repository / self.project.validation_source
+                ).read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            adapter = None
+        if isinstance(adapter, dict) and "validation_tiers" in adapter:
+            try:
+                commands = adapter_command_tuples(adapter, "feature")
+            except ConveyorError as exc:
+                raise RecoveryError(str(exc)) from exc
+            if not commands:
+                raise RecoveryError("feature validation tier is empty")
+            return [list(command) for command in commands]
         changed = tuple(sorted({*tracked_paths, *untracked_paths}))
         changed_tests = [
             Path(path).stem

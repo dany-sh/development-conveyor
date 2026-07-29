@@ -9,11 +9,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .errors import RecoveryError
+from .errors import ConveyorError, RecoveryError
 from .queue import FeatureQueue
 from .registry import Project
 from .repository import RepositoryInspector
 from .sessions import classify_post_integration_commands, parse_integration_terminal_result
+from .validation_tiers import adapter_command_tuples
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,25 @@ def _timestamp_after(value: str | None, baseline: str | None) -> bool:
         return False
 
 
+def _configured_required_commands(project: Project) -> tuple[tuple[str, ...], ...]:
+    """Load milestone validation commands through tier or legacy authority."""
+
+    try:
+        adapter = json.loads(
+            (project.repository / project.validation_source).read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, json.JSONDecodeError):
+        return ()
+    if not isinstance(adapter, dict):
+        return ()
+    try:
+        return adapter_command_tuples(adapter, "milestone")
+    except ConveyorError as exc:
+        raise RecoveryError(str(exc)) from exc
+
+
 def assess_durable_integration_success(
     project: Project,
     cycle: dict[str, Any] | None,
@@ -82,17 +102,7 @@ def assess_durable_integration_success(
         runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         runtime = None
-    try:
-        adapter = json.loads((project.repository / project.validation_source).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        adapter = None
-    configured_commands: list[tuple[str, ...]] = []
-    command_groups = (adapter or {}).get("commands") if isinstance(adapter, dict) else None
-    if isinstance(command_groups, dict):
-        for group in ("build", "test", "lint", "package", "validate"):
-            for command in command_groups.get(group, []):
-                if isinstance(command, list) and command and all(isinstance(part, str) for part in command):
-                    configured_commands.append(tuple(command))
+    configured_commands = list(_configured_required_commands(project))
 
     report_output = str((session_report or {}).get("redacted_stdout") or "")
     terminal, terminal_validation = parse_integration_terminal_result(report_output)

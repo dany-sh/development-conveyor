@@ -2047,3 +2047,296 @@ This log records model configuration and deterministic deployment evidence. It n
 - Base before preparation: `c8d57157b26e20d8162ac63ae2b4be5950a805cc`
 - Production implementation started: `false`
 - Stop reason: `feature_branch_prepared`
+
+## 2026-07-27 — M2-000 scope-clean reconstruction
+
+- Scope: reconstructed M2-000 manually from pristine parent
+  `abf511f7381cc9042958691485966e055070ac4a` on
+  `codex/m2-000-conveyor-simplification-reconstructed`. The contaminated
+  `1c5080109abd077d464be4d86be1950d1fbeb298` commit was read-only hunk
+  evidence; it was not cherry-picked.
+- Isolation: M1-029 source, tests, specification, queue entry, catalog entry,
+  status history, and run evidence remain unchanged. No application repository,
+  integration branch, default branch, external service, or release surface was
+  mutated.
+- Implementation: adapters may declare complete feature, milestone, and
+  release tiers. Cycle execution and retained-result finalization select
+  feature authority. Integration, recovery, and session result validation
+  select milestone authority. Legacy adapters retain their exact flat command
+  sequence at each caller.
+- Safety: command execution continues through `SafetyPolicy`; tier tests
+  observe canonical `configured_validation` authority and prove a prohibited
+  release operation is rejected. Existing lease, path, prohibited-action,
+  repository/ref, candidate, compare-and-swap, and application-isolation
+  enforcement remains at the original call sites.
+- Focused evidence: `tests.test_validation_tiers` passed 25 tests in 3.134
+  seconds. Added coverage includes caller-level legacy fallback, exact
+  identity/outcome debt mismatch failure, one authoritative tiered milestone
+  runtime record, and explicit SafetyPolicy invocation/prohibition.
+- Escalation: after two focused test-contract repair attempts, the
+  Sol/xhigh reviewer confirmed the production authority and runtime schema were
+  correct. The sole mismatch was Low severity in the test expectation:
+  `configured` versus canonical `configured_validation`. The test-only
+  correction passed 25 tests in 3.303 seconds; production safety semantics were
+  unchanged. Reason code: `two_repair_attempts_failed`.
+- Release observation count at this checkpoint: zero. The debt catalog is in
+  explicit single-observation capture mode until the one authorized release
+  run supplies exact outcomes.
+
+## 2026-07-28 — M2-000 debt reconciliation and rejected isolated release
+
+- Prepared-parent catalog source:
+  `/private/tmp/m1-029-base.jQRS70/feature-full.out`, SHA-256
+  `dbdac38970df795ca6c409876829138280f110e1bfe24de09cb3979811fbcffe`.
+  Its verifiable summary is 723 tests in 669.248 seconds with 21 failures and
+  16 errors. All 37 unique catalog identities and exact outcomes match its
+  failure/error headings with no missing, extra, duplicate, or mismatched
+  record.
+- Sole isolated release observation:
+  `/private/tmp/m2-000-reconstruction.5D0AiB/release-validation.json`, SHA-256
+  `bae8ce43a247e298958356674bd2294339d41734c181ddefc4dfd205c6200605`.
+  `scripts/conveyor validate-release` ran exactly once without `--repeat`;
+  complete-suite invocations: 1; tests: 745; suite duration: 660.921 seconds;
+  total duration: 661.102 seconds; suite-output SHA-256:
+  `dcd146e77b1273b723d4cefad5e1e63a5ab2f6fe7dda814dbb5fd246eca49ad9`.
+- Rejected result: `valid: false`, 20 failures, and 17 errors. It did not
+  reproduce or supersede the prepared-parent 21/16 baseline.
+- Exact transition:
+  `test_post_transition_cycle_cache_repair.PostTransitionCycleCacheRepairTests.test_unrelated_branch_and_changed_hash_fail_closed`
+  changed from baseline `failure` to isolated `error`. Exact focused
+  reproduction raised `FileNotFoundError` while the test fixture attempted to
+  copy the intentionally absent
+  `state/projects/interview-companion/evidence-ledger.jsonl`.
+- The missing controller fixture is expressly excluded from M2 reconstruction.
+  It was not copied from read-only provenance and was not repaired. The
+  release was not rerun. Strict acceptance remains blocked.
+
+### Model execution — 2026-07-28T06:56:50+00:00
+
+- Agent role: `repository-explorer`
+- Effective model: `gpt-5.6-terra`
+- Effective reasoning effort: `medium`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m2_000_reconstruction_evidence`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-28T06:56:50+00:00
+
+- Agent role: `test-engineer`
+- Effective model: `gpt-5.6-terra`
+- Effective reasoning effort: `high`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m2_000_test_evidence`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-28T06:56:50+00:00
+
+- Agent role: `feature-worker`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `high`
+- Configuration source: `agent_file`
+- Event: `start`
+- Reason code: `m2_000_scope_clean_reconstruction`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-28T06:56:50+00:00
+
+- Agent role: `adversarial-reviewer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `xhigh`
+- Configuration source: `agent_file`
+- Event: `escalation`
+- Reason code: `two_repair_attempts_failed`
+- Focused repair attempts: 2
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-28T06:56:50+00:00
+
+- Agent role: `deterministic-validation`
+- Effective model: `none (deterministic script)`
+- Effective reasoning effort: `none`
+- Configuration source: `deterministic_script`
+- Event: `start`
+- Reason code: `m2_000_validation_gates`
+- Safety and autonomy contracts unchanged: `true`
+
+## 2026-07-28 — M2-000 review repairs and pre-release validation
+
+- Supplied historical evidence remains distinct: the earlier feature gate ran
+  21 tests across four commands in 3.544 seconds with zero complete-suite
+  invocations. The earlier milestone gate ran 35 main tests plus exactly one
+  20-test observation per ref in 96.046 seconds with zero complete-suite
+  invocations. These values are retained historical evidence, not new reruns.
+- Corrected Medium findings: unittest debt parsing now canonicalizes ordinary
+  verbose results and real summary headings, including parenthesized subtests
+  with single-quoted, double-quoted, and multiple parameters. Accepted bracket
+  identities are preserved. Unparseable failure/error headings and duplicate
+  normalized identities fail closed.
+- Persistence boundary: raw subprocess text still supplies the SHA-256 and debt
+  parser. `redact_text` now protects only the bounded persisted output tail.
+  Focused coverage proves authentication and credential categories plus
+  documented absolute user-data paths are absent or redacted without recording
+  any secret value here.
+- Exact debt evidence: five parser, redaction, and debt-map checks passed. The
+  prepared-parent artifact parsed to 37 records, 37 unique identities, 21
+  failures, and 16 errors with exact reconciliation and zero missing,
+  unexpected, mismatched, duplicate, or invalid records. A separate synthetic
+  candidate retained all 37 identities and changed only
+  `test_post_transition_cycle_cache_repair.PostTransitionCycleCacheRepairTests.test_unrelated_branch_and_changed_hash_fail_closed`
+  from failure to error, yielding 20 failures and 17 errors. Classifications
+  remained diagnostic only.
+- Focused module: `python3 -m unittest -v tests.test_validation_tiers` passed
+  28 tests in 4.621 seconds.
+- Post-repair feature gate: 25 selected tests passed; all four commands passed
+  in 4.411 seconds; complete-suite invocations: 0.
+- Post-repair milestone gate: 39 main tests passed in 46.210 seconds. The
+  prepared-parent observation passed 20 tests in 41.047 seconds and the
+  WORKTREE observation passed 20 tests in 44.053 seconds, exactly one
+  observation per ref. Total gate duration was 132.344 seconds;
+  complete-suite invocations: 0; equivalent success: true.
+- `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, and
+  the gate-owned `git diff --check` commands passed. No release validation,
+  fixture copy or repair, commit, integration, push, deployment, publication,
+  or registered-application mutation occurred. Strict acceptance remains
+  pending the orchestrator-reserved final release observation.
+
+## 2026-07-28 — M2-000 post-manual evidence repair
+
+- Historical manual context only: the user supplied 748 tests, 945.536
+  seconds, 20 failures, 17 errors, and child exit code 1. The raw output was
+  overwritten, so this result is unauthenticated and is not acceptance
+  evidence.
+- Python 3.9 verbose parsing now appends the captured display method when the
+  parenthesized identity is only `module.Class`; an identity already ending in
+  that method remains unchanged. Parenthesized and accepted bracket subtest
+  identities retain their canonical catalog forms.
+- Every release complete-suite execution now creates unique UUID-bound raw
+  stdout/stderr paths with exclusive creation and mode `0600`. Separate
+  metadata is exclusively durable before child launch, updated with child exit
+  and per-stream hashes before debt parsing, and updated again with parser
+  success or failure. Metadata stores no child output or command arguments.
+- Existing focused methods were extended instead of adding tests. Four
+  targeted parser/artifact/debt methods passed in 0.089 seconds. The complete
+  `tests.test_validation_tiers` module retained 28 discovered tests; the final
+  run passed in 4.759 seconds. Short synthetic commands exercised success,
+  unique paths, collision refusal without overwrite, and parser failure. No
+  `validate-release`, unittest discovery, or complete suite ran.
+- Post-manual feature validation passed 25 tests across four commands in 4.630
+  seconds with zero complete-suite invocations. Milestone validation passed 39
+  main tests plus exactly one 20-test prepared-parent observation and one
+  20-test WORKTREE observation in 125.273 seconds, with equivalent success and
+  zero complete-suite invocations.
+- M2-000 remains `review` and unaccepted. One current full release run is
+  necessary only if strict acceptance is pursued; the feature worker did not
+  run it. No commit, integration, push, registered-application mutation,
+  deployment, publication, or release action occurred.
+
+## 2026-07-28 — M2-000 cross-form debt-map review repair
+
+- The reviewer identified one Medium fail-closed gap: complete output that
+  contained both verbose results and summary headings previously preferred the
+  summary set without proving the verbose set agreed.
+- `_debt_records` now requires exact normalized identity-to-outcome map
+  equality whenever both forms are present. Partial maps and outcome
+  disagreement fail closed; existing duplicate and unparseable-heading
+  behavior is unchanged.
+- Partial-map and outcome-mismatch cases were folded into the existing parser
+  test method. Discovered test count remains unchanged.
+- Closure validation: five exact parser/debt/redaction methods passed in 0.091
+  seconds; the full validation-tier module passed all 28 discovered tests in
+  4.482 seconds; compilation and configuration validation passed. Feature
+  validation passed 25 tests across four commands in 5.318 seconds with zero
+  complete-suite invocations.
+- Milestone validation was not repeated: the repair changes only the
+  failure/error cross-form rejection path and cannot affect the successful
+  milestone path. The current 39-main-test plus 20-tests-per-ref evidence
+  remains the 125.273-second post-manual run with zero complete suites.
+
+## 2026-07-28 — M2-000 final candidate preflight
+
+- Candidate base: pristine
+  `abf511f7381cc9042958691485966e055070ac4a` on
+  `codex/m2-000-conveyor-simplification-reconstructed`. Contaminated commit
+  `1c5080109abd077d464be4d86be1950d1fbeb298` remains rejected evidence and was
+  neither reused nor amended.
+- Completion evidence: focused parser/debt/redaction checks 5 of 5; validation
+  tier module 28 of 28; feature tier 25 tests across four commands in 5.318
+  seconds with zero complete suites; milestone tier 79 total tests in 125.273
+  seconds with zero complete suites.
+- Review evidence: zero unresolved Critical, High, or Medium findings.
+  Parser-only closure added zero discovered test IDs.
+- Release evidence: authenticated release remains pending. The manual 748-test,
+  945.536-second, 20-failure/17-error, exit-1 result is historical and
+  unauthenticated because its raw output was overwritten. Integration remains
+  blocked until one authenticated release run passes.
+- Count chronology: the preserved rejected isolated JSON records 745 tests;
+  the later user-supplied manual result reports 748. The three-test increase
+  predates the final parser-only repair. The exact added identities and reason
+  are unresolved because no complete raw or final JSON evidence survives for
+  the 748-test run; no inference is promoted to fact.
+- Scope: M1-029 source, tests, specification, baseline-equivalence,
+  controlled-environment, and external-fixture machinery remain unchanged.
+  No release validation, complete discovery, registered-application command,
+  integration, push, publication, or deployment was run during candidate
+  preflight.
+
+### Model execution — 2026-07-28T23:04:05+00:00
+
+- Agent role: `interactive-parent`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `m2_release_reconciliation_followup`
+- Safety and autonomy contracts unchanged: `true`
+
+## 2026-07-28 — M2-000 authenticated release reconciliation follow-up
+
+- Scope: parent-session-only reconciliation; no delegation, Feature Factory,
+  application-repository mutation, release rerun, integration, push,
+  publication, or deployment.
+- Release provenance: execution `0b90e31ee17a46eaacf0ff8d2fca1f64`
+  ran from 15:27 to 15:45 PDT. Commit
+  `029d0a08b1b00c151840e6f268a3c66103c1aae4` was already checked out at
+  13:53 PDT; branch and worktree reflogs show no later movement, the worktree
+  was clean before this follow-up, and the implementation commit remains in
+  current ancestry.
+- Authenticated implementation tree:
+  `ea0d11135f7e81dff1d6cc7b6edbbc9978fa8e11`.
+- Preserved artifact hashes: external release JSON
+  `4c6f3a876b889aaa6564e704081c3e27b54177efa5af941767cadcf36eb50919`;
+  raw stdout
+  `19475609f41adef518dc6ba3218dff6e226e7b871824d7f438028b29e644972c`;
+  raw stderr
+  `0440904cc3a56a9cc7b905db834a1c44a5e81edc9be7b769bfb0f4e3c976671a`.
+  Original release JSON, execution metadata, and raw artifacts were not
+  rewritten.
+- Offline reconciliation: valid; 748 tests; 37 exact identities; candidate
+  20 failures and 17 errors; historical baseline 21 failures and 16 errors;
+  zero missing, added, duplicate, pending, or unparseable identities.
+- Explicit permitted shift:
+  `test_post_transition_cycle_cache_repair.PostTransitionCycleCacheRepairTests.test_unrelated_branch_and_changed_hash_fail_closed`
+  remains baseline `failure` and was observed as candidate `error`. Its
+  catalog record alone permits `failure` or `error` with a generated-state
+  dependency rationale. The other 36 records remain classification-exact.
+- Immutable offline artifact:
+  `release-reconciliation-0b90e31ee17a46eaacf0ff8d2fca1f64.json`,
+  SHA-256
+  `df95608b65baf709c55083ee0e2d8612ef68801ced00bdce9552b8c58450ecd6`.
+  It binds the execution ID, preserved hashes, external JSON, implementation
+  commit/tree, debt catalog, reconciliation code, and exact shift; it persists
+  no local user or temporary absolute path.
+- Bounded validation: five existing focused test IDs passed in 0.215 seconds;
+  final Python compilation passed in 0.103 seconds; configuration validation
+  passed in 0.235 seconds; and `git diff --check` passed in 0.062 seconds. The
+  focused tests cover exact identity matching, permitted shift reporting,
+  undeclared-shift rejection, output-tail redaction, and artifact binding.
+- Acceptance-path audit: the supported deterministic accepted-commit finalizer
+  requires the candidate implementation commit to be the exact direct child of
+  the configured milestone base. It cannot bind authenticated implementation
+  commit `029d0a08` plus a reconciliation-only direct child without weakening
+  integration-base authority or rewriting history. M2-000 therefore remains
+  in review for one explicit human acceptance decision; integration is not
+  authorized.

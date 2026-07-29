@@ -43,6 +43,7 @@ from .queue_control import (
     transition_backlog,
     transition_ready,
 )
+from .validation_tiers import run_repository_validation
 
 MODES = ("audit", "one_feature", "until_blocked", "milestone", "portfolio", "resume")
 
@@ -81,6 +82,32 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("validate-config", help="validate controller and project configuration")
+    validate_feature = subparsers.add_parser(
+        "validate-feature",
+        help="run affected tests, the minimal invariant core, compilation, config, and diff checks",
+    )
+    validate_feature.add_argument("--base")
+    validate_feature.add_argument("--spec")
+    validate_feature.add_argument("--test", action="append", default=[])
+    validate_milestone = subparsers.add_parser(
+        "validate-milestone",
+        help="run the feature gate plus broader controller and integration checks",
+    )
+    validate_milestone.add_argument("--base")
+    validate_milestone.add_argument("--spec")
+    validate_milestone.add_argument("--test", action="append", default=[])
+    validate_milestone.add_argument("--prepared-parent")
+    validate_milestone.add_argument("--candidate")
+    validate_release = subparsers.add_parser(
+        "validate-release",
+        help="run complete discovery once and reconcile exact visible debt",
+    )
+    validate_release.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="repeat complete discovery only for explicit nondeterminism investigation",
+    )
 
     doctor = subparsers.add_parser("doctor", help="validate Codex CLI, model, and reasoning compatibility")
     doctor.add_argument("--project")
@@ -452,7 +479,26 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
     args = _parser().parse_args(arguments)
     if args.command == "execute-integration-plan":
         return execute_integration_plan(Path(args.plan).expanduser().resolve())
-    controller_root = discover_root(root)
+    validation_command = args.command in {
+        "validate-config",
+        "validate-feature",
+        "validate-milestone",
+        "validate-release",
+    }
+    controller_root = discover_root(
+        Path.cwd() if validation_command and root is None else root
+    )
+    if args.command in {"validate-feature", "validate-milestone", "validate-release"}:
+        return run_repository_validation(
+            controller_root,
+            tier=args.command.removeprefix("validate-"),
+            base=getattr(args, "base", None),
+            specification=getattr(args, "spec", None),
+            explicit_tests=getattr(args, "test", ()),
+            prepared_parent=getattr(args, "prepared_parent", None),
+            candidate=getattr(args, "candidate", None),
+            repeat=getattr(args, "repeat", 1),
+        )
     configuration = load_configuration(controller_root)
     registry = ProjectRegistry(configuration)
     if args.command == "stop-autopilot":
@@ -877,6 +923,8 @@ def main(arguments: list[str] | None = None) -> int:
         result = execute(arguments)
         print(render_json(result))
         return 2 if (
+            result.get("valid") is False
+            or
             result.get("launch_allowed") is False
             or result.get("runtime_policy_passed") is False
             or result.get("outcome") == "resolution_rejected"

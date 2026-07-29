@@ -19,6 +19,7 @@ reports/*.json
 reports/*.md
 reports/**/*.json
 reports/**/*.md
+reports/release-validation-*.raw
 logs/*.jsonl
 logs/*.lock
 !state/.gitkeep

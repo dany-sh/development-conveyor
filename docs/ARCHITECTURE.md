@@ -224,6 +224,35 @@ compatibility caches. Environment failures are separate from implementation
 failures; identical evidence is not repeated; exhaustion preserves the diff,
 creates no product gate or commit, and releases ownership.
 
+## Tiered validation authority
+
+Adapters may declare complete `feature`, `milestone`, and `release` command
+sets. Partial declarations fail closed; absent declarations preserve the exact
+legacy flat command order. Feature execution and retained-result finalization
+select feature authority. Milestone execution, recovery, and result validation
+select milestone authority.
+
+The feature tier maps changed production paths to tests, accepts explicit
+specification tests, and always includes six safety invariants. The milestone
+tier adds fixed combined-system coverage. Tests, routing, environment, fixture
+authority, or known milestone debt can require one prepared-parent and one
+candidate observation; neither ref is repeated during an ordinary milestone
+gate. Release alone runs complete discovery and repeats only by explicit
+operator request.
+
+Tier routing changes validation cost, not mutation authority. Typed writer
+leases, authorized path sets, prohibited actions, repository/ref identity,
+candidate identity, compare-and-swap operations, dirty-worktree checks, and
+application-repository isolation retain their existing enforcement points.
+
+Each release complete-suite child receives a UUID-bound local evidence set.
+Raw stdout and stderr are created with exclusive no-overwrite descriptors and
+mode `0600`. A separate execution record is durably created before launch,
+updated with child completion, exit status, and per-stream hashes before debt
+parsing, then updated with parser success or failure. Parser failure therefore
+cannot erase or replace the raw child evidence, and metadata never contains
+the child output or command arguments.
+
 Feature identity in preparation, execution, acceptance, and retained-result
 recovery is phase-aware. The exact transaction `feature_id` and projection
 `current_feature` remain authoritative after selection is consumed, followed

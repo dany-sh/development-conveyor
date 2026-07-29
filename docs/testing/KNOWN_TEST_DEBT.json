@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "source": {
+    "kind": "prepared_parent_baseline",
+    "artifact": "/private/tmp/m1-029-base.jQRS70/feature-full.out",
+    "artifact_sha256": "dbdac38970df795ca6c409876829138280f110e1bfe24de09cb3979811fbcffe",
+    "tests_run": 723,
+    "duration_seconds": 669.248,
+    "failures": 21,
+    "errors": 16,
+    "summary": "FAILED (failures=21, errors=16)"
+  },
+  "policy": "Every record is unresolved. Semantic classification is diagnostic only and is not acceptance authority, a count waiver, a skip, or an expected failure.",
+  "expected_totals": {
+    "records": 37,
+    "failure": 21,
+    "error": 16
+  },
+  "isolated_reconstruction_observation": {
+    "artifact": "/private/tmp/m2-000-reconstruction.5D0AiB/release-validation.json",
+    "artifact_sha256": "bae8ce43a247e298958356674bd2294339d41734c181ddefc4dfd205c6200605",
+    "suite_output_sha256": "dcd146e77b1273b723d4cefad5e1e63a5ab2f6fe7dda814dbb5fd246eca49ad9",
+    "valid": false,
+    "complete_suite_invocations": 1,
+    "tests_run": 745,
+    "suite_duration_seconds": 660.921,
+    "total_duration_seconds": 661.102,
+    "failures": 20,
+    "errors": 17,
+    "disposition": "Rejected. The catalog remains the prepared-parent baseline and does not claim this isolated run restored 21 failures and 16 errors.",
+    "outcome_transition": {
+      "id": "test_post_transition_cycle_cache_repair.PostTransitionCycleCacheRepairTests.test_unrelated_branch_and_changed_hash_fail_closed",
+      "baseline_outcome": "failure",
+      "isolated_outcome": "error",
+      "reason": "The isolated reconstruction omits the excluded state/projects/interview-companion/evidence-ledger.jsonl controller fixture."
+    }
+  },
+  "records": [
+    {
+      "id": "test_cli_compatibility_repair.CompatibilityRepairTests.test_16_cycle_checkpoint_precedes_session_launch",
+      "outcome": "failure",
+      "classification": "obsolete_historical_contract",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_cli_compatibility_repair.CompatibilityRepairTests.test_22_integration_failure_uses_separate_session_and_precise_gate",
+      "outcome": "failure",
+      "classification": "obsolete_historical_contract",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_cycle_engine.CycleEngineTests.test_feature_execution_rejects_planning_control_plane_mutation_without_commit",
+      "outcome": "failure",
+      "classification": "obsolete_historical_contract",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_cycle_engine.CycleEngineTests.test_focused_session_repair_resumes_and_records_attempt",
+      "outcome": "failure",
+      "classification": "obsolete_historical_contract",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_cycle_engine.CycleEngineTests.test_queue_reconciliation_runs_before_feature_selection",
+      "outcome": "failure",
+      "classification": "obsolete_historical_contract",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_integration_gate_lifecycle.HistoricalIntegrationLifecycleTests.test_historical_gate_dry_run_persistence_status_and_idempotency",
+      "outcome": "failure",
+      "classification": "obsolete_historical_contract",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_reconciliation_contract.ReconciliationContractTests.test_11_successful_reconciliation_with_ready_work",
+      "outcome": "failure",
+      "classification": "obsolete_historical_contract",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_reconciliation_contract.ReconciliationContractTests.test_12_successful_reconciliation_with_no_ready_work",
+      "outcome": "failure",
+      "classification": "obsolete_historical_contract",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_reconciliation_contract.ReconciliationContractTests.test_13_milestone_complete_result",
+      "outcome": "failure",
+      "classification": "obsolete_historical_contract",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_reconciliation_contract.ReconciliationContractTests.test_14_legitimately_blocked_result",
+      "outcome": "failure",
+      "classification": "obsolete_historical_contract",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_reconciliation_contract.ReconciliationContractTests.test_16_session_process_failure_releases_launch_lock",
+      "outcome": "failure",
+      "classification": "obsolete_historical_contract",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_reconciliation_contract.ReconciliationContractTests.test_18_idempotent_retry_after_reconciliation_failure",
+      "outcome": "failure",
+      "classification": "obsolete_historical_contract",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.ContractTests.test_feature_prompt_excludes_legacy_preflights_incompatible_with_kernel_lease",
+      "outcome": "failure",
+      "classification": "obsolete_historical_contract",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_human_decision_resolution.HumanDecisionResolutionTests.test_20_controller_registration_has_pinned_legacy_gate",
+      "outcome": "error",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_post_integration_finalization.PostIntegrationFinalizationTests.test_29_finalized_cycle_allows_later_planning_only_milestone_commit",
+      "outcome": "failure",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_post_transition_cycle_cache_repair.PostTransitionCycleCacheRepairTests.test_exact_f097_transition_dry_run_and_apply",
+      "outcome": "error",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_post_transition_cycle_cache_repair.PostTransitionCycleCacheRepairTests.test_unrelated_branch_and_changed_hash_fail_closed",
+      "outcome": "failure",
+      "permitted_candidate_outcomes": [
+        "failure",
+        "error"
+      ],
+      "rationale": "Environment-sensitive generated controller state dependency: the authenticated release worktree intentionally lacks the excluded evidence-ledger fixture.",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_startup_reconciliation.StartupReconciliationTests.test_one_feature_mode_stops_with_second_feature_still_ready",
+      "outcome": "error",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_startup_reconciliation.StartupReconciliationTests.test_real_run_persists_repair_before_feature_launch",
+      "outcome": "failure",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.ContractTests.test_every_adapter_routes_every_non_success_classification_to_terminal_state",
+      "outcome": "error",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_cli_resume_routes_clean_and_exact_dirty_interruptions_through_planner[mode=clean]",
+      "outcome": "failure",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_cli_resume_routes_clean_and_exact_dirty_interruptions_through_planner[mode=dirty]",
+      "outcome": "failure",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_cli_resume_routes_clean_and_exact_dirty_interruptions_through_planner[mode=validated]",
+      "outcome": "failure",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_cli_resume_routes_clean_and_exact_dirty_interruptions_through_planner[mode=failure]",
+      "outcome": "failure",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_actual_every_workflow_boundary_matrix_is_recovered",
+      "outcome": "error",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_actual_kernel_integrates_once",
+      "outcome": "error",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_actual_kernel_interruption_after_commit",
+      "outcome": "error",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_actual_twenty_cycle_milestone_has_no_duplicate_or_prohibited_operation",
+      "outcome": "error",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_bridge_terminal_evidence_spoof_is_terminalized_as_failure",
+      "outcome": "error",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_consistency_checker_valid_recoverable_corrupt_and_unsafe",
+      "outcome": "error",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_integration_after_commit_recovery_preserves_exact_accepted_commit",
+      "outcome": "error",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_interruption_rebuilds_exact_projection_and_cache_evidence",
+      "outcome": "error",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_terminal_completion_evidence_cannot_override_canonical_fields",
+      "outcome": "error",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_terminal_materialization_replays_once_until_acknowledged",
+      "outcome": "error",
+      "classification": "schema_or_fixture_drift",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_phase_bridge_terminalizes_exit_zero_human_and_nonzero_retryable[classification=HUMAN_DECISION_REQUIRED]",
+      "outcome": "error",
+      "classification": "intentional_negative_scenario_with_broken_setup",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_phase_bridge_terminalizes_exit_zero_human_and_nonzero_retryable[classification=RETRYABLE_PLANNING_FAILURE]",
+      "outcome": "error",
+      "classification": "intentional_negative_scenario_with_broken_setup",
+      "status": "unresolved"
+    },
+    {
+      "id": "test_transactional_kernel.MigrationAndSimulatorTests.test_real_case_manager_dry_run_projection",
+      "outcome": "failure",
+      "classification": "environment_or_application_dependency",
+      "status": "unresolved"
+    }
+  ]
+}

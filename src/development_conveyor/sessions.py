@@ -18,13 +18,14 @@ from .compatibility import (
     check_compatibility,
     resolve_model_selection,
 )
-from .errors import SessionError
+from .errors import ConveyorError, SessionError
 from .warning_evidence import WarningEvidenceError, normalize_warning_evidence
 from .redaction import redact_text
 from .registry import Project
 from .repository import RepositoryInspector
 from .queue import FeatureQueue
 from .validation import SafetyPolicy
+from .validation_tiers import adapter_command_tuples
 from .contracts import TERMINAL_ENVELOPE_MARKER, extract_terminal_envelope
 from .context_pack import ContextReadError, build_context_pack
 from .capability_policy import (
@@ -681,25 +682,19 @@ def parse_integration_terminal_result(
 
 
 def _configured_required_commands(project: Project) -> tuple[tuple[str, ...], ...]:
-    """Load only the adapter's verified command arrays; absent adapters configure none."""
+    """Load milestone commands; legacy adapters retain their flat command set."""
 
     path = project.repository / project.validation_source
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
         return ()
-    commands = document.get("commands") if isinstance(document, dict) else None
-    if not isinstance(commands, dict):
+    if not isinstance(document, dict):
         return ()
-    configured: list[tuple[str, ...]] = []
-    for group in ("build", "test", "lint", "package", "validate"):
-        values = commands.get(group, [])
-        if not isinstance(values, list):
-            continue
-        for value in values:
-            if isinstance(value, list) and value and all(isinstance(part, str) and part for part in value):
-                configured.append(tuple(value))
-    return tuple(configured)
+    try:
+        return adapter_command_tuples(document, "milestone")
+    except ConveyorError as exc:
+        raise SessionError(str(exc)) from exc
 
 
 def _runtime_integration_record(project: Project) -> dict[str, Any] | None:

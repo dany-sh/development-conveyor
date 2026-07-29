@@ -96,3 +96,43 @@ Existing focused cycle, recovery, integration-finalization, execution-plan,
 and consistency tests remain authoritative for the reused route internals.
 
 The final blocker closure also directly covers exact accepted-commit recovery after integration finalization (`test_integration_after_commit_recovery_preserves_exact_accepted_commit`), canonical ledger/cache routing after real fixture migration (`test_post_migration_real_fixtures_route_only_fresh_kernel_actions`), non-repeating legacy terminal replay (`LedgerTests.test_legacy_terminal_replay_does_not_repeat_mutation`), and projection-aware resume compatibility (`CycleEngineTests.test_complete_one_feature_cycle_integrates_exactly_one_commit`, `SyntheticIntegrationTests.test_resume_after_verified_integration_does_not_repeat_feature`).
+
+## M2-000 tiered validation
+
+The focused validation-tier module proves complete tier selection, fail-closed
+partial configuration, caller-level legacy fallback in cycle execution,
+recovery, sessions, retained finalization, and integration, affected/spec test
+selection, six fixed invariants, conditional one-observation-per-ref
+comparison, release-only discovery and repeats, explicit SafetyPolicy
+invocation/prohibition, and authoritative tiered milestone command evidence in
+the synthetic integration runtime record.
+
+Release debt tests require exact unique record identities and exact observed
+outcomes. Any missing, unexpected, duplicate, invalid, or outcome-mismatched
+record fails reconciliation. The catalog must contain 37 unresolved identities
+with 21 `failure` and 16 `error` outcomes; no record is waived, skipped,
+expected, or accepted.
+
+Parser coverage uses real unittest verbose and summary shapes, including
+parenthesized subtests with single-quoted, double-quoted, and multiple
+parameters. Canonical identities append the summary method to its module/class
+container, normalize parenthesized parameters to the catalog bracket form,
+preserve accepted bracket forms, and fail closed on unparseable headings or
+duplicate normalized identities. When verbose and summary forms coexist,
+partial identity maps and outcome disagreements fail closed. Persisted
+output-tail coverage proves
+credential categories and absolute user-data paths are redacted while the raw
+output hash and raw debt extraction remain unchanged.
+
+Deterministic catalog coverage proves 37 unique prepared-parent records with
+21 failures and 16 errors. A separate synthetic candidate proves exactly the
+documented excluded-fixture identity transitions from failure to error,
+producing 20 failures and 17 errors with zero added, missing, or duplicate
+identities. Semantic classifications remain diagnostic only.
+
+Release-artifact coverage remains inside the existing output-tail test method,
+so discovered test count does not increase. Short synthetic children prove
+unique execution IDs and paths, `O_EXCL` collision refusal without overwrite,
+mode-`0600` stdout/stderr/metadata, raw per-stream hashes, prelaunch metadata,
+and parser-failure metadata plus raw-file survival. No complete discovery is
+used by this coverage.
