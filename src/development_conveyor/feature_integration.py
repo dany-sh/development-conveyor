@@ -95,10 +95,12 @@ def integrate_feature(
         accepted_commit=accepted_commit,
     )
     if acceptance_result is not None:
+        structured_metadata = acceptance_result.get("acceptance_metadata") or {}
         checks = {
-            "transaction": acceptance_result.get("transaction_id")
+            "transaction": structured_metadata.get("transaction_id")
             == acceptance["transaction_id"],
-            "commit": acceptance_result.get("accepted_commit") == accepted_commit,
+            "commit": acceptance_result.get("accepted_implementation_commit")
+            == accepted_commit,
             "feature": acceptance_result.get("feature_id") == feature_id,
         }
         if not all(checks.values()):
