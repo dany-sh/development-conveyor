@@ -868,6 +868,35 @@
         "tests_run": 0,
         "non_reusable": true
       }
+    },
+    {
+      "id": "M2-002R",
+      "title": "Thin Feature Delivery Orchestrator",
+      "status": "review",
+      "priority": "P1",
+      "milestone": "M2",
+      "dependencies": [
+        "M2-001"
+      ],
+      "spec": "docs/features/M2-002R-thin-feature-delivery.md",
+      "acceptance_criteria": [
+        "One deliver-feature command invokes validation, acceptance, and integration exactly once in order",
+        "Integration consumes exact ledger authority and uses the configured distinct milestone worktree",
+        "Advanced targets return reconciliation_required without automatic Git reconciliation",
+        "Ordinary delivery invokes zero complete suites and zero release validation"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m2-002r-thin-feature-delivery",
+      "integration_base_commit": "fd7d4b077e125bd05fb3fcb859c548ff4c0ef3ff",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": []
     }
   ]
 }

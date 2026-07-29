@@ -349,3 +349,17 @@ at the next safe cycle boundary. Clearing the flag starts no work.
 ## Decisions
 
 See `docs/adr/0001-append-only-phase-evidence.md`.
+
+## Thin feature delivery
+
+`deliver-feature` is a sequential adapter over three independently owned
+authorities: registered feature validation, ledger-backed acceptance, and
+deterministic milestone integration. It passes immutable structured results
+between phases and stops after the first failure.
+
+`integrate-feature` authenticates acceptance from the candidate-worktree
+evidence ledger, but resolves and mutates only the separately configured
+milestone worktree. Its kernel-backed integration transaction has target-path
+lease authority and records completed integration evidence separately; the
+immutable executor remains the only implementation and metadata Git mutator.
+Queue state is a projection and is not acceptance authority.

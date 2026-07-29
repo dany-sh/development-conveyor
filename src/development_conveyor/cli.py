@@ -28,6 +28,9 @@ from .retained_feature_repair import (
     RetainedFeatureValidationRepair,
 )
 from .acceptance import accept_feature, inspect_acceptance_candidate
+from .feature_delivery import deliver_feature
+from .feature_integration import integrate_feature
+from .feature_validation import validate_feature_candidate
 from .execution_profiles import PROFILE_NAMES
 from .feature_scoping import FeatureScoper
 from .feature_decisions import FeatureDecisionResolver
@@ -90,6 +93,8 @@ def _parser() -> argparse.ArgumentParser:
     validate_feature.add_argument("--base")
     validate_feature.add_argument("--spec")
     validate_feature.add_argument("--test", action="append", default=[])
+    validate_feature.add_argument("--project")
+    validate_feature.add_argument("--feature")
     validate_milestone = subparsers.add_parser(
         "validate-milestone",
         help="run the feature gate plus broader controller and integration checks",
@@ -341,6 +346,18 @@ def _parser() -> argparse.ArgumentParser:
         help="execute one immutable controller-owned milestone integration plan",
     )
     execute_integration.add_argument("--plan", required=True)
+    integrate = subparsers.add_parser(
+        "integrate-feature",
+        help="integrate one exact ledger-accepted feature into its configured target",
+    )
+    integrate.add_argument("--project", required=True)
+    integrate.add_argument("--feature", required=True)
+    deliver = subparsers.add_parser(
+        "deliver-feature",
+        help="sequentially validate, accept, and integrate one feature",
+    )
+    deliver.add_argument("--project", required=True)
+    deliver.add_argument("--feature", required=True)
     scope = subparsers.add_parser(
         "scope-features",
         help="author and validate one bounded planning-only feature set from an explicit brief",
@@ -500,7 +517,13 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
     controller_root = discover_root(
         Path.cwd() if validation_command and root is None else root
     )
-    if args.command in {"validate-feature", "validate-milestone", "validate-release"}:
+    if (
+        args.command in {"validate-feature", "validate-milestone", "validate-release"}
+        and not (
+            args.command == "validate-feature"
+            and getattr(args, "project", None) is not None
+        )
+    ):
         return run_repository_validation(
             controller_root,
             tier=args.command.removeprefix("validate-"),
@@ -513,6 +536,26 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
         )
     configuration = load_configuration(controller_root)
     registry = ProjectRegistry(configuration)
+    if args.command == "validate-feature":
+        if not args.feature:
+            raise ConveyorError("--feature is required with --project")
+        return validate_feature_candidate(
+            controller_root=controller_root,
+            project=registry.get(args.project),
+            feature_id=args.feature,
+        )
+    if args.command == "integrate-feature":
+        return integrate_feature(
+            controller_root=controller_root,
+            project=registry.get(args.project),
+            feature_id=args.feature,
+        )
+    if args.command == "deliver-feature":
+        return deliver_feature(
+            controller_root=controller_root,
+            project=registry.get(args.project),
+            feature_id=args.feature,
+        )
     if args.command == "stop-autopilot":
         return request_stop(
             configuration,
