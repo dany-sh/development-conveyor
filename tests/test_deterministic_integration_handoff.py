@@ -39,6 +39,153 @@ class DeterministicIntegrationHandoffTests(unittest.TestCase):
             git(repository, "status", "--porcelain=v1", "-uall"),
         )
 
+    def _transition_fixture(
+        self,
+        root: Path,
+        *,
+        status: str = "review",
+        queued_commit: str | None = None,
+        queued_branch: str | None = None,
+    ):
+        repository, project = synthetic_repository(root, feature_status=status)
+        queue_path = repository / project.queue_location
+        if queued_commit is not None or queued_branch is not None:
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            queue["features"][0]["accepted_commit"] = queued_commit
+            queue["features"][0]["branch"] = queued_branch
+            write_json(queue_path, queue)
+            git(repository, "add", project.queue_location)
+            git(repository, "commit", "-m", "test: conflicting queue projection")
+        milestone_base = git(repository, "rev-parse", "HEAD")
+        feature_branch = "codex/f001-ledger-accepted"
+        git(repository, "switch", "-c", feature_branch)
+        (repository / "app.txt").write_text(
+            "baseline\nledger accepted\n", encoding="utf-8"
+        )
+        git(repository, "add", "app.txt")
+        git(repository, "commit", "-m", "F001: ledger accepted")
+        accepted_commit = git(repository, "rev-parse", "HEAD")
+        accepted_tree = git(repository, "rev-parse", "HEAD^{tree}")
+        git(repository, "switch", project.milestone_branch)
+        plan = {
+            "feature_id": "F001",
+            "milestone_id": "M0",
+            "milestone_branch": project.milestone_branch,
+            "queue_path": project.queue_location,
+            "metadata_paths": [
+                "docs/CURRENT_STATUS.md",
+                project.queue_location,
+                "docs/RUN_LOG.md",
+            ],
+            "accepted_metadata_ref": (
+                "ledger:acceptance-transaction:" + "a" * 64
+            ),
+            "feature_branch": feature_branch,
+            "pre_integration_head": milestone_base,
+            "accepted_commit": accepted_commit,
+            "created_at": "2026-07-29T21:00:00Z",
+        }
+        authority = {
+            "completed_acceptance_transaction": True,
+            "transaction_id": "acceptance-transaction",
+            "metadata_fingerprint": "a" * 64,
+            "feature_id": "F001",
+            "milestone_base": milestone_base,
+            "implementation_commit": accepted_commit,
+            "implementation_tree": accepted_tree,
+            "feature_branch": feature_branch,
+            "acceptance_tier": "feature",
+            "tier_evidence_fingerprint": "b" * 64,
+            "implementation_ref_unchanged": True,
+            "integration_target_preflight_passed": True,
+        }
+        return repository, project, plan, authority
+
+    def test_ledger_backed_acceptance_transitions_review_to_integrating(self):
+        for status in ("review", "accepted", "integration_pending", "integrating"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                repository, project, plan, authority = self._transition_fixture(
+                    Path(temporary), status=status
+                )
+
+                executor_module._mark_integrating(
+                    repository,
+                    plan,
+                    ledger_transition_authority=authority,
+                )
+
+                queue = json.loads(
+                    (repository / project.queue_location).read_text(encoding="utf-8")
+                )
+                feature = queue["features"][0]
+                self.assertEqual("integrating", feature["status"])
+                self.assertEqual(plan["accepted_commit"], feature["accepted_commit"])
+                self.assertEqual(plan["feature_branch"], feature["branch"])
+
+    def test_legacy_queue_backed_plan_still_rejects_review(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, project, plan, _ = self._transition_fixture(
+                Path(temporary), status="review"
+            )
+
+            with self.assertRaisesRegex(
+                IntegrationPlanError,
+                "accepted feature cannot transition to integrating",
+            ):
+                executor_module._mark_integrating(repository, plan)
+
+            queue = json.loads(
+                (repository / project.queue_location).read_text(encoding="utf-8")
+            )
+            self.assertEqual("review", queue["features"][0]["status"])
+
+    def test_ledger_transition_mismatched_authority_fails_closed(self):
+        cases = {
+            "transaction_id": "different-transaction",
+            "implementation_commit": "c" * 40,
+            "implementation_tree": "d" * 40,
+        }
+        for field, value in cases.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                repository, _, plan, authority = self._transition_fixture(
+                    Path(temporary), status="review"
+                )
+                authority[field] = value
+
+                with self.assertRaisesRegex(
+                    IntegrationPlanError,
+                    "ledger integration transition authority failed",
+                ):
+                    executor_module._mark_integrating(
+                        repository,
+                        plan,
+                        ledger_transition_authority=authority,
+                    )
+
+    def test_ledger_transition_terminal_or_conflicting_queue_state_is_rejected(self):
+        cases = [
+            {"status": status}
+            for status in ("integrated", "completed", "cancelled", "rejected", "blocked")
+        ]
+        cases.extend(
+            [
+                {"status": "review", "queued_commit": "e" * 40},
+                {"status": "review", "queued_branch": "codex/different-feature"},
+            ]
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                repository, _, plan, authority = self._transition_fixture(
+                    Path(temporary), **case
+                )
+
+                with self.assertRaises(IntegrationPlanError):
+                    executor_module._mark_integrating(
+                        repository,
+                        plan,
+                        ledger_transition_authority=authority,
+                    )
+
     def test_exact_plan_bypasses_live_ready_queue_and_adopts_one_controller_lease(self):
         with tempfile.TemporaryDirectory() as temporary:
             (

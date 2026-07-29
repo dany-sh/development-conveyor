@@ -295,6 +295,7 @@ def inspect_two_refs(
         == milestone_branch,
     }
     accepted_metadata_ref: str
+    ledger_transition_authority: dict[str, Any] | None = None
     if acceptance_metadata is None:
         parents = _git_output(
             root, "show", "-s", "--format=%P", accepted_commit
@@ -351,6 +352,10 @@ def inspect_two_refs(
                 "accepted implementation history must be linear"
             )
         metadata_fingerprint = acceptance_metadata.get("metadata_fingerprint")
+        completion_verified = (
+            acceptance_metadata.get("completed_acceptance_transaction") is True
+        )
+        milestone_base = acceptance_metadata.get("milestone_base")
         checks.update(
             {
                 "metadata_surface": acceptance_metadata.get("surface")
@@ -385,17 +390,49 @@ def inspect_two_refs(
                     {
                         key: value
                         for key, value in acceptance_metadata.items()
-                        if key != "metadata_fingerprint"
+                        if key
+                        not in {
+                            "metadata_fingerprint",
+                            "completed_acceptance_transaction",
+                            "milestone_base",
+                        }
                     }
                 ),
             }
         )
+        if completion_verified:
+            checks["metadata_milestone_base"] = (
+                milestone_base == pre_integration_head
+            )
         accepted_metadata_ref = (
             "ledger:"
             + str(acceptance_metadata.get("transaction_id") or "")
             + ":"
             + str(metadata_fingerprint or "")
         )
+        if completion_verified:
+            ledger_transition_authority = {
+                "completed_acceptance_transaction": True,
+                "transaction_id": acceptance_metadata.get("transaction_id"),
+                "metadata_fingerprint": metadata_fingerprint,
+                "feature_id": acceptance_metadata.get("feature_id"),
+                "milestone_base": milestone_base,
+                "implementation_commit": acceptance_metadata.get(
+                    "implementation_commit"
+                ),
+                "implementation_tree": acceptance_metadata.get(
+                    "implementation_tree"
+                ),
+                "feature_branch": acceptance_metadata.get("feature_branch"),
+                "acceptance_tier": acceptance_metadata.get("acceptance_tier"),
+                "tier_evidence_fingerprint": acceptance_metadata.get(
+                    "tier_evidence_fingerprint"
+                ),
+                "implementation_ref_unchanged": acceptance_metadata.get(
+                    "implementation_ref_unchanged"
+                ),
+                "integration_target_preflight_passed": True,
+            }
     failed = [key for key, passed in checks.items() if not passed]
     if failed:
         raise IntegrationPlanError(
@@ -490,6 +527,7 @@ def inspect_two_refs(
         "metadata_paths": _metadata_paths(accepted_adapter, queue_path),
         "dependencies": list(dependencies),
         "project_id": controller_project_id,
+        "ledger_transition_authority": ledger_transition_authority,
     }
 
 
@@ -856,6 +894,28 @@ def acceptance_metadata_from_ledger(
         )
     event = matches[0]
     payload = event["payload"]
+    finalized = [
+        candidate
+        for candidate in events
+        if candidate.get("transaction_id") == event["transaction_id"]
+        and candidate.get("workflow_type") == "feature_acceptance"
+        and candidate.get("event_type") == "CommitFinalized"
+    ]
+    if len(finalized) != 1:
+        raise IntegrationPlanError(
+            "completed ledger acceptance must contain one finalized implementation"
+        )
+    finalized_payload = finalized[0].get("payload") or {}
+    if (
+        finalized_payload.get("commit") != accepted_commit
+        or finalized_payload.get("tree")
+        != payload.get("accepted_implementation_tree")
+        or not isinstance(finalized_payload.get("parent"), str)
+        or not finalized_payload["parent"]
+    ):
+        raise IntegrationPlanError(
+            "completed ledger acceptance finalized identity is inconsistent"
+        )
     value = {
         "surface": payload["acceptance_metadata_surface"],
         "transaction_id": event["transaction_id"],
@@ -874,6 +934,8 @@ def acceptance_metadata_from_ledger(
         "accepted_changed_paths": payload.get("accepted_changed_paths"),
     }
     value["metadata_fingerprint"] = fingerprint(value)
+    value["completed_acceptance_transaction"] = True
+    value["milestone_base"] = finalized_payload["parent"]
     return value
 
 
@@ -1111,12 +1173,99 @@ def _append_run_log(path: Path, content: str) -> None:
     path.write_text(existing.rstrip() + "\n\n" + content.rstrip() + "\n", encoding="utf-8")
 
 
-def _mark_integrating(root: Path, plan: dict[str, Any]) -> str:
+def _validate_ledger_transition_authority(
+    root: Path,
+    plan: dict[str, Any],
+    feature: dict[str, Any],
+    authority: dict[str, Any],
+) -> None:
+    accepted_tree = _git_output(
+        root, "rev-parse", f"{plan['accepted_commit']}^{{tree}}"
+    )
+    transaction_id = authority.get("transaction_id")
+    metadata_fingerprint = authority.get("metadata_fingerprint")
+    checks = {
+        "completed_acceptance": authority.get(
+            "completed_acceptance_transaction"
+        )
+        is True,
+        "transaction": isinstance(transaction_id, str)
+        and isinstance(metadata_fingerprint, str)
+        and plan.get("accepted_metadata_ref")
+        == f"ledger:{transaction_id}:{metadata_fingerprint}",
+        "feature": authority.get("feature_id") == plan["feature_id"],
+        "milestone_base": authority.get("milestone_base")
+        == plan["pre_integration_head"],
+        "implementation_commit": authority.get("implementation_commit")
+        == plan["accepted_commit"],
+        "implementation_tree": authority.get("implementation_tree")
+        == accepted_tree,
+        "feature_branch": authority.get("feature_branch")
+        == plan["feature_branch"],
+        "acceptance_tier": authority.get("acceptance_tier")
+        in {"feature", "milestone", "release"},
+        "tier_evidence": isinstance(
+            authority.get("tier_evidence_fingerprint"), str
+        )
+        and bool(authority["tier_evidence_fingerprint"]),
+        "implementation_ref_unchanged": authority.get(
+            "implementation_ref_unchanged"
+        )
+        is True,
+        "integration_target": authority.get(
+            "integration_target_preflight_passed"
+        )
+        is True,
+        "queue_milestone": feature.get("milestone") == plan["milestone_id"],
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise IntegrationPlanError(
+            "ledger integration transition authority failed: "
+            + ", ".join(failed)
+        )
+
+
+def _mark_integrating(
+    root: Path,
+    plan: dict[str, Any],
+    *,
+    ledger_transition_authority: dict[str, Any] | None = None,
+) -> str:
     _ensure_metadata_files(root, plan)
     queue = _load_worktree_json(root, plan["queue_path"])
     feature = _one(queue, "features", plan["feature_id"])
-    if feature.get("status") not in {"accepted", "integration_pending", "integrating"}:
+    status = feature.get("status")
+    materialized = {"accepted", "integration_pending", "integrating"}
+    if ledger_transition_authority is None and status not in materialized:
         raise IntegrationPlanError("accepted feature cannot transition to integrating")
+    if ledger_transition_authority is not None:
+        _validate_ledger_transition_authority(
+            root, plan, feature, ledger_transition_authority
+        )
+        if status not in {*materialized, "review", "ready"}:
+            raise IntegrationPlanError(
+                "ledger-accepted feature has a conflicting queue status"
+            )
+        queued_commit = feature.get("accepted_commit")
+        if queued_commit not in {None, "SELF", plan["accepted_commit"]}:
+            raise IntegrationPlanError(
+                "ledger-accepted feature queue commit conflicts with authority"
+            )
+        queued_branch = feature.get("branch")
+        if queued_branch not in {None, plan["feature_branch"]}:
+            raise IntegrationPlanError(
+                "ledger-accepted feature queue branch conflicts with authority"
+            )
+        if feature.get("integration_status") in {
+            "passed",
+            "completed",
+            "cancelled",
+            "rejected",
+        }:
+            raise IntegrationPlanError(
+                "ledger-accepted feature queue integration state is terminal"
+            )
     feature.update(
         {
             "status": "integrating",
@@ -1493,7 +1642,13 @@ def execute_integration_plan(path: Path) -> dict[str, Any]:
         raise IntegrationPlanError(
             "cherry-picked feature patch differs from the accepted commit"
         )
-    integrating_commit = _mark_integrating(root, plan)
+    integrating_commit = _mark_integrating(
+        root,
+        plan,
+        ledger_transition_authority=evidence.get(
+            "ledger_transition_authority"
+        ),
+    )
     _write_runtime(
         root,
         plan,

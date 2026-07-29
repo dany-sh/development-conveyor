@@ -2581,3 +2581,39 @@ This log records model configuration and deterministic deployment evidence. It n
 - Validation boundary: tests, builds, validation tiers, release validation,
   application commands, and acceptance operations run `0`. Only bounded
   metadata parsing and `git diff --check` were performed.
+
+### Model execution — 2026-07-29T20:21:59+00:00
+
+- Agent role: `parent_repair_writer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `low`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `user_directed_m2_002a_ledger_transition_adapter`
+- Safety and autonomy contracts unchanged: `true`
+
+## 2026-07-29 — M2-002A ledger-backed integration transition adapter
+
+- Root cause: the deterministic integration renderer treated the queue as
+  acceptance authority for every plan and rejected a ledger-accepted candidate
+  whose queue projection remained `review` or `ready`.
+- Authority distinction: legacy commit/queue-backed plans retain the existing
+  materialized-state requirement. Ledger-backed plans receive a runtime-only
+  transition proof only after the executor reauthenticates the completed
+  acceptance transaction, exact transaction fingerprint, milestone base,
+  candidate commit and tree, feature ref, evidence tier and fingerprint,
+  unchanged implementation ref, lease, and target worktree.
+- Projection safety: only `review`, `ready`, `accepted`,
+  `integration_pending`, and `integrating` may render to `integrating`.
+  Terminal, cancelled, rejected, blocked, or conflicting commit/branch states
+  fail closed, and the existing queue renderer creates no acceptance event.
+- Focused validation: four test IDs passed in `2.765s`; the fresh
+  `probe_queue_authority.py` synthetic control passed one test in `0.237s`.
+  Changed-file compilation, `scripts/conveyor validate-config`, and
+  `git diff --check` passed.
+- Invocation boundary: complete-suite invocations `0`; release-validation
+  invocations `0`; milestone validation, baseline equivalence, application
+  tests, recovery, and bootstrap behavior were not invoked.
+- Direct review: one bounded review completed with no unresolved Critical,
+  High, or Medium finding. The review tightened the proof handoff to require
+  the exact ledger transaction and acceptance-metadata fingerprint.

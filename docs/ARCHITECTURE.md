@@ -295,6 +295,17 @@ Fresh exact milestone integration uses a repository-owned deterministic executor
 
 `scripts/conveyor execute-integration-plan --plan <absolute-plan-path>` is the explicit compatibility boundary. The executor never selects from the live queue, acquires a lease, binds a model session, or releases the controller lease. It validates the plan fingerprint, unchanged controller ledger, common-Git exclusion, exact live milestone ref, immutable accepted-ref metadata, dependency ancestry, accepted direct-child topology, commit audit, and exact lease owner/process/start snapshot before application mutation. It may then switch to the milestone branch, cherry-pick only the planned commit, preserve a real conflict, record integrating metadata, run the accepted adapter's configured command arrays, write ignored identity-bound runtime evidence, and create final metadata evidence. Its machine result is revalidated by the kernel before terminal ledger events; only the controller releases the lease. Successful milestone completion projects directly to `milestone_gate`, while remaining ready work projects to `feature_ready`. A model may be considered only after a deterministic semantic conflict, ambiguous evidence, or another configured human gate.
 
+The integrating queue transition distinguishes legacy queue-backed acceptance
+from completed ledger acceptance. Legacy plans still require an already
+materialized `accepted`, `integration_pending`, or `integrating` queue state.
+After the executor independently reauthenticates one completed acceptance
+transaction, its milestone base, candidate commit and tree, feature ref,
+evidence tier and fingerprint, unchanged implementation ref, lease, and target
+worktree, `review` or `ready` may transition to `integrating`; at that boundary
+the queue is a projection rather than acceptance authority. Missing features,
+terminal or unrelated blocked states, and conflicting queued commits or
+branches remain fail-closed.
+
 After a successful deterministic integration reaches its terminal milestone
 HEAD, the kernel completes the ledger transaction, releases the integration
 writer lease, persists the final projection, and then atomically finalizes the
