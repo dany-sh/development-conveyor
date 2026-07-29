@@ -2552,3 +2552,32 @@ This log records model configuration and deterministic deployment evidence. It n
   feature-branch precedence overlap in one synthetic integration test. The
   repair is confined to that discovery boundary; complete-suite invocations
   remain `0` and release-validation invocations remain `0`.
+
+### Model execution — 2026-07-29T09:30:27-07:00
+
+- Agent role: `parent_bootstrap_integrator`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `low`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `user_directed_m2_001_bootstrap_integration`
+- Safety and autonomy contracts unchanged: `true`
+
+## 2026-07-29 — M2-001 bootstrap integration
+
+- Acceptance authority: completed ledger transaction
+  `54c8de75-be07-5af2-a192-6e2d669bbefe` binds M2-001 candidate
+  `1413d37ca57ba03c16e358802d5db2fe883fcc52`, tree
+  `61e17ddc532828dddcff147de4edd2c71eebd8f0`, and integration base
+  `598f06837b89221fe37add2b7db5132f63acbb43`.
+- Integration: branch `codex/m2-validation-simplification-integration`
+  fast-forwarded from the exact prior head to the accepted candidate without a
+  merge commit. The accepted feature branch did not move.
+- Bootstrap reason: the pre-M2-001 dispatcher required queue-materialized
+  acceptance and could not consume the completed ledger-only acceptance. This
+  operator-authorized path is one-time and non-reusable.
+- Metadata: M2-001 is integrated/completed; the queue, catalog, current status,
+  specification, and this run log are the only post-candidate changes.
+- Validation boundary: tests, builds, validation tiers, release validation,
+  application commands, and acceptance operations run `0`. Only bounded
+  metadata parsing and `git diff --check` were performed.

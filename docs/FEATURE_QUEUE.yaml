@@ -21,7 +21,8 @@
       "base_commit": "abf511f7381cc9042958691485966e055070ac4a",
       "integration_branch": "codex/m2-validation-simplification-integration",
       "integrated_features": [
-        "M2-000"
+        "M2-000",
+        "M2-001"
       ],
       "last_validated_commit": "abf511f7381cc9042958691485966e055070ac4a",
       "human_gate": true
@@ -827,7 +828,7 @@
     {
       "id": "M2-001",
       "title": "Collapse Acceptance Ceremony",
-      "status": "review",
+      "status": "integrated",
       "priority": "P1",
       "milestone": "M2",
       "dependencies": [
@@ -850,11 +851,23 @@
       },
       "branch": "codex/m2-001-collapse-acceptance-ceremony-reconciled",
       "integration_base_commit": "598f06837b89221fe37add2b7db5132f63acbb43",
-      "accepted_commit": null,
-      "integrated_commit": null,
-      "integration_status": "pending",
+      "accepted_commit": "1413d37ca57ba03c16e358802d5db2fe883fcc52",
+      "accepted_implementation_tree": "61e17ddc532828dddcff147de4edd2c71eebd8f0",
+      "integrated_commit": "1413d37ca57ba03c16e358802d5db2fe883fcc52",
+      "integration_status": "completed",
       "integration_fix_commits": [],
-      "implementation_status": "Completed"
+      "implementation_status": "Completed",
+      "updated_at": "2026-07-29T09:30:27-07:00",
+      "integration_evidence": {
+        "mode": "one_time_operator_bootstrap",
+        "accepted_candidate": "1413d37ca57ba03c16e358802d5db2fe883fcc52",
+        "accepted_tree": "61e17ddc532828dddcff147de4edd2c71eebd8f0",
+        "acceptance_transaction": "54c8de75-be07-5af2-a192-6e2d669bbefe",
+        "target_prior_head": "598f06837b89221fe37add2b7db5132f63acbb43",
+        "reason": "The pre-M2-001 dispatcher required queue-materialized acceptance and could not consume the completed ledger-only acceptance.",
+        "tests_run": 0,
+        "non_reusable": true
+      }
     }
   ]
 }

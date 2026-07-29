@@ -28,4 +28,4 @@
 | M1-028 | Complete queue browsing scopes | integrated | M1 | `docs/features/M1-028-complete-queue-browsing-scopes.md` |
 | M1-029 | Generic retained repair recovery | ready | M1 | `docs/features/M1-029-generic-retained-repair-recovery.md` |
 | M2-000 | Conveyor simplification and validation reduction | integrated | M2 | `docs/features/M2-000-conveyor-simplification.md` |
-| M2-001 | Collapse Acceptance Ceremony | review | M2 | `docs/features/M2-001-collapse-acceptance-ceremony.md` |
+| M2-001 | Collapse Acceptance Ceremony | integrated | M2 | `docs/features/M2-001-collapse-acceptance-ceremony.md` |

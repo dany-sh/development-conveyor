@@ -2,13 +2,25 @@
 
 ## Status
 
-- Factory status: Review — implementation and bounded feature evidence complete;
-  milestone integration pending
+- Factory status: Integrated — accepted implementation is in the M2 integration
+  ancestry; bootstrap integration ran zero tests
 - Planning base:
   `598f06837b89221fe37add2b7db5132f63acbb43`
 - Proposed feature branch:
   `codex/m2-001-collapse-acceptance-ceremony-reconciled`
-- Branch state: implementation candidate; leave unintegrated
+- Branch state: accepted implementation remains immutable at
+  `1413d37ca57ba03c16e358802d5db2fe883fcc52`, tree
+  `61e17ddc532828dddcff147de4edd2c71eebd8f0`
+
+### Integration record
+
+- Acceptance transaction: `54c8de75-be07-5af2-a192-6e2d669bbefe`
+- Prior integration head: `598f06837b89221fe37add2b7db5132f63acbb43`
+- Integration method: fast-forward only, followed by a separate metadata commit
+- Tests run during integration: `0`
+- One-time bootstrap reason: the pre-M2-001 dispatcher required
+  queue-materialized acceptance and could not consume the completed ledger-only
+  acceptance. This exception is non-reusable.
 
 ## Objective
 

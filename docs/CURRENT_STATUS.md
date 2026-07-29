@@ -4,8 +4,8 @@ Last updated: 2026-07-29
 
 ## Factory position
 
-- Active feature: M2-001 — Collapse Acceptance Ceremony (implementation
-  complete; candidate review passed; milestone integration pending)
+- Active feature: none. M2-001 — Collapse Acceptance Ceremony is integrated;
+  M2-002 was not started.
 - Acceptance interface: `scripts/conveyor accept-feature` is the sole supported
   deterministic entry point. It leaves the implementation branch at the exact
   candidate commit/tree and records acceptance authority in the controller
@@ -15,8 +15,16 @@ Last updated: 2026-07-29
   validations. Release inventory and reparsing remain candidate-bound.
 - Dependency behavior: integration resolves completed dependencies
   cumulatively across all milestones.
-- Next action: integrate the M2-001 candidate through the normal milestone
-  integration workflow under separate authority.
+- Integration result: the M2 branch fast-forwarded from
+  `598f06837b89221fe37add2b7db5132f63acbb43` to accepted candidate
+  `1413d37ca57ba03c16e358802d5db2fe883fcc52`, tree
+  `61e17ddc532828dddcff147de4edd2c71eebd8f0`; acceptance transaction
+  `54c8de75-be07-5af2-a192-6e2d669bbefe` remains the acceptance authority.
+- Bootstrap boundary: no tests were run. This one-time, non-reusable path was
+  required because the pre-M2-001 dispatcher required queue-materialized
+  acceptance and could not consume the completed ledger-only acceptance.
+- Next action: review the integrated M2 head; do not start M2-002 without
+  separate authority.
 
 ## Integrated M2-000 baseline
 
