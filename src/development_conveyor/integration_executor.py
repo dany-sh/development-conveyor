@@ -243,6 +243,7 @@ def inspect_two_refs(
     milestone_branch: str,
     pre_integration_head: str,
     queue_path: str,
+    acceptance_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate the immutable accepted ref and live milestone ref without writes."""
 
@@ -255,12 +256,6 @@ def inspect_two_refs(
         raise IntegrationPlanError("live milestone ref does not match the planned starting HEAD")
     if inspector.rev_parse(feature_branch, check=False) != accepted_commit:
         raise IntegrationPlanError("feature branch HEAD does not match the accepted commit")
-    parents = _git_output(root, "show", "-s", "--format=%P", accepted_commit).split()
-    if parents != [pre_integration_head]:
-        raise IntegrationPlanError(
-            "accepted commit is not the exact permitted single child of the milestone HEAD"
-        )
-
     accepted_queue, accepted_queue_bytes = _json_at(root, accepted_commit, queue_path)
     accepted_adapter, _ = _json_at(root, accepted_commit, ".factory/project.yaml")
     accepted_adapter_project_id = _adapter_project_id(
@@ -292,29 +287,115 @@ def inspect_two_refs(
     accepted_feature = _one(accepted_queue, "features", feature_id)
     accepted_milestone = _one(accepted_queue, "milestones", milestone_id)
     live_milestone = _one(live_queue, "milestones", milestone_id)
-    checks = {
+    checks: dict[str, bool] = {
         "accepted_feature_milestone": accepted_feature.get("milestone") == milestone_id,
-        "accepted_implementation_completed": str(
-            accepted_feature.get("implementation_status", "")
-        ).strip().lower()
-        == "completed",
-        "accepted_status": accepted_feature.get("status") == "integration_pending",
-        "accepted_integration_pending": accepted_feature.get("integration_status") == "pending",
-        "accepted_feature_branch": accepted_feature.get("branch") == feature_branch,
-        "accepted_integration_base": accepted_feature.get("integration_base_commit")
-        == pre_integration_head,
-        "accepted_commit_identity": accepted_feature.get("accepted_commit")
-        in {"SELF", accepted_commit},
         "accepted_milestone_branch": accepted_milestone.get("integration_branch")
         == milestone_branch,
         "live_milestone_branch": live_milestone.get("integration_branch")
         == milestone_branch,
     }
-    acceptance = accepted_feature.get("acceptance")
-    checks["acceptance_flags"] = isinstance(acceptance, dict) and all(
-        acceptance.get(key) is True
-        for key in ("tests_passed", "review_passed", "documentation_current")
-    )
+    accepted_metadata_ref: str
+    if acceptance_metadata is None:
+        parents = _git_output(
+            root, "show", "-s", "--format=%P", accepted_commit
+        ).split()
+        if parents != [pre_integration_head]:
+            raise IntegrationPlanError(
+                "legacy accepted commit is not the exact permitted single child "
+                "of the milestone HEAD"
+            )
+        checks.update(
+            {
+                "accepted_implementation_completed": str(
+                    accepted_feature.get("implementation_status", "")
+                ).strip().lower()
+                == "completed",
+                "accepted_status": accepted_feature.get("status")
+                == "integration_pending",
+                "accepted_integration_pending": accepted_feature.get(
+                    "integration_status"
+                )
+                == "pending",
+                "accepted_feature_branch": accepted_feature.get("branch")
+                == feature_branch,
+                "accepted_integration_base": accepted_feature.get(
+                    "integration_base_commit"
+                )
+                == pre_integration_head,
+                "accepted_commit_identity": accepted_feature.get("accepted_commit")
+                in {"SELF", accepted_commit},
+            }
+        )
+        acceptance = accepted_feature.get("acceptance")
+        checks["acceptance_flags"] = isinstance(acceptance, dict) and all(
+            acceptance.get(key) is True
+            for key in (
+                "tests_passed",
+                "review_passed",
+                "documentation_current",
+            )
+        )
+        accepted_metadata_ref = accepted_commit
+    else:
+        if not inspector.is_ancestor(pre_integration_head, accepted_commit):
+            raise IntegrationPlanError(
+                "accepted implementation does not descend from the milestone HEAD"
+            )
+        if _git_output(
+            root,
+            "rev-list",
+            "--merges",
+            f"{pre_integration_head}..{accepted_commit}",
+        ):
+            raise IntegrationPlanError(
+                "accepted implementation history must be linear"
+            )
+        metadata_fingerprint = acceptance_metadata.get("metadata_fingerprint")
+        checks.update(
+            {
+                "metadata_surface": acceptance_metadata.get("surface")
+                == "controller_evidence_ledger",
+                "metadata_feature": acceptance_metadata.get("feature_id")
+                == feature_id,
+                "metadata_commit": acceptance_metadata.get(
+                    "implementation_commit"
+                )
+                == accepted_commit,
+                "metadata_tree": acceptance_metadata.get("implementation_tree")
+                == inspector.rev_parse(f"{accepted_commit}^{{tree}}", check=False),
+                "metadata_ref": acceptance_metadata.get("feature_branch")
+                == feature_branch,
+                "metadata_ref_unchanged": acceptance_metadata.get(
+                    "implementation_ref_unchanged"
+                )
+                is True,
+                "metadata_integration_pending": acceptance_metadata.get(
+                    "integration_status"
+                )
+                == "pending",
+                "metadata_tier": acceptance_metadata.get("acceptance_tier")
+                in {"feature", "milestone", "release"},
+                "metadata_evidence": isinstance(
+                    acceptance_metadata.get("tier_evidence_fingerprint"), str
+                )
+                and bool(acceptance_metadata["tier_evidence_fingerprint"]),
+                "metadata_fingerprint": isinstance(metadata_fingerprint, str)
+                and metadata_fingerprint
+                == fingerprint(
+                    {
+                        key: value
+                        for key, value in acceptance_metadata.items()
+                        if key != "metadata_fingerprint"
+                    }
+                ),
+            }
+        )
+        accepted_metadata_ref = (
+            "ledger:"
+            + str(acceptance_metadata.get("transaction_id") or "")
+            + ":"
+            + str(metadata_fingerprint or "")
+        )
     failed = [key for key, passed in checks.items() if not passed]
     if failed:
         raise IntegrationPlanError(
@@ -326,9 +407,20 @@ def inspect_two_refs(
         for item in live_queue.get("features", [])
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
-    integrated_ids = live_milestone.get("integrated_features", [])
-    if not isinstance(integrated_ids, list):
-        raise IntegrationPlanError("live milestone integrated_features must be an array")
+    integrated_ids: set[str] = set()
+    for milestone in live_queue.get("milestones", []):
+        values = (
+            milestone.get("integrated_features")
+            if isinstance(milestone, dict)
+            else None
+        )
+        if not isinstance(values, list) or not all(
+            isinstance(value, str) and value for value in values
+        ):
+            raise IntegrationPlanError(
+                "live milestone integrated_features must be ID arrays"
+            )
+        integrated_ids.update(values)
     dependencies = accepted_feature.get("dependencies", [])
     if not isinstance(dependencies, list) or not all(
         isinstance(item, str) and item for item in dependencies
@@ -357,17 +449,35 @@ def inspect_two_refs(
             line
             for line in _git_output(
                 root,
-                "diff-tree",
-                "--no-commit-id",
-                "--name-only",
-                "-r",
-                accepted_commit,
+                *(
+                    (
+                        "diff",
+                        "--name-only",
+                        pre_integration_head,
+                        accepted_commit,
+                        "--",
+                    )
+                    if acceptance_metadata is not None
+                    else (
+                        "diff-tree",
+                        "--no-commit-id",
+                        "--name-only",
+                        "-r",
+                        accepted_commit,
+                    )
+                ),
             ).splitlines()
             if line
         )
     )
     if not changed_paths:
         raise IntegrationPlanError("accepted commit has no changed paths")
+    if acceptance_metadata is not None and acceptance_metadata.get(
+        "accepted_changed_paths"
+    ) != list(changed_paths):
+        raise IntegrationPlanError(
+            "controller acceptance metadata changed paths disagree"
+        )
     return {
         "repository_identity": identity["repository_id"],
         "repository_path_fingerprint": identity["path_fingerprint"],
@@ -375,6 +485,7 @@ def inspect_two_refs(
         "adapter_project_id": live_adapter_project_id,
         "accepted_queue_fingerprint": _sha256(accepted_queue_bytes),
         "accepted_changed_paths": list(changed_paths),
+        "accepted_metadata_ref": accepted_metadata_ref,
         "validation_commands": _commands_from_adapter(accepted_adapter),
         "metadata_paths": _metadata_paths(accepted_adapter, queue_path),
         "dependencies": list(dependencies),
@@ -433,7 +544,7 @@ def build_integration_plan(
         "feature_id": feature_id,
         "feature_branch": feature_branch,
         "accepted_commit": accepted_commit,
-        "accepted_metadata_ref": accepted_commit,
+        "accepted_metadata_ref": evidence["accepted_metadata_ref"],
         "accepted_queue_fingerprint": evidence["accepted_queue_fingerprint"],
         "accepted_changed_paths": evidence["accepted_changed_paths"],
         "milestone_id": milestone_id,
@@ -506,8 +617,16 @@ def validate_plan_document(plan: dict[str, Any]) -> None:
             raise IntegrationPlanError(f"integration plan {field} must be a non-empty string")
     if type(plan.get("ledger_sequence")) is not int or plan["ledger_sequence"] < 0:
         raise IntegrationPlanError("integration plan ledger_sequence must be non-negative")
-    if plan["accepted_metadata_ref"] != plan["accepted_commit"]:
-        raise IntegrationPlanError("accepted metadata ref must be the immutable accepted commit")
+    if not (
+        plan["accepted_metadata_ref"] == plan["accepted_commit"]
+        or re.fullmatch(
+            r"ledger:[A-Za-z0-9][A-Za-z0-9._:-]{0,255}:[0-9a-f]{64}",
+            plan["accepted_metadata_ref"],
+        )
+    ):
+        raise IntegrationPlanError(
+            "accepted metadata ref must be the accepted commit or controller ledger authority"
+        )
     if plan["plan_fingerprint"] != _plan_fingerprint(plan):
         raise IntegrationPlanError("integration plan fingerprint is invalid")
     if not isinstance(plan.get("accepted_changed_paths"), list) or not plan[
@@ -702,6 +821,62 @@ def _verify_ledger_binding(plan: dict[str, Any]) -> None:
         raise IntegrationPlanError("controller ledger fingerprint changed after plan creation")
 
 
+def acceptance_metadata_from_ledger(
+    *,
+    ledger_path: Path,
+    feature_id: str,
+    accepted_commit: str,
+    ledger_sequence: int | None = None,
+) -> dict[str, Any]:
+    """Resolve one controller-owned acceptance authority from immutable events."""
+
+    try:
+        lines = ledger_path.read_bytes().splitlines()
+        if ledger_sequence is not None:
+            lines = lines[:ledger_sequence]
+        events = [json.loads(line) for line in lines]
+    except (OSError, json.JSONDecodeError) as exc:
+        raise IntegrationPlanError(
+            "controller acceptance ledger is unreadable or malformed"
+        ) from exc
+    matches = [
+        event
+        for event in events
+        if event.get("event_type") == "TransactionCompleted"
+        and event.get("workflow_type") == "feature_acceptance"
+        and (event.get("payload") or {}).get("feature_id") == feature_id
+        and (event.get("payload") or {}).get("accepted_feature_commit")
+        == accepted_commit
+        and (event.get("payload") or {}).get("acceptance_metadata_surface")
+        == "controller_evidence_ledger"
+    ]
+    if len(matches) != 1:
+        raise IntegrationPlanError(
+            "controller ledger must contain exactly one matching acceptance authority"
+        )
+    event = matches[0]
+    payload = event["payload"]
+    value = {
+        "surface": payload["acceptance_metadata_surface"],
+        "transaction_id": event["transaction_id"],
+        "ledger_sequence": event["sequence"],
+        "ledger_fingerprint": event["fingerprint"],
+        "feature_id": feature_id,
+        "implementation_commit": payload["accepted_feature_commit"],
+        "implementation_tree": payload.get("accepted_implementation_tree"),
+        "feature_branch": payload.get("implementation_ref"),
+        "implementation_ref_unchanged": payload.get(
+            "implementation_ref_unchanged"
+        ),
+        "integration_status": payload.get("integration_status"),
+        "acceptance_tier": payload.get("acceptance_tier"),
+        "tier_evidence_fingerprint": payload.get("tier_evidence_fingerprint"),
+        "accepted_changed_paths": payload.get("accepted_changed_paths"),
+    }
+    value["metadata_fingerprint"] = fingerprint(value)
+    return value
+
+
 def _audit_accepted_commit(root: Path, plan: dict[str, Any]) -> dict[str, Any]:
     adapter, _ = _json_at(
         root, plan["accepted_commit"], ".factory/project.yaml"
@@ -872,15 +1047,22 @@ def _git_mutation(
     check: bool = True,
     timeout: int = 1800,
 ) -> subprocess.CompletedProcess[str]:
+    range_pick = [
+        "cherry-pick",
+        "--no-commit",
+        f"{plan['pre_integration_head']}..{plan['accepted_commit']}",
+    ]
     allowed = [
         ["switch", plan["milestone_branch"]],
         ["cherry-pick", plan["accepted_commit"]],
+        range_pick,
     ]
     metadata = list(plan["metadata_paths"])
     subjects = {
         f"factory: mark {plan['feature_id']} integrating",
         f"factory: record {plan['feature_id']} integration passed",
         f"factory: record {plan['feature_id']} integration failed",
+        f"factory: integrate {plan['feature_id']} implementation",
     }
     if argv[:2] == ["add", "--"]:
         if argv[2:] != metadata:
@@ -1174,6 +1356,16 @@ def execute_integration_plan(path: Path) -> dict[str, Any]:
         lease.revalidate_adopted(plan["lease_identity"])
     except LockError as exc:
         raise IntegrationPlanError(str(exc)) from exc
+    acceptance_metadata = (
+        acceptance_metadata_from_ledger(
+            ledger_path=Path(plan["controller_ledger_path"]),
+            feature_id=plan["feature_id"],
+            accepted_commit=plan["accepted_commit"],
+            ledger_sequence=plan["ledger_sequence"],
+        )
+        if plan["accepted_metadata_ref"].startswith("ledger:")
+        else None
+    )
     evidence = inspect_two_refs(
         repository=root,
         controller_project_id=_controller_project_id(plan),
@@ -1184,6 +1376,7 @@ def execute_integration_plan(path: Path) -> dict[str, Any]:
         milestone_branch=plan["milestone_branch"],
         pre_integration_head=plan["pre_integration_head"],
         queue_path=plan["queue_path"],
+        acceptance_metadata=acceptance_metadata,
     )
     exact_checks = {
         "controller_project_id": evidence["controller_project_id"]
@@ -1192,6 +1385,8 @@ def execute_integration_plan(path: Path) -> dict[str, Any]:
         == plan["accepted_queue_fingerprint"],
         "accepted_changed_paths": evidence["accepted_changed_paths"]
         == plan["accepted_changed_paths"],
+        "accepted_metadata_ref": evidence["accepted_metadata_ref"]
+        == plan["accepted_metadata_ref"],
         "adapter_project_id": evidence["adapter_project_id"]
         == plan["adapter_project_id"],
         "validation_commands": evidence["validation_commands"]
@@ -1227,10 +1422,20 @@ def execute_integration_plan(path: Path) -> dict[str, Any]:
         lease.heartbeat_adopted(plan["lease_identity"])
     except LockError as exc:
         raise IntegrationPlanError(str(exc)) from exc
+    ledger_authority = plan["accepted_metadata_ref"].startswith("ledger:")
+    pick_argv = (
+        [
+            "cherry-pick",
+            "--no-commit",
+            f"{plan['pre_integration_head']}..{plan['accepted_commit']}",
+        ]
+        if ledger_authority
+        else ["cherry-pick", plan["accepted_commit"]]
+    )
     picked = _git_mutation(
         root,
         plan,
-        ["cherry-pick", plan["accepted_commit"]],
+        pick_argv,
         check=False,
     )
     if picked.returncode != 0:
@@ -1264,15 +1469,30 @@ def execute_integration_plan(path: Path) -> dict[str, Any]:
         result["runtime"] = _write_runtime(root, plan, "conflict", result)
         return result
 
+    if ledger_authority:
+        _git_mutation(
+            root,
+            plan,
+            ["commit", "-m", f"factory: integrate {plan['feature_id']} implementation"],
+        )
     resulting_feature_commit = _git_output(root, "rev-parse", "HEAD")
     if _git_output(root, "rev-parse", f"{resulting_feature_commit}^") != plan[
         "pre_integration_head"
     ]:
         raise IntegrationPlanError("cherry-picked feature commit is not a direct child of the plan start")
-    if inspector.patch_fingerprint(resulting_feature_commit) != inspector.patch_fingerprint(
-        plan["accepted_commit"]
-    ):
-        raise IntegrationPlanError("cherry-picked feature patch differs from the accepted commit")
+    if ledger_authority:
+        if _git_output(
+            root, "rev-parse", f"{resulting_feature_commit}^{{tree}}"
+        ) != _git_output(root, "rev-parse", f"{plan['accepted_commit']}^{{tree}}"):
+            raise IntegrationPlanError(
+                "integrated feature tree differs from the accepted implementation"
+            )
+    elif inspector.patch_fingerprint(
+        resulting_feature_commit
+    ) != inspector.patch_fingerprint(plan["accepted_commit"]):
+        raise IntegrationPlanError(
+            "cherry-picked feature patch differs from the accepted commit"
+        )
     integrating_commit = _mark_integrating(root, plan)
     _write_runtime(
         root,

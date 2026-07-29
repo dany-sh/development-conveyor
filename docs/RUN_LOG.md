@@ -2432,6 +2432,85 @@ This log records model configuration and deterministic deployment evidence. It n
   baseline equivalence, application commands, complete-suite discovery, and
   M2-001 work were not run.
 
+## 2026-07-29 — M2-001 collapsed acceptance implementation
+
+- Scope: one parent session, zero child sessions, no Feature Factory, no
+  application-repository mutation, and no milestone integration.
+- Entry point: `scripts/conveyor accept-feature` and the shared
+  `accept_feature` API authenticate the exact implementation commit/tree,
+  feature and milestone refs, application identity, changed paths, typed
+  lease, and candidate-bound tier evidence.
+- Authority: successful acceptance leaves the implementation ref unchanged and
+  records acceptance metadata in the controller evidence ledger. Integration
+  binds the ledger transaction/fingerprint separately from the implementation
+  commit, accepts the exact linear prepared-base-to-candidate tree, and retains
+  compare-and-swap and two-ref checks.
+- Validation tiers: ordinary acceptance requires feature-tier command authority
+  and rejects any nonzero complete-suite or release-validation invocation
+  count. Release inventory is candidate-derived, and preserved raw release
+  artifacts can be reparsed with zero suite invocations.
+- Dependencies: integration aggregates `integrated_features` from all
+  milestones and still requires completed feature metadata plus integrated
+  commit ancestry.
+- Obsolete path: normal cycle acceptance no longer materializes five repository
+  metadata files or creates a sibling/direct-child accepted commit. The
+  `recover-accepted-commit` CLI was removed; historical immutable accepted
+  commits remain readable for compatibility only.
+- Focused evidence: eight M2-001 test IDs were invoked once; seven passed and
+  one fixture setup failed before exercising behavior. The corrected fixture
+  ID then passed, for nine focused test-ID invocations total.
+- Final feature gate:
+  `scripts/conveyor validate-feature --spec
+  docs/features/M2-001-collapse-acceptance-ceremony.md` passed 36 tests and
+  compilation, configuration, and diff checks in 14.313 seconds.
+- Invocation boundary: complete-suite invocations `0`; release-validation
+  invocations `0`; milestone/release/baseline/application validation was not
+  run.
+
+### Model execution — 2026-07-29T06:18:32+00:00
+
+- Agent role: `parent_feature_implementation`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `user_directed_m2_001_parent_session`
+- Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-29T07:29:08+00:00
+
+- Agent role: `parent_feature_repair`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `low`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `linked_worktree_acceptance_lease_repair`
+- Safety and autonomy contracts unchanged: `true`
+
+## 2026-07-29 — M2-001 linked-worktree acceptance repair
+
+- Root cause: the shared writer lease was stored under the primary worktree,
+  and acquisition derived `repository_path` from that lock location even when
+  the registered invoking repository was a linked worktree. Kernel
+  revalidation correctly compared the lease against the linked worktree and
+  rejected the mismatch before acceptance.
+- Repair: repository identity remains common-directory-derived and stable
+  across worktrees. Lease acquisition now records the separately supplied
+  invoking worktree and verifies its path fingerprint; kernel release binds
+  the exact lease ID, run, worktree, branch, head, feature, milestone, session,
+  and mutation policy.
+- Recovery: `accept-feature --recover-incomplete-transaction` can
+  idempotently supersede only one exact start-only acceptance with no live
+  lease and no repository mutation. It preserves the original event and
+  records the linked-worktree lease-identity failure before admitting the
+  deterministic retry.
+- Focused validation: four authorized test IDs passed in 4.248 seconds,
+  covering linked-worktree acceptance, primary-worktree compatibility,
+  foreign-worktree release rejection, and start-only recovery plus retry.
+- Invocation boundary: complete-suite invocations `0`; release-validation
+  invocations `0`; milestone/release/baseline/application validation was not
+  run.
+
 ### Model execution — 2026-07-29T08:11:52+00:00
 
 - Agent role: `controller-repair-writer`

@@ -2,12 +2,13 @@
 
 ## Status
 
-- Factory status: Proposed; implementation not started
+- Factory status: Review — implementation and bounded feature evidence complete;
+  milestone integration pending
 - Planning base:
   `902a1d25c0cb083010780fb3c673bfa1ec3f300c`
 - Proposed feature branch:
   `codex/m2-001-collapse-acceptance-ceremony`
-- Branch state: planned only; do not create or check out in this preparation
+- Branch state: implementation candidate; leave unintegrated
 
 ## Objective
 
@@ -86,7 +87,6 @@ acceptance metadata from implementation history.
 
 ## Non-goals
 
-- No M2-001 implementation in this preparation.
 - No M2-000 metadata rewrite.
 - No changes to Interview Companion or Case Manager.
 - No changes to the parked `4f6aa96` branch.

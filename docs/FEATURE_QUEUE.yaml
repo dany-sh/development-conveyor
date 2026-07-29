@@ -823,6 +823,38 @@
         "tests_run": 0,
         "non_reusable": true
       }
+    },
+    {
+      "id": "M2-001",
+      "title": "Collapse Acceptance Ceremony",
+      "status": "review",
+      "priority": "P1",
+      "milestone": "M2",
+      "dependencies": [
+        "M2-000"
+      ],
+      "spec": "docs/features/M2-001-collapse-acceptance-ceremony.md",
+      "acceptance_criteria": [
+        "One deterministic acceptance entry point consumes candidate-bound tier evidence and preserves the exact implementation ref and tree",
+        "Controller acceptance metadata is ledger-owned and separate from implementation history",
+        "Ordinary feature acceptance invokes zero complete suites and zero release validation",
+        "Release inventory and preserved raw evidence bind the exact candidate and support offline reparsing",
+        "Dependencies resolve cumulatively across completed milestones",
+        "Lease, ref, tree, compare-and-swap, changed-path, prohibited-action, and application-isolation protections fail closed"
+      ],
+      "requires_human_decision": false,
+      "execution_policy": {
+        "profile": "generic_or_architectural",
+        "parent_sessions": 1,
+        "child_sessions": 0
+      },
+      "branch": "codex/m2-001-collapse-acceptance-ceremony",
+      "integration_base_commit": "902a1d25c0cb083010780fb3c673bfa1ec3f300c",
+      "accepted_commit": null,
+      "integrated_commit": null,
+      "integration_status": "pending",
+      "integration_fix_commits": [],
+      "implementation_status": "Completed"
     }
   ]
 }

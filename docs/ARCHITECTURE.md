@@ -68,6 +68,21 @@ ownership record is released.
 
 `ExecutionPlan` is the only writable-routing contract once a valid ledger and matching projection cache exist. It binds the ledger and projection fingerprints, workflow, feature and accepted commit, starting branch and commit, feature branch, milestone branch, session recovery eligibility, typed lease, and success state. A fresh unprepared feature begins from the milestone checkout. Once a completed deterministic preparation transaction authenticates the sole ready feature, its clean terminal snapshot becomes the feature-execution boundary: the exact feature branch and feature starting commit are required even when the feature and milestone refs resolve to the same object. The milestone branch remains the later integration destination and cannot substitute for the feature checkout. Planner-facing status is derived from that plan; legacy cycles remain diagnostics only. Immediately before a writable transaction, the controller reloads the projection under its launch reservation, validates the exact queue and Git identities, and passes the planned branch and HEAD into `WorkflowKernel`. The kernel preacquires the typed writer lease, recaptures the repository and target ref while leased, and appends `TransactionStarted` only if the leased snapshot still matches the plan. Compatibility project and cycle state are fingerprint-bound, atomic caches and never override routing; prelaunch recovery refreshes their observed Git checkpoint from the preserved live feature checkout.
 
+Feature acceptance has one deterministic entry point:
+`scripts/conveyor accept-feature`. The accepted implementation ref remains
+exactly at the implementation commit and tree; acceptance creates no
+application metadata commit. Candidate-bound tier evidence, repository and
+application identity, changed paths, lease ownership, ref/tree identity, and
+the milestone base are authenticated before the controller appends acceptance
+metadata to its hash-chained evidence ledger. The ledger transaction and
+fingerprint are the separate metadata authority consumed by integration.
+Ordinary acceptance requires feature-tier evidence with zero complete-suite
+and zero release-validation invocations. Release evidence derives inventory
+from the exact candidate and preserves raw execution artifacts for offline
+reparsing. Dependency checks aggregate `integrated_features` across every
+completed milestone and still require each integrated commit in milestone
+history.
+
 Application feature mutation uses one bounded parent Codex session by default. The selected feature identity is rechecked at queue selection, kernel creation, `SessionRequest` construction, prompt rendering, terminal parsing, semantic validation, reporting, and projection. A zero child-session budget sets `agents.enabled=false`, disables both multi-agent feature variants, and runs a model-free prompt-input capability probe before fresh or resumed invocation. One child is permitted only by a validated cheaper-model, smaller-context, bounded-task, compact-output, and non-overlapping-ownership record; the launcher terminates on any collaboration call beyond the exact budget. Failure to prove the collaboration boundary blocks before model launch. The exact terminal JSON schema binds every execution identity and requires the actual launcher-observed session UUID, unchanged branch and HEAD, the exact live changed-path set, implementation evidence, and controller-owned acceptance acknowledgment.
 
 Conveyor sessions receive a second fail-closed capability preflight. The

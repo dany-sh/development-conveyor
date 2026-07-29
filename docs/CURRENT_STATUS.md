@@ -4,7 +4,24 @@ Last updated: 2026-07-29
 
 ## Factory position
 
-- Active feature: M2-000 — Conveyor simplification and validation reduction (integrated by one-time operator bootstrap)
+- Active feature: M2-001 — Collapse Acceptance Ceremony (implementation
+  complete; candidate review passed; milestone integration pending)
+- Acceptance interface: `scripts/conveyor accept-feature` is the sole supported
+  deterministic entry point. It leaves the implementation branch at the exact
+  candidate commit/tree and records acceptance authority in the controller
+  evidence ledger.
+- Validation boundary: ordinary feature acceptance consumes feature-tier
+  evidence directly and invokes zero complete suites and zero release
+  validations. Release inventory and reparsing remain candidate-bound.
+- Dependency behavior: integration resolves completed dependencies
+  cumulatively across all milestones.
+- Next action: integrate the M2-001 candidate through the normal milestone
+  integration workflow under separate authority.
+
+## Integrated M2-000 baseline
+
+- M2-000 status: Conveyor simplification and validation reduction was
+  integrated by one-time operator bootstrap.
 - Accepted implementation: `e9b9e9aca00352fbd0fa137511d342803d7951a4`;
   tree `90ba7e397b3ac43edd7279bbd1f9ec1ba538572c`.
 - Integration authority: exact implementation ref
@@ -24,8 +41,6 @@ Last updated: 2026-07-29
   `b7ac3641564c9827e426bc08b8cfe131917faa74` and is reachable from the target's
   prior head. The pre-M2 integrator failed because it checked only active-M2
   `integrated_features`.
-- Next action: human review of the integrated M2 milestone. M2-001 was not
-  started.
 
 ## Historical M2 reconstruction and review evidence
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -26,7 +27,7 @@ from .retained_feature_repair import (
     RetainedFeatureRepairRecovery,
     RetainedFeatureValidationRepair,
 )
-from .accepted_commit_recovery import AcceptedCommitRecovery
+from .acceptance import accept_feature, inspect_acceptance_candidate
 from .execution_profiles import PROFILE_NAMES
 from .feature_scoping import FeatureScoper
 from .feature_decisions import FeatureDecisionResolver
@@ -295,21 +296,32 @@ def _parser() -> argparse.ArgumentParser:
     mode = recover_feature_repair.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
-    recover_accepted = subparsers.add_parser(
-        "recover-accepted-commit",
+    accept = subparsers.add_parser(
+        "accept-feature",
         help=(
-            "reconstruct one exact direct-child accepted commit from a completed "
-            "candidate without launching a model"
+            "accept one exact immutable implementation using candidate-bound "
+            "tier evidence"
         ),
     )
-    recover_accepted.add_argument("--project", required=True)
-    recover_accepted.add_argument("--feature", required=True)
-    recover_accepted.add_argument("--candidate-commit", required=True)
-    recover_accepted.add_argument("--milestone-base", required=True)
-    recover_accepted.add_argument("--feature-branch", required=True)
-    recover_accepted.add_argument("--feature-transaction-id", required=True)
-    recover_accepted.add_argument("--acceptance-transaction-id", required=True)
-    mode = recover_accepted.add_mutually_exclusive_group(required=True)
+    accept.add_argument("--project", required=True)
+    accept.add_argument("--feature", required=True)
+    accept.add_argument("--implementation-commit", required=True)
+    accept.add_argument("--implementation-tree", required=True)
+    accept.add_argument("--milestone-base", required=True)
+    accept.add_argument("--feature-branch", required=True)
+    accept.add_argument("--evidence", required=True)
+    accept.add_argument(
+        "--tier", choices=("feature", "milestone", "release"), default="feature"
+    )
+    accept.add_argument("--run-id", required=True)
+    accept.add_argument(
+        "--recover-incomplete-transaction",
+        help=(
+            "supersede one exact start-only acceptance that failed before "
+            "repository mutation"
+        ),
+    )
+    mode = accept.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
     verify = subparsers.add_parser(
@@ -877,26 +889,49 @@ def execute(arguments: list[str] | None = None, *, root: Path | None = None) -> 
             "child_sessions_that_would_launch": 0,
         }
 
-    if args.command == "recover-accepted-commit":
-        recovery = AcceptedCommitRecovery(
-            controller_root=controller_root,
-            configuration=configuration.conveyor,
-            project=registry.get(args.project),
-        )
-        recovery_plan = recovery.inspect(
+    if args.command == "accept-feature":
+        evidence_path = Path(args.evidence).expanduser().resolve()
+        try:
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ConveyorError("acceptance evidence is unreadable or malformed") from exc
+        project = registry.get(args.project)
+        if args.apply:
+            return accept_feature(
+                controller_root=controller_root,
+                project=project,
+                feature_id=args.feature,
+                feature_branch=args.feature_branch,
+                milestone_base=args.milestone_base,
+                implementation_commit=args.implementation_commit,
+                implementation_tree=args.implementation_tree,
+                tier_evidence=evidence,
+                run_id=args.run_id,
+                required_tier=args.tier,
+                recover_incomplete_transaction=args.recover_incomplete_transaction,
+            )
+        candidate = inspect_acceptance_candidate(
+            project=project,
             feature_id=args.feature,
-            candidate_commit=args.candidate_commit,
-            milestone_base=args.milestone_base,
             feature_branch=args.feature_branch,
-            feature_transaction_id=args.feature_transaction_id,
-            acceptance_transaction_id=args.acceptance_transaction_id,
+            milestone_base=args.milestone_base,
+            implementation_commit=args.implementation_commit,
+            implementation_tree=args.implementation_tree,
+            tier_evidence=evidence,
+            required_tier=args.tier,
         )
-        return recovery.apply(recovery_plan) if args.apply else {
-            **recovery_plan,
-            "outcome": "recovery_ready",
+        return {
+            **candidate,
+            "outcome": "acceptance_ready",
             "application_repository_written": False,
             "model_sessions_launched": 0,
             "child_sessions_launched": 0,
+            "complete_suite_invocations": candidate["tier_evidence"][
+                "complete_suite_invocations"
+            ],
+            "release_validation_invocations": candidate["tier_evidence"][
+                "release_validation_invocations"
+            ],
         }
 
     if args.command == "run":

@@ -89,7 +89,7 @@
         "scripts/conveyor",
         "validate-feature",
         "--spec",
-        "docs/features/M2-000-conveyor-simplification.md"
+        "docs/features/M2-001-collapse-acceptance-ceremony.md"
       ]
     ],
     "milestone": [
@@ -97,7 +97,7 @@
         "scripts/conveyor",
         "validate-milestone",
         "--spec",
-        "docs/features/M2-000-conveyor-simplification.md"
+        "docs/features/M2-001-collapse-acceptance-ceremony.md"
       ]
     ],
     "release": [

@@ -481,18 +481,19 @@ class WorkflowKernel:
         record = self._preacquired_lease_record
         if record is None:
             record = self.lease.acquire(
-            lease_type=WORKFLOW_LEASE[transaction.workflow_type],
-            repository_identity=transaction.repository_identity,
-            repository_path_fingerprint=transaction.repository_path_fingerprint,
-            project_id=transaction.project_id,
-            transaction_id=transaction.transaction_id,
-            workflow_type=transaction.workflow_type,
-            milestone=transaction.milestone,
-            feature_id=transaction.feature_id,
-            starting_branch=transaction.starting_branch,
-            starting_head=transaction.starting_head,
-            run_id=transaction.run_id,
-            session_id=None,
+                lease_type=WORKFLOW_LEASE[transaction.workflow_type],
+                repository_identity=transaction.repository_identity,
+                repository_path_fingerprint=transaction.repository_path_fingerprint,
+                repository_path=self.project.repository,
+                project_id=transaction.project_id,
+                transaction_id=transaction.transaction_id,
+                workflow_type=transaction.workflow_type,
+                milestone=transaction.milestone,
+                feature_id=transaction.feature_id,
+                starting_branch=transaction.starting_branch,
+                starting_head=transaction.starting_head,
+                run_id=transaction.run_id,
+                session_id=None,
                 policy=transaction.allowed_mutation_policy,
             )
         else:
@@ -525,6 +526,7 @@ class WorkflowKernel:
             lease_type=WORKFLOW_LEASE[transaction.workflow_type],
             repository_identity=transaction.repository_identity,
             repository_path_fingerprint=transaction.repository_path_fingerprint,
+            repository_path=self.project.repository,
             project_id=transaction.project_id,
             transaction_id=transaction.transaction_id,
             workflow_type=transaction.workflow_type,
@@ -543,13 +545,28 @@ class WorkflowKernel:
         if self._preacquired_lease_record is None:
             return
         self._revalidate_lease()
+        self._release_owned_lease(transaction)
+        self._preacquired_lease_record = None
+
+    def _release_owned_lease(self, transaction: PhaseTransaction) -> None:
         self.lease.release(
             transaction_id=transaction.transaction_id,
             workflow_type=transaction.workflow_type,
             repository_identity=transaction.repository_identity,
             project_id=transaction.project_id,
+            repository_path_fingerprint=transaction.repository_path_fingerprint,
+            repository_path=self.project.repository,
+            lease_id=transaction.lease_identity,
+            milestone=transaction.milestone,
+            feature_id=transaction.feature_id,
+            starting_branch=transaction.starting_branch,
+            starting_head=transaction.starting_head,
+            run_id=transaction.run_id,
+            session_id=(
+                transaction.session_ids[-1] if transaction.session_ids else None
+            ),
+            policy=transaction.allowed_mutation_policy,
         )
-        self._preacquired_lease_record = None
 
     def capture_snapshot(self) -> dict[str, Any]:
         transaction = self._require()
@@ -1953,12 +1970,7 @@ class WorkflowKernel:
         self.interrupt("before_lease_release", transaction)
         if self.lease.read() is not None:
             self._revalidate_lease()
-            self.lease.release(
-                transaction_id=transaction.transaction_id,
-                workflow_type=transaction.workflow_type,
-                repository_identity=transaction.repository_identity,
-                project_id=transaction.project_id,
-            )
+            self._release_owned_lease(transaction)
             self.ledger.append(
                 event_type="LeaseReleased",
                 transaction_id=transaction.transaction_id,
@@ -2135,12 +2147,7 @@ class WorkflowKernel:
         self.interrupt("before_lease_release", transaction)
         if self.lease.read() is not None:
             self._revalidate_lease()
-            self.lease.release(
-                transaction_id=transaction.transaction_id,
-                workflow_type=transaction.workflow_type,
-                repository_identity=transaction.repository_identity,
-                project_id=transaction.project_id,
-            )
+            self._release_owned_lease(transaction)
             self.ledger.append(
                 event_type="LeaseReleased",
                 transaction_id=transaction.transaction_id,

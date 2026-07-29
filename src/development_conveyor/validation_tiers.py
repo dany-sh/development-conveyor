@@ -20,6 +20,7 @@ from typing import Any, Iterable
 from .errors import ConveyorError
 from .logging import atomic_write_json, utc_now
 from .redaction import redact_text, redact_value
+from .repository import RepositoryInspector
 from .validation import SafetyPolicy
 
 TIERS = ("feature", "milestone", "release")
@@ -1336,6 +1337,86 @@ def reconcile_release_artifacts(
     return result
 
 
+def reparse_release_artifacts(
+    root: Path,
+    *,
+    execution_metadata_path: Path,
+    raw_stdout_path: Path,
+    raw_stderr_path: Path,
+    implementation_commit: str,
+) -> dict[str, Any]:
+    """Reparse preserved candidate-bound raw output without launching a suite."""
+
+    root = root.resolve()
+    try:
+        execution = json.loads(execution_metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConveyorError("release execution metadata is unreadable") from exc
+    if not isinstance(execution, dict):
+        raise ConveyorError("release execution metadata must be an object")
+    if execution.get("completion_state") not in {
+        "child_completed",
+        "parser_failed",
+        "complete",
+    }:
+        raise ConveyorError("release suite did not complete before reparsing")
+    if type(execution.get("child_exit_code")) is not int:
+        raise ConveyorError("release execution metadata lacks a child exit code")
+    expected_stdout = root / str(execution.get("raw_stdout_path") or "")
+    expected_stderr = root / str(execution.get("raw_stderr_path") or "")
+    expected_metadata = root / str(execution.get("metadata_path") or "")
+    if (
+        raw_stdout_path.resolve() != expected_stdout.resolve()
+        or raw_stderr_path.resolve() != expected_stderr.resolve()
+        or execution_metadata_path.resolve() != expected_metadata.resolve()
+    ):
+        raise ConveyorError("release artifact paths do not match execution metadata")
+    stdout_bytes = raw_stdout_path.read_bytes()
+    stderr_bytes = raw_stderr_path.read_bytes()
+    if (
+        hashlib.sha256(stdout_bytes).hexdigest()
+        != execution.get("stdout_sha256")
+        or hashlib.sha256(stderr_bytes).hexdigest()
+        != execution.get("stderr_sha256")
+    ):
+        raise ConveyorError("release raw artifact hash does not match metadata")
+    if execution.get("provenance_valid") is not True or not _release_provenance_valid(
+        execution, repository=root
+    ):
+        raise ConveyorError("release execution provenance is invalid")
+    provenance = execution["starting_provenance"]
+    resolved = _git(root, "rev-parse", implementation_commit, check=False)
+    tree = _git(root, "rev-parse", f"{implementation_commit}^{{tree}}", check=False)
+    if (
+        resolved.returncode != 0
+        or tree.returncode != 0
+        or resolved.stdout.strip() != implementation_commit
+        or provenance.get("commit") != implementation_commit
+        or provenance.get("tree") != tree.stdout.strip()
+    ):
+        raise ConveyorError("release artifacts bind another implementation")
+    record = _output_record(
+        group=str(execution.get("group") or "release_complete_suite_reparse"),
+        argv=["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+        returncode=int(execution.get("child_exit_code")),
+        stdout=stdout_bytes.decode("utf-8", errors="replace"),
+        stderr=stderr_bytes.decode("utf-8", errors="replace"),
+        duration=0.0,
+    )
+    return {
+        "schema_version": 1,
+        "kind": "preserved_release_evidence_reparse",
+        "execution_id": execution.get("execution_id"),
+        "implementation": {
+            "commit": implementation_commit,
+            "tree": tree.stdout.strip(),
+        },
+        "record": record,
+        "suite_invocations": 0,
+        "raw_artifacts_reused": True,
+    }
+
+
 def run_repository_validation(
     root: Path,
     *,
@@ -1439,15 +1520,54 @@ def run_repository_validation(
         for record in records
         if isinstance(record.get("release_execution"), dict)
     ]
+    provenance = _repository_provenance(root)
+    try:
+        adapter = json.loads((root / ".factory/project.yaml").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConveyorError("factory adapter is unreadable after validation") from exc
+    project_id = (
+        (adapter.get("project") or {}).get("id")
+        if isinstance(adapter, dict)
+        else None
+    )
+    if not isinstance(project_id, str) or not project_id:
+        raise ConveyorError("factory adapter lacks project.id")
+    repository_identity = RepositoryInspector(root).identity()
+    derived_test_count = sum(
+        int(record.get("tests_run") or 0)
+        for record in counted_records
+        if str(record.get("group", "")).endswith("_tests")
+        or str(record.get("group", "")).startswith("release_complete_suite")
+        or record.get("group") == "milestone_ref_observation"
+    )
     return {
         "schema_version": 1,
         "tier": tier,
         "valid": valid,
+        "project_id": project_id,
+        "repository_identity": repository_identity["repository_id"],
+        "repository_path_fingerprint": repository_identity["path_fingerprint"],
+        "implementation": {
+            "commit": provenance["commit"],
+            "tree": provenance["tree"],
+        },
+        "test_inventory": {
+            "source": (
+                "exact_candidate_release_output"
+                if tier == "release"
+                else "exact_candidate_selected_tests"
+            ),
+            "implementation_commit": provenance["commit"],
+            "implementation_tree": provenance["tree"],
+            "test_count": derived_test_count,
+            "selected_test_ids": list(selected) if tier != "release" else [],
+        },
         "changed_paths": list(paths),
         "selected_tests": list(selected) if tier != "release" else [],
         "fixed_core_tests": list(FEATURE_CORE_TESTS),
         "feature_gate_included": tier in {"feature", "milestone"},
         "complete_suite_invocations": repeat if tier == "release" else 0,
+        "release_validation_invocations": 1 if tier == "release" else 0,
         "nondeterminism_investigation_requested": tier == "release" and repeat > 1,
         "comparison": comparison,
         "commands": records,
@@ -1468,13 +1588,7 @@ def run_repository_validation(
             else None
         ),
         "command_count": len(records),
-        "test_count": sum(
-            int(record.get("tests_run") or 0)
-            for record in counted_records
-            if str(record.get("group", "")).endswith("_tests")
-            or str(record.get("group", "")).startswith("release_complete_suite")
-            or record.get("group") == "milestone_ref_observation"
-        ),
+        "test_count": derived_test_count,
         "duration_seconds": round(
             sum(float(record.get("duration_seconds") or 0) for record in counted_records),
             3,

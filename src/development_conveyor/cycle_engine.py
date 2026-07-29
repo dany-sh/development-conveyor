@@ -107,6 +107,7 @@ from .execution_plan import (
     superseded_legacy_cycles,
 )
 from .integration_executor import (
+    acceptance_metadata_from_ledger,
     build_integration_plan,
     execute_integration_plan,
     inspect_integration_finalization_recovery,
@@ -134,10 +135,7 @@ from .validation_tiers import adapter_command_tuples
 from .cost_policy import build_run_plan
 from .context_pack import ContextReadError
 from .feature_branches import canonical_feature_branch
-from .accepted_commit import (
-    acceptance_metadata_paths,
-    materialize_acceptance_metadata,
-)
+from .acceptance import accept_feature, tier_evidence_from_records
 from .feature_prelaunch_recovery import FeaturePrelaunchRecovery
 from .integration_discovery import discover_integration_target
 
@@ -5450,27 +5448,6 @@ class CycleEngine:
                 cycle_path, state, feature_transaction.transaction_id, feature_completion, phase_ledger
             )
 
-            metadata_paths = acceptance_metadata_paths(project, selection.feature)
-            acceptance_adapter = FeatureAcceptanceAdapter(
-                allowed_paths=metadata_paths,
-                commit_subject=f"{selection.feature_id}: {selection.title}",
-                next_state="integration_ready",
-            )
-            acceptance_kernel = WorkflowKernel(
-                project=project, ledger=phase_ledger,
-                projection=ProjectionEngine(phase_ledger, phase_root / "projection-cache.json"),
-                lease=WorkflowWriterLease(inspector.writer_lock_path(
-                    self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
-                )),
-                interruption_hook=self._kernel_interruption,
-            )
-            phase_kernels.append((acceptance_kernel, acceptance_adapter))
-            acceptance_transaction = acceptance_kernel.begin(
-                workflow_type=WorkflowType.FEATURE_ACCEPTANCE,
-                milestone=project.active_milestone, feature_id=selection.feature_id,
-                run_id=run_id, policy=acceptance_adapter.policy,
-            )
-            acceptance_kernel.acquire_lease(); acceptance_kernel.capture_snapshot()
             feature_branch = str(
                 state.get("feature_branch") or inspector.current_branch or ""
             )
@@ -5478,37 +5455,36 @@ class CycleEngine:
             milestone_id = str(project.active_milestone or "")
             if not feature_branch or not milestone_branch or not milestone_id:
                 raise TransactionError(
-                    "accepted-commit finalization lacks exact feature and milestone refs"
+                    "feature acceptance lacks exact feature and milestone refs"
                 )
-            materialized_paths = materialize_acceptance_metadata(
+            candidate_tree = inspector.rev_parse(
+                f"{candidate}^{{tree}}", check=False
+            )
+            if not isinstance(candidate_tree, str):
+                raise TransactionError("feature acceptance lacks the candidate tree")
+            tier_evidence = tier_evidence_from_records(
+                project=project,
+                implementation_commit=candidate,
+                tier="feature",
+                commands=(
+                    record.to_dict() for record in feature_kernel.command_records
+                ),
+                valid=True,
+            )
+            acceptance_result = accept_feature(
+                controller_root=self.root,
                 project=project,
                 feature_id=selection.feature_id,
                 feature_branch=feature_branch,
                 milestone_base=feature_transaction.starting_head,
-                candidate_commit=candidate,
-                recovery=False,
+                implementation_commit=candidate,
+                implementation_tree=candidate_tree,
+                tier_evidence=tier_evidence,
+                run_id=run_id,
             )
-            if (
-                not materialized_paths
-                or not set(materialized_paths).issubset(metadata_paths)
-            ):
-                raise TransactionError(
-                    "accepted-feature metadata authorization changed during finalization"
-                )
-            finalization = acceptance_kernel.finalize_deterministic_accepted_commit(
-                candidate_commit=candidate,
-                milestone_id=milestone_id,
-                milestone_branch=milestone_branch,
-                milestone_base=feature_transaction.starting_head,
-                feature_branch=feature_branch,
-                metadata_paths=materialized_paths,
-                validation_evidence={
-                    "tests_passed": True,
-                    "review_passed": True,
-                    "documentation_current": True,
-                },
+            accepted = str(
+                acceptance_result["accepted_implementation_commit"]
             )
-            accepted = str(finalization["finalized_accepted_commit"])
             state["accepted_feature_commit"] = accepted
             state["candidate_implementation_commit"] = candidate
             self._advance_cycle(
@@ -5517,26 +5493,17 @@ class CycleEngine:
                 "integration_pending",
                 inspector,
                 "kernel_integration_pending",
-                kernel=acceptance_kernel,
             )
             self._advance_cycle(
                 cycle_path, state, "integration_ready", inspector,
-                "kernel_feature_acceptance", kernel=acceptance_kernel,
-            )
-            acceptance_completion = acceptance_kernel.complete(
-                classification="FEATURE_ACCEPTED",
-                evidence={
-                    "accepted_feature_commit": accepted,
-                    "candidate_implementation_commit": candidate,
-                    "authorized_metadata_paths": list(materialized_paths),
-                    "permitted_metadata_paths": list(metadata_paths),
-                    "implementation_tree_equivalent": True,
-                    "integration_status": "pending",
-                },
+                "kernel_feature_acceptance",
             )
             self._materialize_terminal_cycle_cache(
-                cycle_path, state, acceptance_transaction.transaction_id,
-                acceptance_completion, phase_ledger,
+                cycle_path,
+                state,
+                acceptance_result["acceptance_metadata"]["transaction_id"],
+                acceptance_result,
+                phase_ledger,
             )
 
             integration_context = self._validate_projected_dispatch(
@@ -8126,6 +8093,17 @@ class CycleEngine:
             repository_identity=identity["repository_id"],
             repository_path_fingerprint=identity["path_fingerprint"],
         )
+        try:
+            acceptance_metadata = acceptance_metadata_from_ledger(
+                ledger_path=ledger.path,
+                feature_id=feature_id,
+                accepted_commit=accepted,
+            )
+        except IntegrationPlanError:
+            # Historical accepted commits remain readable through their
+            # immutable in-commit metadata. New acceptance never creates that
+            # topology and therefore always resolves through the ledger.
+            acceptance_metadata = None
         lease = WorkflowWriterLease(inspector.writer_lock_path(
             self.configuration.conveyor["lock_policy"]["writer_lock_relative_path"]
         ))
@@ -8139,6 +8117,7 @@ class CycleEngine:
             milestone_branch=str(project.milestone_branch),
             pre_integration_head=str(executable.starting_commit),
             queue_path=project.queue_location,
+            acceptance_metadata=acceptance_metadata,
         )
         accepted_paths = tuple(two_ref["accepted_changed_paths"])
         authorized_paths = tuple(
@@ -8191,6 +8170,7 @@ class CycleEngine:
                 milestone_branch=str(project.milestone_branch),
                 pre_integration_head=str(executable.starting_commit),
                 queue_path=project.queue_location,
+                acceptance_metadata=acceptance_metadata,
             )
             reserved_identity_checks = {
                 "controller_project_id": reserved_two_ref.get("controller_project_id")

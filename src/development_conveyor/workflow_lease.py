@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import socket
 import stat
@@ -233,6 +234,7 @@ class WorkflowWriterLease:
         lease_type: LeaseType,
         repository_identity: str,
         repository_path_fingerprint: str,
+        repository_path: str | Path | None = None,
         project_id: str,
         transaction_id: str,
         workflow_type: WorkflowType,
@@ -249,6 +251,17 @@ class WorkflowWriterLease:
         self._reject_symlinked_target_or_ancestors()
         if self.path.exists() or self.path.is_symlink():
             raise LockError("repository writer lease already exists")
+        invoking_worktree = (
+            self._confinement_root.resolve()
+            if repository_path is None
+            else Path(repository_path).expanduser().resolve()
+        )
+        if (
+            repository_path is not None
+            and hashlib.sha256(str(invoking_worktree).encode()).hexdigest()
+            != repository_path_fingerprint
+        ):
+            raise LockError("writer lease worktree path fingerprint mismatch")
         stamp = utc_now()
         record = WorkflowLeaseRecord(
             schema_version=1,
@@ -256,7 +269,7 @@ class WorkflowWriterLease:
             lease_type=lease_type,
             repository_identity=repository_identity,
             repository_path_fingerprint=repository_path_fingerprint,
-            repository_path=str(self.path.parents[2].resolve()),
+            repository_path=str(invoking_worktree),
             project_id=project_id,
             controller_project_id=None,
             adapter_project_id=None,
@@ -503,12 +516,54 @@ class WorkflowWriterLease:
         self._write_existing(value)
         return WorkflowLeaseRecord.from_dict(value)
 
-    def release(self, *, transaction_id: str, workflow_type: WorkflowType, repository_identity: str, project_id: str) -> None:
+    def release(
+        self,
+        *,
+        transaction_id: str,
+        workflow_type: WorkflowType,
+        repository_identity: str,
+        project_id: str,
+        repository_path_fingerprint: str | None = None,
+        repository_path: str | Path | None = None,
+        lease_id: str | None = None,
+        milestone: str | None | object = _UNSET,
+        feature_id: str | None | object = _UNSET,
+        starting_branch: str | None = None,
+        starting_head: str | None = None,
+        run_id: str | None = None,
+        session_id: str | None | object = _UNSET,
+        policy: MutationPolicy | None = None,
+    ) -> None:
+        record = self.read()
+        if record is None:
+            raise LockError("writer lease is absent")
+        linked_worktree = (
+            Path(record.repository_path).resolve()
+            != self._confinement_root.resolve()
+        )
+        if linked_worktree and (
+            repository_path_fingerprint is None
+            or repository_path is None
+            or run_id is None
+        ):
+            raise LockError(
+                "linked-worktree lease release requires exact worktree and run identity"
+            )
         self.revalidate(
             transaction_id=transaction_id,
             workflow_type=workflow_type,
             repository_identity=repository_identity,
             project_id=project_id,
+            repository_path_fingerprint=repository_path_fingerprint,
+            repository_path=repository_path,
+            lease_id=lease_id,
+            milestone=milestone,
+            feature_id=feature_id,
+            starting_branch=starting_branch,
+            starting_head=starting_head,
+            run_id=run_id,
+            session_id=session_id,
+            policy=policy,
         )
         self.path.unlink()
 
