@@ -2379,3 +2379,24 @@ This log records model configuration and deterministic deployment evidence. It n
 - Metadata result: M2-000 is accepted with integration pending. No production
   code, tests, application repository, milestone integration, M2-001 work,
   push, publication, deployment, tag, or release was performed.
+
+## 2026-07-29 — M2-000 integration-topology normalization
+
+- Accepted implementation authority:
+  `codex/m2-000-accepted-implementation` points exactly to validated commit
+  `e9b9e9aca00352fbd0fa137511d342803d7951a4`, whose sole parent is
+  `abf511f7381cc9042958691485966e055070ac4a` and whose tree is
+  `90ba7e397b3ac43edd7279bbd1f9ec1ba538572c`.
+- Control authority: `codex/m2-000-integration-control` preserves the accepted
+  queue and provenance-bound release evidence in the permanent control
+  worktree. Bootstrap metadata commit
+  `0d640258836b3c2f73d2c3ee1975ebd65bab9bb6` remains immutable historical
+  acceptance evidence and is not application implementation.
+- Queue normalization changes only the M2-000 feature ref to the exact
+  implementation branch. Status remains accepted, accepted implementation
+  remains `e9b9e9aca00352fbd0fa137511d342803d7951a4`, and integration remains
+  pending.
+- Scope: metadata only. No production source, tests, application repository,
+  release validation, complete suite, milestone validation, integration,
+  M2-001 work, push, publication, deployment, tag, or release was performed
+  during normalization.

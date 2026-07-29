@@ -7,6 +7,9 @@ Last updated: 2026-07-29
 - Active feature: M2-000 — Conveyor simplification and validation reduction (accepted; milestone integration pending)
 - Accepted implementation: `e9b9e9aca00352fbd0fa137511d342803d7951a4`;
   tree `90ba7e397b3ac43edd7279bbd1f9ec1ba538572c`.
+- Integration authority: exact implementation ref
+  `codex/m2-000-accepted-implementation`; bootstrap metadata commit
+  `0d640258836b3c2f73d2c3ee1975ebd65bab9bb6` remains historical evidence.
 - Acceptance evidence: provenance-bound release execution
   `b4e80527738c4e498933e8fbeeee7693`, external invocation
   `8289d8335400407cb6100d9263740471`, 750 tests, and 37 exact debt
