@@ -848,8 +848,8 @@
         "parent_sessions": 1,
         "child_sessions": 0
       },
-      "branch": "codex/m2-001-collapse-acceptance-ceremony",
-      "integration_base_commit": "902a1d25c0cb083010780fb3c673bfa1ec3f300c",
+      "branch": "codex/m2-001-collapse-acceptance-ceremony-reconciled",
+      "integration_base_commit": "598f06837b89221fe37add2b7db5132f63acbb43",
       "accepted_commit": null,
       "integrated_commit": null,
       "integration_status": "pending",

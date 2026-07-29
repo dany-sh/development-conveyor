@@ -5,9 +5,9 @@
 - Factory status: Review — implementation and bounded feature evidence complete;
   milestone integration pending
 - Planning base:
-  `902a1d25c0cb083010780fb3c673bfa1ec3f300c`
+  `598f06837b89221fe37add2b7db5132f63acbb43`
 - Proposed feature branch:
-  `codex/m2-001-collapse-acceptance-ceremony`
+  `codex/m2-001-collapse-acceptance-ceremony-reconciled`
 - Branch state: implementation candidate; leave unintegrated
 
 ## Objective
@@ -71,8 +71,8 @@ acceptance metadata from implementation history.
 
 ## Branch plan
 
-1. Create `codex/m2-001-collapse-acceptance-ceremony` directly from
-   `902a1d25c0cb083010780fb3c673bfa1ec3f300c` only when implementation is
+1. Create `codex/m2-001-collapse-acceptance-ceremony-reconciled` directly from
+   `598f06837b89221fe37add2b7db5132f63acbb43` only when reconciliation is
    explicitly authorized.
 2. Before edits, verify the exact base, clean worktree, absent writer and
    integration leases, and unchanged accepted implementation ref.

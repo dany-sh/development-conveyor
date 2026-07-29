@@ -2520,3 +2520,35 @@ This log records model configuration and deterministic deployment evidence. It n
 - Event: `start`
 - Reason code: `m2_001_linked_worktree_integration_discovery`
 - Safety and autonomy contracts unchanged: `true`
+
+### Model execution — 2026-07-29T08:37:17+00:00
+
+- Agent role: `parent_reconciliation_writer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `medium`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `user_directed_m2_001_advanced_target_reconciliation`
+- Safety and autonomy contracts unchanged: `true`
+
+## 2026-07-29 — M2-001 advanced-target reconciliation
+
+- Base and target: the reconciled branch is based directly on advanced M2 head
+  `598f06837b89221fe37add2b7db5132f63acbb43`; the original M2-001 branch,
+  accepted implementation, tree, and acceptance ledger remain unchanged.
+- Replay: the M2-001 specification and implementation commits were replayed.
+  The only textual conflict was additive `docs/RUN_LOG.md` history; both the
+  M2-001 history and advanced linked-worktree discovery history were retained.
+- Semantic overlap: integration planning now prefers the exact feature branch
+  carried by a fresh controller acceptance transaction or an authenticated
+  recovery projection before consulting live milestone-branch queue bytes.
+  Linked-worktree target discovery and legacy two-ref recovery are therefore
+  both preserved.
+- Identity: the M2-001 queue and specification now bind the reconciled feature
+  branch and exact advanced integration base.
+- Focused validation: six requested behavior tests passed in 5.127 seconds.
+  Changed-file compilation, configuration validation, and diff checks passed.
+- Bounded correction: the first base-bound feature gate exposed the
+  feature-branch precedence overlap in one synthetic integration test. The
+  repair is confined to that discovery boundary; complete-suite invocations
+  remain `0` and release-validation invocations remain `0`.

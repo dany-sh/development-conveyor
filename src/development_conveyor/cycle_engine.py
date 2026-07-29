@@ -716,11 +716,51 @@ class CycleEngine:
             ), None)
             if feature_execution is not None:
                 authoritative_snapshot = feature_execution["starting_snapshot"]
-        feature_branch = None
+        feature_branch = (
+            projection.get("feature_branch")
+            if (
+                projection.get("allowed_next_action") == "milestone_integration"
+                and isinstance(projection.get("feature_branch"), str)
+            )
+            else None
+        )
+        if feature_branch is None and ledger_events:
+            accepted_commit = projection.get("accepted_feature_commit")
+            controller_acceptance = next(
+                (
+                    event
+                    for event in reversed(ledger_events)
+                    if event.get("event_type") == "TransactionCompleted"
+                    and event.get("workflow_type")
+                    == WorkflowType.FEATURE_ACCEPTANCE.value
+                    and (event.get("payload") or {}).get("feature_id")
+                    == feature_id
+                    and (event.get("payload") or {}).get(
+                        "accepted_feature_commit"
+                    )
+                    == accepted_commit
+                    and isinstance(
+                        (event.get("payload") or {}).get("implementation_ref"),
+                        str,
+                    )
+                ),
+                None,
+            )
+            if controller_acceptance is not None:
+                feature_branch = controller_acceptance["payload"][
+                    "implementation_ref"
+                ]
         try:
-            queue = FeatureQueue.from_location(project.repository, project.queue_location)
-            feature = queue.feature(str(feature_id)) if feature_id else None
-            feature_branch = self._expected_feature_branch(project, feature) if feature else None
+            if feature_branch is None:
+                queue = FeatureQueue.from_location(
+                    project.repository, project.queue_location
+                )
+                feature = queue.feature(str(feature_id)) if feature_id else None
+                feature_branch = (
+                    self._expected_feature_branch(project, feature)
+                    if feature
+                    else None
+                )
         except (QueueError, OSError):
             feature_branch = None
         if feature_branch is None and feature_id is not None:
