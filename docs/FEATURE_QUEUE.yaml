@@ -22,7 +22,8 @@
       "integration_branch": "codex/m2-validation-simplification-integration",
       "integrated_features": [
         "M2-000",
-        "M2-001"
+        "M2-001",
+        "M2-002R"
       ],
       "last_validated_commit": "abf511f7381cc9042958691485966e055070ac4a",
       "human_gate": true
@@ -872,7 +873,7 @@
     {
       "id": "M2-002R",
       "title": "Thin Feature Delivery Orchestrator",
-      "status": "review",
+      "status": "integrated",
       "priority": "P1",
       "milestone": "M2",
       "dependencies": [
@@ -893,10 +894,24 @@
       },
       "branch": "codex/m2-002r-thin-feature-delivery",
       "integration_base_commit": "fd7d4b077e125bd05fb3fcb859c548ff4c0ef3ff",
-      "accepted_commit": null,
-      "integrated_commit": null,
-      "integration_status": "pending",
-      "integration_fix_commits": []
+      "accepted_commit": "b200852e44814ae6cb1bf0dbf011b8257ad46670",
+      "accepted_implementation_tree": "b7a3cc7fbfbaa92e1835c67c4fd0cd238035884e",
+      "integrated_commit": "b200852e44814ae6cb1bf0dbf011b8257ad46670",
+      "integration_status": "completed",
+      "integration_fix_commits": [],
+      "implementation_status": "Completed",
+      "updated_at": "2026-07-29T14:32:00-07:00",
+      "integration_evidence": {
+        "mode": "one_time_operator_bootstrap",
+        "accepted_candidate": "b200852e44814ae6cb1bf0dbf011b8257ad46670",
+        "accepted_tree": "b7a3cc7fbfbaa92e1835c67c4fd0cd238035884e",
+        "acceptance_transaction": "80d7e8bc-6094-5ebb-9180-3452b639f8d5",
+        "target_prior_head": "fd7d4b077e125bd05fb3fcb859c548ff4c0ef3ff",
+        "target_fast_forward_head": "b200852e44814ae6cb1bf0dbf011b8257ad46670",
+        "reason": "The new integration command cannot integrate the feature that introduces it; the user authorized one clean operator fast-forward after exact ledger acceptance.",
+        "tests_run": 0,
+        "non_reusable": true
+      }
     }
   ]
 }

@@ -2632,3 +2632,17 @@ This log records model configuration and deterministic deployment evidence. It n
 - Protected authority modules changed: `none`
 - Complete-suite invocations: `0`
 - Release-validation invocations: `0`
+
+## 2026-07-29 — M2-002R one-time self-host integration
+
+- Mode: `one_time_operator_bootstrap`
+- Accepted candidate: `b200852e44814ae6cb1bf0dbf011b8257ad46670`
+- Accepted tree: `b7a3cc7fbfbaa92e1835c67c4fd0cd238035884e`
+- Acceptance transaction: `80d7e8bc-6094-5ebb-9180-3452b639f8d5`
+- Stable branch before: `fd7d4b077e125bd05fb3fcb859c548ff4c0ef3ff`
+- Stable branch fast-forward: `b200852e44814ae6cb1bf0dbf011b8257ad46670`
+- Integration method: authorized clean operator `git merge --ff-only`
+- Metadata child changes only queue and run-log integration projections.
+- Implementation ref remained unchanged; no acceptance metadata child exists.
+- Complete-suite invocations: `0`
+- Release-validation invocations: `0`
