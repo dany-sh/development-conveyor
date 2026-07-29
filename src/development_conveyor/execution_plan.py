@@ -329,6 +329,10 @@ class ExecutionPlan:
     lease_type: str | None
     application_mutation_expected: bool
     next_state_on_success: str
+    accepted_tree: str | None = None
+    feature_worktree: str | None = None
+    integration_worktree: str | None = None
+    acceptance_transaction: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -367,6 +371,10 @@ class ExecutionPlan:
         starting_commit: str | None = None,
         feature_branch: str | None = None,
         milestone_branch: str | None = None,
+        accepted_tree: str | None = None,
+        feature_worktree: str | None = None,
+        integration_worktree: str | None = None,
+        acceptance_transaction: str | None = None,
     ) -> "ExecutionPlan":
         claimed = projection.get("projection_fingerprint")
         if not isinstance(claimed, str) or claimed != projection_fingerprint(projection):
@@ -477,6 +485,10 @@ class ExecutionPlan:
                 WORKFLOW_NEXT_STATE[workflow]
                 if isinstance(workflow, WorkflowType) else "milestone_ready_for_merge"
             ),
+            accepted_tree=accepted_tree,
+            feature_worktree=feature_worktree,
+            integration_worktree=integration_worktree,
+            acceptance_transaction=acceptance_transaction,
         )
         plan.validate_against(projection)
         return plan

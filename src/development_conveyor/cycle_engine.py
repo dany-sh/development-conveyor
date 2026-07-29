@@ -139,6 +139,7 @@ from .accepted_commit import (
     materialize_acceptance_metadata,
 )
 from .feature_prelaunch_recovery import FeaturePrelaunchRecovery
+from .integration_discovery import discover_integration_target
 
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 DETERMINISTIC_COMPATIBILITY_FAILURES = {
@@ -677,7 +678,11 @@ class CycleEngine:
         return bound
 
     def _execution_plan(
-        self, project: Project, projection: dict[str, Any]
+        self,
+        project: Project,
+        projection: dict[str, Any],
+        *,
+        ledger_events: list[dict[str, Any]] | None = None,
     ) -> ExecutionPlan:
         inspector = RepositoryInspector(project.repository)
         active_transaction = next((
@@ -730,17 +735,56 @@ class CycleEngine:
             feature_branch = (
                 (feature_transaction or {}).get("starting_snapshot") or {}
             ).get("branch")
+        integration = None
+        milestone_branch = (
+            projection.get("milestone_branch") or project.milestone_branch
+        )
+        if (
+            projection.get("allowed_next_action") == "milestone_integration"
+            and isinstance(feature_id, str)
+            and isinstance(feature_branch, str)
+            and isinstance(projection.get("accepted_feature_commit"), str)
+            and isinstance(milestone_branch, str)
+        ):
+            integration = discover_integration_target(
+                repository=project.repository,
+                feature_id=feature_id,
+                feature_branch=feature_branch,
+                accepted_commit=projection["accepted_feature_commit"],
+                milestone_branch=milestone_branch,
+                expected_starting_commit=projection.get(
+                    "selected_feature_starting_commit"
+                ),
+                ledger_events=ledger_events or (),
+            )
         return ExecutionPlan.from_projection(
             projection,
             # A live ref is an observation, not authority.  When the projection
             # does not carry a feature-specific start, bind the next transaction
             # to the last canonical repository snapshot instead of silently
             # accepting whatever commit the ref points to now.
-            starting_commit=authoritative_snapshot.get("head"),
+            starting_commit=(
+                integration.integration_starting_commit
+                if integration is not None
+                else authoritative_snapshot.get("head")
+            ),
             feature_branch=feature_branch,
-            milestone_branch=(
-                projection.get("milestone_branch")
-                or project.milestone_branch
+            milestone_branch=milestone_branch,
+            accepted_tree=(
+                integration.accepted_tree if integration is not None else None
+            ),
+            feature_worktree=(
+                integration.feature_worktree if integration is not None else None
+            ),
+            integration_worktree=(
+                integration.integration_worktree
+                if integration is not None
+                else None
+            ),
+            acceptance_transaction=(
+                integration.acceptance_transaction
+                if integration is not None
+                else None
             ),
         )
 
@@ -766,8 +810,11 @@ class CycleEngine:
             or projection.get("ledger_fingerprint") != integrity.fingerprint
         ):
             raise ProjectionError("authoritative projection is not bound to the current ledger head")
-        executable = self._execution_plan(project, projection)
-        return projection, executable, superseded_legacy_cycles(ledger.read())
+        events = ledger.read()
+        executable = self._execution_plan(
+            project, projection, ledger_events=events
+        )
+        return projection, executable, superseded_legacy_cycles(events)
 
     def _fresh_failed_integration_projection(
         self, project: Project, projection: dict[str, Any]

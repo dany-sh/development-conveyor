@@ -2431,3 +2431,13 @@ This log records model configuration and deterministic deployment evidence. It n
   Tests, builds, release validation, feature validation, milestone validation,
   baseline equivalence, application commands, complete-suite discovery, and
   M2-001 work were not run.
+
+### Model execution — 2026-07-29T08:11:52+00:00
+
+- Agent role: `controller-repair-writer`
+- Effective model: `gpt-5.6-sol`
+- Effective reasoning effort: `low`
+- Configuration source: `explicit_override`
+- Event: `start`
+- Reason code: `m2_001_linked_worktree_integration_discovery`
+- Safety and autonomy contracts unchanged: `true`
