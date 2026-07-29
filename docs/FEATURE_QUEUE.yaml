@@ -760,7 +760,7 @@
     {
       "id": "M2-000",
       "title": "Conveyor simplification and validation reduction",
-      "status": "review",
+      "status": "accepted",
       "priority": "P1",
       "milestone": "M2",
       "dependencies": [
@@ -782,16 +782,31 @@
       },
       "branch": "codex/m2-000-conveyor-simplification-final-v2",
       "integration_base_commit": "abf511f7381cc9042958691485966e055070ac4a",
-      "accepted_commit": null,
+      "accepted_commit": "e9b9e9aca00352fbd0fa137511d342803d7951a4",
+      "accepted_implementation_tree": "90ba7e397b3ac43edd7279bbd1f9ec1ba538572c",
       "integrated_commit": null,
       "integration_status": "pending",
       "integration_fix_commits": [],
-      "implementation_status": "In review",
-      "updated_at": "2026-07-27T23:52:00-07:00",
+      "implementation_status": "Completed",
+      "updated_at": "2026-07-28T22:01:41-07:00",
       "acceptance": {
-        "tests_passed": false,
-        "review_passed": false,
-        "documentation_current": false
+        "tests_passed": true,
+        "review_passed": true,
+        "documentation_current": true
+      },
+      "acceptance_evidence": {
+        "mode": "one_time_operator_bootstrap",
+        "authorization_sha256": "433048a1fdbf74f656e89a067e5639a6484355ded2bae2a88343a7eeec91fb48",
+        "external_release_invocation": "8289d8335400407cb6100d9263740471",
+        "internal_release_execution": "b4e80527738c4e498933e8fbeeee7693",
+        "release_artifact_directory": "/Users/dany/Developer/development-conveyor-artifacts/m2-000/provenance-final-release-8289d8335400407cb6100d9263740471",
+        "release_json_sha256": "ae106aeadc838bb82203679a1a6c435b5bbce3aabfa73e8adca3efef0288ac7c",
+        "tests_run": 750,
+        "known_debt_identities": 37,
+        "candidate_failures": 20,
+        "candidate_errors": 17,
+        "provenance_valid": true,
+        "non_reusable": true
       }
     }
   ]

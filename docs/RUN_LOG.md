@@ -2340,3 +2340,42 @@ This log records model configuration and deterministic deployment evidence. It n
   integration-base authority or rewriting history. M2-000 therefore remains
   in review for one explicit human acceptance decision; integration is not
   authorized.
+
+## 2026-07-29 — M2-000 one-time bootstrap acceptance
+
+- Authorization: one explicitly authorized, non-reusable operator bootstrap
+  for M2-000 only. Authorization SHA-256:
+  `433048a1fdbf74f656e89a067e5639a6484355ded2bae2a88343a7eeec91fb48`.
+  This operation does not establish a general acceptance bypass.
+- Accepted implementation commit:
+  `e9b9e9aca00352fbd0fa137511d342803d7951a4`; tree
+  `90ba7e397b3ac43edd7279bbd1f9ec1ba538572c`; prepared parent
+  `abf511f7381cc9042958691485966e055070ac4a`.
+- Release identity: external invocation
+  `8289d8335400407cb6100d9263740471`; internal execution
+  `b4e80527738c4e498933e8fbeeee7693`; archived at
+  `/Users/dany/Developer/development-conveyor-artifacts/m2-000/provenance-final-release-8289d8335400407cb6100d9263740471`.
+- Archived fingerprints: `SHA256SUMS`
+  `b5f49aef453a3ce072590b0a1c71bdd269db8d7cee4b02aed223379023ecb789`;
+  release JSON
+  `ae106aeadc838bb82203679a1a6c435b5bbce3aabfa73e8adca3efef0288ac7c`;
+  exit-code file
+  `9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa`;
+  empty external stderr
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+- Internal artifact fingerprints: raw stdout
+  `19475609f41adef518dc6ba3218dff6e226e7b871824d7f438028b29e644972c`;
+  raw stderr
+  `a83039a3705e95babbcc2a7ce1f779bc2a52203b1beab70006a9e58a6e34ba0d`;
+  execution metadata
+  `afe8298d9ed7a10768ccc8e3e6bf0a5da0c835fb2411271d96c25c1ebc3809fb`.
+- Release result: valid; one complete-suite invocation; 750 tests in
+  876.594 seconds; 37 exact debt identities; 20 failures; 17 errors;
+  capture complete; exact reconciliation; compile, configuration validation,
+  and diff-check release records passed.
+- Provenance: canonical repository, final-v2 branch, implementation commit,
+  implementation tree, clean state, empty changed paths, execution ID, and raw
+  hashes agreed before and after the release.
+- Metadata result: M2-000 is accepted with integration pending. No production
+  code, tests, application repository, milestone integration, M2-001 work,
+  push, publication, deployment, tag, or release was performed.

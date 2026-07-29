@@ -1,10 +1,23 @@
 # Current Status
 
-Last updated: 2026-07-28
+Last updated: 2026-07-29
 
-## Authoritative M2 reconstruction
+## Factory position
 
-M2-000 is in review on
+- Active feature: M2-000 — Conveyor simplification and validation reduction (accepted; milestone integration pending)
+- Accepted implementation: `e9b9e9aca00352fbd0fa137511d342803d7951a4`;
+  tree `90ba7e397b3ac43edd7279bbd1f9ec1ba538572c`.
+- Acceptance evidence: provenance-bound release execution
+  `b4e80527738c4e498933e8fbeeee7693`, external invocation
+  `8289d8335400407cb6100d9263740471`, 750 tests, and 37 exact debt
+  identities with 20 failures and 17 errors.
+- Acceptance mode: explicitly authorized, non-reusable operator bootstrap
+  because the pre-M2 interface could not consume tiered release evidence.
+- Next action: milestone integration; not performed by this bootstrap.
+
+## Historical M2 reconstruction and review evidence
+
+Before the one-time bootstrap acceptance, M2-000 was in review on
 `codex/m2-000-conveyor-simplification-final-v2` from pristine parent
 `abf511f7381cc9042958691485966e055070ac4a`. M1 is paused for this isolated
 reconstruction, and the existing M1-029 feature entry remains unchanged and
