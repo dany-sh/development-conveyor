@@ -495,10 +495,21 @@ class EvidenceLedger:
             positions: dict[str, int] = {}
             for index, name in enumerate(history):
                 positions.setdefault(name, index)
-            if history.count("LeaseAcquired") > 1:
-                second_lease = [index for index, name in enumerate(history) if name == "LeaseAcquired"][1]
-                recovery_positions = [index for index, name in enumerate(history) if name == "RecoveryApplied"]
-                if not recovery_positions or recovery_positions[-1] > second_lease:
+            lease_positions = [
+                index for index, name in enumerate(history)
+                if name == "LeaseAcquired"
+            ]
+            recovery_positions = [
+                index for index, name in enumerate(history)
+                if name == "RecoveryApplied"
+            ]
+            for prior_lease, reacquired_lease in zip(
+                lease_positions, lease_positions[1:]
+            ):
+                if not any(
+                    prior_lease < recovery < reacquired_lease
+                    for recovery in recovery_positions
+                ):
                     raise CorruptEvidenceError(
                         f"transaction {transaction_id} reacquired a lease without prior recovery authorization"
                     )
