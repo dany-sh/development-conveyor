@@ -16,19 +16,5 @@
     "controller_repair": "generic_or_architectural",
     "metadata": "mechanical"
   },
-  "feature_policies": [
-    {
-      "project_id": "interview-companion",
-      "feature_id": "F004",
-      "execution_policy": {
-        "profile": "multi_module_precise",
-        "parent_sessions": 1,
-        "child_sessions": 0,
-        "escalation": {
-          "trigger": "material_architecture_or_authority_ambiguity",
-          "profile": "generic_or_architectural"
-        }
-      }
-    }
-  ]
+  "feature_policies": []
 }

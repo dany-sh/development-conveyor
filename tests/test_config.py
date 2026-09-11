@@ -23,8 +23,27 @@ class ConfigurationTests(unittest.TestCase):
         (root / "config/execution-profiles.yaml").write_text(
             (REPOSITORY_ROOT / "config/execution-profiles.yaml").read_text(), encoding="utf-8"
         )
-        project = json.loads((REPOSITORY_ROOT / "config/projects.yaml").read_text())["projects"][0]
-        project["repository"] = repository
+        project = {
+            "project_id": "synthetic",
+            "repository": repository,
+            "enabled": True,
+            "priority": 1,
+            "active_milestone": "M0",
+            "recovery_branch": "main",
+            "milestone_branch": "codex/m0",
+            "validated_baseline_commit": None,
+            "queue_location": "docs/FEATURE_QUEUE.yaml",
+            "autonomy_contract_location": "docs/AUTONOMY_CONTRACT.md",
+            "validation_source": ".factory/project.yaml",
+            "automation_mode": "one_feature",
+            "maximum_retries": None,
+            "schedule": None,
+            "human_gates": [],
+            "last_accepted_feature": None,
+            "last_accepted_commit": None,
+            "current_state": "feature_ready",
+            "registration_notes": "Synthetic configuration fixture.",
+        }
         (root / "config/projects.yaml").write_text(json.dumps({"schema_version": 1, "projects": [project]}), encoding="utf-8")
         self.addCleanup(temporary.cleanup)
         return root
