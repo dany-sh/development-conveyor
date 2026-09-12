@@ -2,7 +2,7 @@
   "schema_version": 1,
   "project_id": "interview-companion",
   "repository": {
-    "path": "/Users/dany/Developer/Live_Interview_Companion",
+    "path": "${HOME}/Developer/example-application",
     "repository_id": "9022b4a8018866b7a9c0862efb2b8664b7e0288afd5e3fbd22b107fa640ab299",
     "path_fingerprint": "dd395b40fd8c69fffcde93bf15963740d4f914c01bffc69cd8d47a46c8d908e2",
     "adapter_project_id": "live-interview-companion"

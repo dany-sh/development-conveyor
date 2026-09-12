@@ -619,7 +619,7 @@
         "M1-023",
         "M1-024"
       ],
-      "spec": "docs/features/M1-025-explicit-capability-selection-and-resume-recovery.md",
+      "spec": "docs/features/M1-025-explicit-capability-selection-and-session-recovery.md",
       "acceptance_criteria": [
         "Swift source discovery alone does not require unavailable build-macos-apps skills; exact feature-contract declarations remain authoritative and fail closed when unavailable",
         "The pinned CLI proves the minimal feature requested and effective allowlists are identical before model launch",
@@ -803,7 +803,7 @@
         "authorization_sha256": "433048a1fdbf74f656e89a067e5639a6484355ded2bae2a88343a7eeec91fb48",
         "external_release_invocation": "8289d8335400407cb6100d9263740471",
         "internal_release_execution": "b4e80527738c4e498933e8fbeeee7693",
-        "release_artifact_directory": "/Users/dany/Developer/development-conveyor-artifacts/m2-000/provenance-final-release-8289d8335400407cb6100d9263740471",
+        "release_artifact_directory": "${HOME}/Developer/development-conveyor-artifacts/m2-000/provenance-final-release-8289d8335400407cb6100d9263740471",
         "release_json_sha256": "ae106aeadc838bb82203679a1a6c435b5bbce3aabfa73e8adca3efef0288ac7c",
         "tests_run": 750,
         "known_debt_identities": 37,

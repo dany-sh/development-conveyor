@@ -1,4 +1,4 @@
-# M1-025 — Explicit capability selection and failed-resume recovery
+# M1-025 — Explicit capability selection and failed-session recovery
 
 ## Status
 

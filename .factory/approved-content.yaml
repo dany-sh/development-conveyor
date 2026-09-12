@@ -1,4 +1,18 @@
 {
   "schema_version": 1,
-  "approved": []
+  "approved": [
+    {
+      "category": "local_only_dependency",
+      "path": "src/development_conveyor/redaction.py",
+      "reason": "Portable redaction logic intentionally recognizes absolute user-data path shapes; it contains no owner-specific path."
+    },
+    {
+      "category": "local_only_dependency",
+      "path": [
+        "tests/test_redaction.py",
+        "tests/test_validation_tiers.py"
+      ],
+      "reason": "Synthetic person-path fixtures verify that private user-data paths are redacted and contain no real user data."
+    }
+  ]
 }

@@ -28,7 +28,7 @@ Key integration conclusions:
 
 ## CLI compatibility repair evidence
 
-- The failed P0-001 run did not persist `codex --version`. The retained pre-upgrade executable at `/Users/dany/.codex/packages/standalone/releases/0.137.0-aarch64-apple-darwin/bin/codex` reports `codex-cli 0.137.0`, and the launcher symlink changed after the failed run to the retained `0.144.5` release.
+- The failed P0-001 run did not persist `codex --version`. A retained pre-upgrade executable reported `codex-cli 0.137.0`, and the launcher symlink changed after the failed run to the retained `0.144.5` release.
 - The current exact resolved Conveyor executable is the standalone `0.144.5` binary. It exposes `gpt-5.6-sol` with `high` reasoning through `codex debug models`.
 - The terminal `turn.failed` event is authoritative: it classifies the old run as `cli_upgrade_required`. Optional MCP authentication warnings remain secondary diagnostics.
 - P0-001 has no feature branch, worktree, writer lease, accepted commit, Git operation, or repository mutation. Its verified start and milestone pre-integration commit are both `826de2ab2c517e4bba53ed54f0cf2ddee50f38ef`.
@@ -37,7 +37,7 @@ Key integration conclusions:
 
 ### Case Manager
 
-- Repository: `${HOME}/Developer/conan-case-manager`
+- Repository: `${HOME}/Developer/example-case-manager`
 - Branches `codex/pre-factory-baseline` and `codex/p0-foundation` exist.
 - Baseline `e4264c6539338320ace2245cc18b05d7150c1358` exists and is an ancestor of the milestone branch.
 - Accepted P0-002 commit `4c43aa5cd870ddb4962eceb1fbe35c648efa3e18` exists and is the current milestone HEAD at deployment discovery.
@@ -47,7 +47,7 @@ Key integration conclusions:
 
 ### Interview Companion
 
-- Repository path was verified as `${HOME}/Developer/Live_Interview_Companion` from its own factory adapter and product documentation.
+- Repository path was verified as `${HOME}/Developer/example-interview-companion` from its own factory adapter and product documentation.
 - Active milestone `M0`, baseline `8f0d7e3111db316b677d098a621c019b7677c057`, and milestone branch `codex/m0-foundation` were verified independently.
 - During read-only discovery, another repository workflow advanced F002 from an active dirty feature worktree to integrated state. No Development Conveyor command caused that change.
 - Final discovery verified accepted F002 commit `3b30adaa1a9829d9e225728c2873a23512086e8b` and integrated commit `e229b116b2d0979b99449f11d2abb1e812479721`.

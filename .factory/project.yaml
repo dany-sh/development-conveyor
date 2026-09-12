@@ -5,31 +5,32 @@
     "name": "development-conveyor"
   },
   "project_profile": {
-    "usage": "personal_private",
+    "usage": "open_source",
     "intended_users": [
-      "owner"
+      "contributors",
+      "public"
     ],
-    "distribution": "local_private",
-    "preserve_personalization": true,
-    "portability_target": "current_owner_environment"
+    "distribution": "open_source",
+    "preserve_personalization": false,
+    "portability_target": "documented_supported_environments"
   },
   "content_policy": {
-    "personal_names": "allow",
-    "company_names": "allow",
-    "personalized_prompts": "allow",
-    "personalized_test_fixtures": "allow",
-    "documented_absolute_paths": "allow",
-    "production_absolute_paths": "warn",
-    "personal_bundle_identifier": "preserve",
-    "sensitive_source_data": "report",
+    "personal_names": "review",
+    "company_names": "review",
+    "personalized_prompts": "review",
+    "personalized_test_fixtures": "review",
+    "documented_absolute_paths": "warn",
+    "production_absolute_paths": "block",
+    "personal_bundle_identifier": "review",
+    "sensitive_source_data": "block",
     "secrets": "block",
     "generated_artifacts": "ignore"
   },
   "repository": {
-    "default_branch": "codex/development-conveyor"
+    "default_branch": "main"
   },
   "git": {
-    "default_branch": "codex/development-conveyor",
+    "default_branch": "main",
     "automatic_merge_to_main": false,
     "automatic_push": false,
     "one_commit_per_feature": true,

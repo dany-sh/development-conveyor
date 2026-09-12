@@ -142,7 +142,7 @@ This log records model configuration and deterministic deployment evidence. It n
 ### CLI compatibility and failed-cycle recovery — 2026-07-17
 
 - Root cause: the failed P0-001 repository session reached a terminal `turn.failed` event because `gpt-5.6-sol` required a newer Codex CLI. Optional MCP authentication and model-cache warnings were secondary diagnostics, not the primary cause.
-- Version evidence: the failed run did not persist `codex --version`; the retained pre-upgrade executable `/Users/dany/.codex/packages/standalone/releases/0.137.0-aarch64-apple-darwin/bin/codex` reconstructs the old version as `0.137.0`. The exact current Conveyor executable is `/Users/dany/.codex/packages/standalone/releases/0.144.5-aarch64-apple-darwin/bin/codex`, version `0.144.5`.
+- Version evidence: the failed run did not persist `codex --version`; a retained pre-upgrade executable reconstructed the old version as `0.137.0`. The then-current Conveyor executable reported version `0.144.5`.
 - Model policy: feature orchestration remains explicitly pinned to `gpt-5.6-sol` with `high` reasoning from the `feature-factory-orchestrator` agent policy. No model or reasoning fallback was introduced.
 - Preflight: `scripts/conveyor doctor` and `scripts/conveyor doctor --project case-manager` both classified the current exact executable, model, and reasoning combination as `compatible` before recovery.
 - Failure and retry disposition: run `555d458b-b52d-43ee-8aa2-dde097df4c77`, session `019f7264-c6e8-7591-b79f-253cb162cc65`, and its three focused retries are preserved as an exhausted, non-retryable `cli_upgrade_required` cycle. The old session will not resume.
@@ -317,7 +317,7 @@ This log records model configuration and deterministic deployment evidence. It n
 - Planning transaction: queue reconciliation captures its clean starting snapshot, acquires a planning-specific writer lease before session mutation, binds the returned session, validates exact paths/diff/queue/semantics/inventory/model evidence, and creates one focused Factory planning commit. Controller state records non-self-referential start, result, evidence, previous validated, and effective milestone commit fields.
 - Recovery: `recover-planning` requires an explicit run, session, starting HEAD, diff fingerprint, and exact changed paths. Dry-run writes nothing; apply commits only validated planning files, stops at `feature_ready`, and supports duplicate and post-commit interruption recognition.
 - Synthetic coverage: added planning lease, authorized and unauthorized path, semantic agreement, exact seven-file recovery, fingerprint/head/path/queue divergence, commit, cleanliness, idempotency, non-self-reference, status separation, and no-launch tests. Historical integration dirtiness coverage verifies that pending planning changes do not retroactively invalidate a finalized integration.
-- Final validation: `python3 -m unittest discover -s tests -q` passed all 266 tests in 178.417 seconds. Pytest passed the same 266 tests using the existing local `/Users/dany/Documents/planhat-takehome/.venv/bin/python` environment; the system and bundled Python runtimes did not contain the optional `pytest` module. `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, and `git diff --check` passed.
+- Final validation: `python3 -m unittest discover -s tests -q` passed all 266 tests in 178.417 seconds. Pytest passed the same 266 tests using an existing local virtual environment; the system and bundled Python runtimes did not contain the optional `pytest` module. `python3 -m compileall src scripts`, `scripts/conveyor validate-config`, and `git diff --check` passed.
 - Live recovery dry-run: run `f2a11cf5-c3af-4737-89c2-96b017155d97`, session `019f77e1-c551-7f00-9409-2fff9f6ee79b`, starting HEAD `0f43ad23a3820ccd3e27f4a6a475e42dc70957bc`, seven exact planning paths, and diff fingerprint `e1b6f21eaa8b2254bf3080d800945aa05ff388ad88387e94c445d11fda5c1c81` validated without writes. P0-003 remained the sole ready feature; Feature Factory and Milestone Integrator launch flags were false.
 - Live recovery apply: created exactly one Case Manager planning commit, `f85f7dad2d1e1318bf36f277b5bd832b3cbf11a0` (`factory: reconcile P0 queue and ready P0-003`), on `codex/p0-foundation`. The worktree is clean, no writer lease or Git operation exists, P0-001 remains historically `INTEGRATED`, P0-003 remains ready, and its starting commit is the planning result commit. Post-apply milestone dry-run projects only `$feature-factory`; it writes nothing and does not launch Milestone Integrator.
 
@@ -2354,7 +2354,7 @@ This log records model configuration and deterministic deployment evidence. It n
 - Release identity: external invocation
   `8289d8335400407cb6100d9263740471`; internal execution
   `b4e80527738c4e498933e8fbeeee7693`; archived at
-  `/Users/dany/Developer/development-conveyor-artifacts/m2-000/provenance-final-release-8289d8335400407cb6100d9263740471`.
+  `${HOME}/Developer/development-conveyor-artifacts/m2-000/provenance-final-release-8289d8335400407cb6100d9263740471`.
 - Archived fingerprints: `SHA256SUMS`
   `b5f49aef453a3ce072590b0a1c71bdd269db8d7cee4b02aed223379023ecb789`;
   release JSON
